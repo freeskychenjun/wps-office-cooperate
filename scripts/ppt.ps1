@@ -9,7 +9,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'slide', 'text', 'textbox', 'image', 'table', 'shape',
-                 'format', 'theme', 'audit', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish')]
+                 'format', 'font', 'theme', 'audit', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish')]
     [string]$Command,
 
     [string]$Doc,
@@ -264,6 +264,14 @@ switch ($Command) {
         if ($Shape) { $request['shape'] = $Shape }
         if ($ShapeIdx -gt 0) { $request['shapeIdx'] = $ShapeIdx }
         Add-Format-Fields $PSBoundParameters
+    }
+    'font' {
+        # whole deck (or a slide range): every text run, groups and table cells included.
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'font needs -Doc' }
+        if (-not $Font) { Write-Error-Json 'BAD_ARGS' 'font needs -Font <name>' }
+        $request['font'] = $Font
+        if ($From -gt 1) { $request['from'] = $From }
+        if ($To -gt 0) { $request['to'] = $To }
     }
     'notes' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'notes needs -Doc' }

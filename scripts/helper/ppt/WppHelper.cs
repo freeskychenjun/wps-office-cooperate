@@ -378,6 +378,7 @@ internal static class Program
             case "table": return TableCmd(a);
             case "shape": return ShapeCmd(a);
             case "format": return FormatCmd(a);
+            case "font": return FontCmd(a);
             case "notes": return NotesCmd(a);
             case "theme": return ThemeCmd(a);
             case "audit": return AuditCmd(a);
@@ -392,7 +393,7 @@ internal static class Program
             case "close": return ClosePres(a);
             case "quit": return QuitAll(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|slide|text|textbox|image|table|shape|format|theme|audit|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|slide|text|textbox|image|table|shape|format|font|theme|audit|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish");
         }
     }
 
@@ -1538,6 +1539,122 @@ internal static class Program
                 { "bold", TryGet(() => (object)sh.TextFrame.TextRange.Font.Bold, null) }
             } }
         };
+    }
+
+    /// <summary>Unify the font of every run in the deck - groups and table cells included.
+    /// Fonts only: colour, size, bold, alignment and geometry are left exactly as they are.</summary>
+    private sealed class FontSweep
+    {
+        public string Font;
+        public int Shapes;
+        public int Failed;
+        public int Groups;
+        public int Tables;
+        public List<object> Samples = new List<object>();
+    }
+
+    private static object FontCmd(Bag a)
+    {
+        dynamic p = RequirePres(a, true);
+        string font = a.Str("font", null);
+        if (font == null || font.Length == 0) throw new Fail("BAD_ARGS", "font needs -Font <name> (e.g. -Font \u5b8b\u4f53)");
+        int n = 0;
+        try { n = (int)p.Slides.Count; } catch (Exception) { }
+        int from = a.Int("from", 1), to = a.Int("to", 0);
+        if (from < 1) from = 1;
+        if (to <= 0 || to > n) to = n;
+        FontSweep sw = new FontSweep();
+        sw.Font = font;
+        for (int k = from; k <= to; k++)
+        {
+            dynamic s = null;
+            try { s = p.Slides.Item(k); } catch (Exception) { sw.Failed++; continue; }
+            int cnt = 0;
+            try { cnt = (int)s.Shapes.Count; } catch (Exception) { continue; }
+            for (int i = 1; i <= cnt; i++)
+            {
+                dynamic sh = null;
+                try { sh = s.Shapes.Item(i); } catch (Exception) { continue; }
+                FontDeep(sh, k, sw);
+            }
+        }
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["font"] = font;
+        r["from"] = from;
+        r["to"] = to;
+        r["shapes"] = sw.Shapes;
+        r["groups"] = sw.Groups;
+        r["tables"] = sw.Tables;
+        r["failed"] = sw.Failed;
+        r["samples"] = sw.Samples;
+        return r;
+    }
+
+    private static void FontDeep(dynamic sh, int slideNo, FontSweep sw)
+    {
+        int type = 1;
+        try { type = Convert.ToInt32(TryGet(() => (object)sh.Type, 1), CultureInfo.InvariantCulture); } catch (Exception) { }
+        if (type == 6)
+        {
+            sw.Groups++;
+            int gc = 0;
+            try { gc = (int)sh.GroupItems.Count; } catch (Exception) { sw.Failed++; return; }
+            for (int j = 1; j <= gc; j++)
+            {
+                dynamic g = null;
+                try { g = sh.GroupItems.Item(j); } catch (Exception) { sw.Failed++; continue; }
+                FontDeep(g, slideNo, sw);
+            }
+            return;
+        }
+        if (type == 19)
+        {
+            sw.Tables++;
+            int rows = 0, cols = 0;
+            try { rows = (int)sh.Table.Rows.Count; cols = (int)sh.Table.Columns.Count; } catch (Exception) { sw.Failed++; return; }
+            int cells = 0;
+            for (int r = 1; r <= rows; r++)
+            {
+                for (int c = 1; c <= cols; c++)
+                {
+                    try
+                    {
+                        dynamic cr = sh.Table.Cell(r, c).Shape.TextFrame.TextRange;
+                        cr.Font.Name = sw.Font;
+                        try { cr.Font.NameFarEast = sw.Font; } catch (Exception) { }
+                        cells++;
+                    }
+                    catch (Exception) { sw.Failed++; }
+                }
+            }
+            if (cells > 0)
+            {
+                sw.Shapes++;
+                if (sw.Samples.Count < 12)
+                    sw.Samples.Add(new Dictionary<string, object> {
+                        { "slide", slideNo },
+                        { "shape", Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture) },
+                        { "cells", cells }
+                    });
+            }
+            return;
+        }
+        string text = ShapeText(sh);
+        if (text == null || text.Length == 0) return;
+        try
+        {
+            dynamic tr = sh.TextFrame.TextRange;
+            tr.Font.Name = sw.Font;
+            try { tr.Font.NameFarEast = sw.Font; } catch (Exception) { }
+            sw.Shapes++;
+            if (sw.Samples.Count < 12)
+                sw.Samples.Add(new Dictionary<string, object> {
+                    { "slide", slideNo },
+                    { "shape", Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture) },
+                    { "chars", text.Length }
+                });
+        }
+        catch (Exception) { sw.Failed++; }
     }
 
     private static object NotesCmd(Bag a)
