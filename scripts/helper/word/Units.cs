@@ -49,6 +49,44 @@ internal static partial class Program
     // tokens that are almost always a typo in this kind of report: reported, never fixed
     private static readonly string[] SUSPECT_TOKENS = new string[] { "km3", "km4", "m4", "hm3" };
 
+    // A unit is only fixed when it hangs off a value ("500km2", "1.2亿m3", "面积（km2）").
+    // An isolated token ("km2 = 1", "<m1，m2，m3>") is a variable or label in a template/script
+    // legend - measured on a real report: those were damaged by an earlier build of this
+    // command, which is exactly what these guards and the fragment report exist to prevent.
+    private const string CTX_FIX = null;
+    private const string CTX_ISOLATED = "isolated (no value in front - looks like a variable or label)";
+    private const string CTX_ASSIGN = "followed by = (assignment or label)";
+    private const string CTX_ENGLISH = "letter in front (looks like an English word)";
+    private const string CTX_DIGIT = "digit after (the number continues)";
+
+    /// <summary>Decide whether the token at [start,end) is a real unit in its context.</summary>
+    private static string UnitContext(string text, int start, int end)
+    {
+        int len = text.Length;
+        char prev = start > 0 ? text[start - 1] : ' ';
+        char prev2 = start > 1 ? text[start - 2] : ' ';
+        char next = end < len ? text[end] : ' ';
+        if (next >= '0' && next <= '9') return CTX_DIGIT;
+        if (IsAsciiLetter(prev)) return CTX_ENGLISH;
+        int k = end;
+        while (k < len && (text[k] == ' ' || text[k] == '\t' || text[k] == '\u3000')) k++;
+        char nextNonSpace = k < len ? text[k] : ' ';
+        if (nextNonSpace == '=' || nextNonSpace == '\uFF1D') return CTX_ASSIGN;
+        if (prev >= '0' && prev <= '9') return CTX_FIX;
+        if (prev == '\u4E07' || prev == '\u4EBF') return CTX_FIX;          // 万 / 亿
+        if (prev == '(' || prev == '\uFF08') return CTX_FIX;               // ( （
+        if (IsCjkIdeograph(prev)) return CTX_FIX;                          // 汉字 right before ("面积km2")
+        if ((prev == ' ' || prev == '\u3000') && prev2 >= '0' && prev2 <= '9') return CTX_FIX;  // "500 km2"
+        return CTX_ISOLATED;
+    }
+
+    /// <summary>Han characters only - NOT CJK punctuation: a comma before the token means it is
+    /// a list member ("&lt;m1，m2，m3&gt;"), not a value.</summary>
+    private static bool IsCjkIdeograph(char c)
+    {
+        return (c >= '\u4E00' && c <= '\u9FFF') || (c >= '\u3400' && c <= '\u4DBF') || (c >= '\uF900' && c <= '\uFAFF');
+    }
+
     private static object UnitsDoc(Bag a)
     {
         dynamic doc = RequireDoc(a, true);
@@ -62,6 +100,9 @@ internal static partial class Program
         List<object> report = new List<object>();
         HashSet<string> present = new HashSet<string>(StringComparer.Ordinal);
         int candTotal = 0, uniTotal = 0, dangerLetter = 0, dangerDigit = 0;
+        int fixable = 0, isolated = 0, assignment = 0;
+        List<object> fragmentSamples = new List<object>();
+        Dictionary<string, int> fragmentByToken = new Dictionary<string, int>(StringComparer.Ordinal);
         List<object> dangerSamples = new List<object>();
         foreach (string[] u in units)
         {
@@ -74,18 +115,26 @@ internal static partial class Program
             uniTotal += uniN;
             if (cand > 0) present.Add(needle);   // units absent from the text cost a full scan each
 
-            // decoys: a letter right before the unit that is NOT a legal unit prefix
-            // (k/c/d/h/u/n/m + m forms km2/cm2/... which are units of their own), or a digit after it.
-            string letterDanger = @"[A-Za-z-[kcdhunm]]" + Regex.Escape(needle) + @"(?![0-9])";
-            foreach (Match m in Regex.Matches(text, letterDanger))
+            // classify every candidate: a real unit hangs off a value; an isolated token is a
+            // variable/label in a script legend (measured: those must NOT be touched)
+            if (cand > 0)
             {
-                dangerLetter++;
-                if (dangerSamples.Count < 8) dangerSamples.Add(DangerSample(text, m.Index, m.Length, "letter-prefixed (looks like an English word)"));
-            }
-            foreach (Match m in Regex.Matches(text, @"(?<![A-Za-z0-9])" + Regex.Escape(needle) + @"[0-9]"))
-            {
-                dangerDigit++;
-                if (dangerSamples.Count < 8) dangerSamples.Add(DangerSample(text, m.Index, m.Length, "digit-suffixed (a number continues)"));
+                Regex rxAll = new Regex(@"(?<![A-Za-z])" + Regex.Escape(needle) + @"(?![0-9])");
+                foreach (Match mm in rxAll.Matches(text))
+                {
+                    string why = UnitContext(text, mm.Index, mm.Index + mm.Length);
+                    if (why == CTX_FIX) { fixable++; continue; }
+                    if (why == CTX_ASSIGN) assignment++;
+                    else if (why == CTX_ISOLATED) isolated++;
+                    else if (why == CTX_ENGLISH) dangerLetter++;
+                    else if (why == CTX_DIGIT) dangerDigit++;
+                    if (why == CTX_ISOLATED || why == CTX_ASSIGN)
+                    {
+                        if (!fragmentByToken.ContainsKey(needle)) fragmentByToken[needle] = 0;
+                        fragmentByToken[needle] = fragmentByToken[needle] + 1;
+                        if (fragmentSamples.Count < 8) fragmentSamples.Add(DangerSample(text, mm.Index, mm.Length, why));
+                    }
+                }
             }
 
             Dictionary<string, object> one = new Dictionary<string, object>();
@@ -104,10 +153,49 @@ internal static partial class Program
         r["summary"] = new Dictionary<string, object> {
             { "plainDigitHits", candTotal },
             { "unicodeOk", uniTotal },
+            { "unitContext", fixable },
+            { "isolated", isolated },
+            { "assignment", assignment },
             { "letterPrefixedSkipped", dangerLetter },
             { "digitSuffixedSkipped", dangerDigit }
         };
-        if (dangerSamples.Count > 0) r["skippedSamples"] = dangerSamples;
+        if (fragmentSamples.Count > 0)
+        {
+            List<object> frag = new List<object>();
+            foreach (KeyValuePair<string, int> kv in fragmentByToken)
+            {
+                Dictionary<string, object> one = new Dictionary<string, object>();
+                one["token"] = kv.Key;
+                one["count"] = kv.Value;
+                frag.Add(one);
+            }
+            r["fragments"] = frag;
+            r["fragmentSamples"] = fragmentSamples;
+            r["fragmentsNote"] = "isolated unit-shaped tokens: usually variable names or labels in a template/script legend (e.g. \"km2 = 1\" inside a [for] example). They are NOT fixed - adding a superscript there would corrupt the document. Read the samples, then fix real units by hand if any of them is one.";
+        }
+
+        // fragments that are not units at all but look like a unit whose base got lost:
+        // "n2" / "n3" next to "m2" / "m3" in the same list is a strong hint of that
+        List<object> loose = new List<object>();
+        foreach (string probe in new string[] { "n2", "n3", "k2", "h2", "c2", "d2", "u2" })
+        {
+            Regex rxp = new Regex(@"(?<![A-Za-z0-9])" + Regex.Escape(probe) + @"(?![0-9A-Za-z])");
+            MatchCollection hits = rxp.Matches(text);
+            if (hits.Count == 0) continue;
+            Dictionary<string, object> one = new Dictionary<string, object>();
+            one["token"] = probe;
+            one["count"] = hits.Count;
+            one["likely"] = "m" + probe.Substring(1) + " / m" + (probe.Substring(1) == "2" ? "\u00B2" : "\u00B3") + " ?";
+            List<object> ctx = new List<object>();
+            foreach (Match m in hits) { if (ctx.Count < 3) ctx.Add(DangerSample(text, m.Index, m.Length, "unit-shaped fragment")); }
+            one["samples"] = ctx;
+            loose.Add(one);
+        }
+        if (loose.Count > 0)
+        {
+            r["looseFragments"] = loose;
+            r["looseNote"] = "unit-shaped fragments with no unit base (n2, k2 ...): often a typo for m2/m3, or a variable name. Reported only - confirm with the author.";
+        }
 
         // Suspects: look like units but are almost certainly a typo (km3 for 立方公里 in a
         // report about areas is a typo for km2). Report them; do not touch them.
@@ -146,7 +234,7 @@ internal static partial class Program
         // ---- apply: per-hit, filtered, guarded
         dynamic app = App(true, true);
         int docEnd = (int)TryGet(() => (object)doc.Content.End, 0);
-        int fixedTotal = 0, skipPrev = 0, skipNext = 0, failed = 0;
+        int fixedTotal = 0, skipPrev = 0, skipNext = 0, skipAssign = 0, skipIsolated = 0, failed = 0;
         List<object> perUnit = new List<object>();
         List<object> skipSamples = new List<object>();
         bool wasTracking = false;
@@ -183,19 +271,14 @@ internal static partial class Program
                     int e = (int)rng.End;
                     if (e <= s) break;
 
-                    string prev = s > 0 ? Convert.ToString(TryGet(() => (object)doc.Range(s - 1, s).Text, ""), CultureInfo.InvariantCulture) : "";
-                    if (prev.Length > 0 && IsAsciiLetter(prev[0]))
+                    string why = ClassifyLive(doc, s, e, docEnd);
+                    if (why != CTX_FIX)
                     {
-                        skipPrev++;
-                        if (skipSamples.Count < 6) AddSkipSample(doc, s, e, "letter before the unit - probably an English word, not a unit", skipSamples);
-                        try { rng.SetRange(e, docEnd); } catch (Exception) { break; }
-                        continue;
-                    }
-                    string next = e < docEnd - 1 ? Convert.ToString(TryGet(() => (object)doc.Range(e, e + 1).Text, ""), CultureInfo.InvariantCulture) : "";
-                    if (next.Length > 0 && next[0] >= '0' && next[0] <= '9')
-                    {
-                        skipNext++;
-                        if (skipSamples.Count < 6) AddSkipSample(doc, s, e, "a digit follows the unit - the number continues", skipSamples);
+                        if (why == CTX_ENGLISH) skipPrev++;
+                        else if (why == CTX_DIGIT) skipNext++;
+                        else if (why == CTX_ASSIGN) skipAssign++;
+                        else skipIsolated++;
+                        if (skipSamples.Count < 6) AddSkipSample(doc, s, e, why, skipSamples);
                         try { rng.SetRange(e, docEnd); } catch (Exception) { break; }
                         continue;
                     }
@@ -223,7 +306,13 @@ internal static partial class Program
 
         r["fixed"] = fixedTotal;
         r["fixedPerUnit"] = perUnit;
-        r["skipped"] = new Dictionary<string, object> { { "letterPrefixed", skipPrev }, { "digitSuffixed", skipNext }, { "failed", failed } };
+        r["skipped"] = new Dictionary<string, object> {
+            { "letterPrefixed", skipPrev },
+            { "digitSuffixed", skipNext },
+            { "assignment", skipAssign },
+            { "isolated", skipIsolated },
+            { "failed", failed }
+        };
         if (skipSamples.Count > 0) r["skippedSamples"] = skipSamples;
         r["tracked"] = track;
         r["saved"] = false;
@@ -231,6 +320,33 @@ internal static partial class Program
             ? "nothing to fix: every unit found was already superscript (unicode or run format)."
             : "the exponent digits were replaced with unicode superscript characters (format-only change, one undo step). Render the pages you changed, then save.";
         return r;
+    }
+
+    /// <summary>Same decision as UnitContext, but read from the live document (text offsets and
+    /// Range positions do not line up in documents that contain tables).</summary>
+    private static string ClassifyLive(dynamic doc, int start, int end, int docEnd)
+    {
+        string before = "";
+        try { int from = Math.Max(0, start - 2); before = Convert.ToString(doc.Range(from, start).Text ?? "", CultureInfo.InvariantCulture); }
+        catch (Exception) { }
+        char prev = before.Length > 0 ? before[before.Length - 1] : ' ';
+        char prev2 = before.Length > 1 ? before[before.Length - 2] : ' ';
+        string after = "";
+        try { int to = Math.Min(docEnd, end + 6); after = Convert.ToString(doc.Range(end, to).Text ?? "", CultureInfo.InvariantCulture); }
+        catch (Exception) { }
+        char next = after.Length > 0 ? after[0] : ' ';
+        if (next >= '0' && next <= '9') return CTX_DIGIT;
+        if (IsAsciiLetter(prev)) return CTX_ENGLISH;
+        int k = 0;
+        while (k < after.Length && (after[k] == ' ' || after[k] == '\t' || after[k] == '\u3000')) k++;
+        char nextNonSpace = k < after.Length ? after[k] : ' ';
+        if (nextNonSpace == '=' || nextNonSpace == '\uFF1D') return CTX_ASSIGN;
+        if (prev >= '0' && prev <= '9') return CTX_FIX;
+        if (prev == '\u4E07' || prev == '\u4EBF') return CTX_FIX;
+        if (prev == '(' || prev == '\uFF08') return CTX_FIX;
+        if (IsCjkIdeograph(prev)) return CTX_FIX;
+        if ((prev == ' ' || prev == '\u3000') && prev2 >= '0' && prev2 <= '9') return CTX_FIX;
+        return CTX_ISOLATED;
     }
 
     private static void AddSkipSample(dynamic doc, int start, int end, string why, List<object> into)

@@ -5,6 +5,10 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.6（2026-10-25）**：`word unit` 增加**上下文守卫 + "可疑碎片"报告**。起因是真报告里有一页**模板语法示例**（`[for]`、`m1..m3`、`n1..n3`、`k~a = 1`），其中的 `km2/m2/m3` 是**变量名**；无守卫的 v1.4 把它们改成了 `km²/m²/m³`（已在真实文档上复现并修正）。现在**只有"挂在数值上"的单位才修**（前字符是数字 / 万 / 亿 / 汉字 / 半全角左括号，或"数字 空格 单位"），其余一律只报不改，分两类：`fragments`（孤立 token、后跟 `=`）与 `looseFragments`（`n2`/`n3` 这类缺基名的形态）。
+
+**版本 v1.5（2026-10-25）**：把"连接"与"动手"分成两挡——新增 **铁律 7**（用户只要"连上 / 接管"时，`status` + `open` 报一句摘要即停，不 `read` 全稿、不 `render`、不 `audit`、不 `close`）；PPT 视觉自检闭环的前提改为"**本轮真的改动过这份稿**"；`audit` 注明人工制作的老稿误报率高、结论以 `render` 目检为准。起因：一次"连上 PPT"被做成了全稿体检，用户干等。
+
 **版本 v1.4（2026-10-25）**：新增 **`word unit`** —— 单位上标批量修（把掉下来的 `m3/s`/`km2` 改成 `m³/s`/`km²`）。判据来自实测：同一篇文档里"对的上标"有两种形态（Unicode ²/³、run 级上标），只有 `Find.Font.Superscript = 0` 能挑出真正掉下来的；逐处修改 + 三重守卫（格式过滤、前字符非英文字母、后字符非数字），已正确的与 `item3`/`m23` 类英文数字形态自动跳过并回报上下文。**疑似笔误只报不改**：`km3`（面积表里几乎必是 `km2` 笔误）等列进 `suspects` 交人确认——自动加 ³ 会让笔误看起来像有意为之。300 页 / 13498 段真实报告实测 ~21 s，精确修 16 处、零误伤。
 
 **版本 v1.3（2026-10-25）**：按一份真实报告（饶河水系 297 页 / 85 张表）的使用记录补 Word 表格能力——`table -Action scan`（表格体检，只读）、`-Action caption`（题名做进第 1 行的一键提到框外，内部保证"插题名 → 删行 → 加边框"的顺序）、`-Action header-repeat`（跨页表头，自动迭代到稳定）、`-Action rows`（删行）；修掉 `insert -Where after` 在表格前落进表格的坑、`-HeaderRow` 静默失败（WPS 的 `Rows.Item(n)` 是残缺对象）、`audit` 新增"题名在第 1 行"规则、`page` 查询模式报页码断号 + `-PageNumberStart none`。
@@ -43,6 +47,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
    - **Excel 一切写操作**：COM 修改不进撤销栈，改前 `snapshot`（`write`/`fill` 已自动落 pre-batch 快照）、改后比对 before/after 与 `diff`，别指望 Ctrl+Z；
    - **PPT 一切写操作**：同 Excel，无修订层、无撤销；批量改前 `snapshot`、改后 `diff` + `render` 目检；
    - `snapshot`/`diff`/`handoff` 都走 COM 读活文档，不依赖 save，不构成提前落盘的理由。
+7. **先分清"只连接"和"要动手"，别把连接做成体检。** 用户只说"连上 / 接管 / 打开这份文档 / 先看看有什么"时，本轮做到 **`status` → `open` → 报一句摘要**（文件名 / 页数或段落数 / 纸张或尺寸 / `readOnly` / 有无未保存改动）**就停下等指令**：不 `read` 全稿、不 `render`、不 `audit`、不 `snapshot`、不 `close`（文档留给用户继续用，等他下一次给出任务时再按铁律 4 收尾）。这些动作只在用户给出具体任务时才做，且只做该任务需要的那一部分——大文档 `read` 一次吐上万字符、`audit` 一次吐上百条（人工老稿误报居多），对"只是连上"的用户是纯等待成本。
+   反过来同样成立：用户给了"改"的任务，别在没改完、没 `render` 复核之前就宣布完成。
 
 ---
 
@@ -73,7 +79,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `toc` | `-Doc <路径> [-Para N] [-Title 目录] [-Levels 3]` | 插入并刷新目录（域），可从文首或指定段之前 |
 | `reference` | 列表：`-Action list -Items <json 数组> [-AtPara N] [-Heading 参考文献]`；引用：`-Action cite -Para N -Numbers "1,2,5"\|"3-6"` | 生成参考文献列表 / 在段末插入上标引用 |
 | `view` | `-Doc <路径> -Para N` 或 `-Page N` | 把 WPS 窗口滚到那一段/那一页（唯一能做的"跟随"，不动文档内容） |
-| `unit` / `units` | `-Doc <路径> [-Apply] [-Units "m3,km2,s2"] [-Normalize] [-Track]` | **单位上标批量修**：把掉下来的 `m3/s`、`km2`、`万m3` 里的指数改成 Unicode 上标（`m³/s`、`km²`）。括号里不带 `-Apply` = 只体检（页数/候选/已 Unicode 数/可疑词样例/**疑似笔误**），带 `-Apply` = 修并报逐单位改了几处、跳过了哪几处。**已正确的两种形态自动跳过**（Unicode ²/³ 与 run 级上标），**英文/数字贴连形态自动跳过**（`item3`、`m23`、`km20`），**疑似笔误只报不改**（`km3` 这类，见 `suspects`）。300 页/13k 段实测 ~20 s |
+| `unit` / `units` | `-Doc <路径> [-Apply] [-Units "m3,km2,s2"] [-Normalize] [-Track]` | **单位上标批量修**：把掉下来的 `m3/s`、`km2`、`万m3` 里的指数改成 Unicode 上标（`m³/s`、`km²`）。不带 `-Apply` = 只体检，带 `-Apply` = 修并报逐单位处数与跳过项。**只修"挂在数值上"的单位**（前字符＝数字/万/亿/汉字/左括号，或"数字 空格 单位"）；**已正确的两种形态自动跳过**（Unicode ²/³ 与 run 级上标）；**英文/数字贴连跳过**（`item3`、`m23`、`km20`）。三类只报不改：`fragments`（孤立 token／后跟 `=`，多半是模板变量名）、`looseFragments`（`n2`/`n3` 缺基名）、`suspects`（`km3` 这类疑似笔误）。300 页/13k 段实测 ~20 s |
 | `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段、**题名做进表格第 1 行**（`table-caption-in-row`，直接给出该用哪条 `table -Action caption`）；返回段落号 + 建议，供你判断后落批注 |
 | `fields` | `-Doc <路径>` | **刷新全部域**：页码、目录、题注、引用（改完正文、交付前跑一次） |
 | `cell` | `-Doc <路径> (-Table n -Row r -Col c \| -Para N) -Text "..."` + 任意格式项 | 改一个表格单元格的文字（可带字体字号对齐） |
@@ -148,7 +154,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 11. **单位上标批量修（几百页报告的常见活）**：`unit -Doc X` 先看体量 → `unit -Doc X -Apply` 一键修（已正确的跳过）→ `render` 抽 1–2 页确认 → `save`。
     - 判据：`unit` 的 `plainDigitHits` − `unicodeOk` 不等于坏例数，**坏例数以 `-Apply` 返回的 `fixed` 为准**（只有 Find 能看到 run 格式，文本层分不出"真掉"和"格式上标"）。
     - `skippedSamples` 里若出现疑似真单位，用 `-Units` 补上重跑；若是英文词（`item3`、`com2`）则不用管。
-    - `suspects` 是**疑似笔误**（如面积表里的 `km3`，多半该是 `km2`）：命令**不会自动改**——自动修会把笔误变成"上标 3"，看起来像故意的。**报给作者确认**后再用 `revise`/`cell` 改数字。
+    - **`fragments` / `looseFragments` / `suspects` 三样都必须看一遍**：`fragments` 多半是**模板/脚本示例里的变量名**（`km2 = 1`、`<m1，m2，m3>`），`looseFragments` 是缺基名的形态（`n2`、`n3`，常是 `m2`/`m3` 打错），`suspects` 是疑似笔误（面积表里的 `km3` 多半该是 `km2`）。**这三类一律只报不改**——自动改会把变量名/笔误变成"看起来是对的"上标，比不改更糟。报给作者确认后再用 `revise`/`cell` 处理。
+    - 若 `fixed` 明显少于预期（例如只剩个位数），先看 `skipped.assignment/isolated`：说明命中多半在模板示例或表格标题里，符合预期。
     - 全文见 [reference/workflows.md](reference/workflows.md) 的「单位上标批量修」一节。
 10. **反悔**：自己刚写完且无 `changedOutside` 时 `undo -Count N`（排版批=1 步）。
 
@@ -303,7 +310,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `view` | `-Slide N` | 把 WPS 窗口切到那一页（唯一"跟随"手段，不动内容） |
 | `render` | `-Doc [-From 1] [-To 4] -Out <目录> [-Width 1100]`；**总览：`-Overview`（每次 ≤24 页，6 页拼一张并带页码）** | 逐页 EMF→PNG（**每次最多 4 页**）；写盘者是 helper，**明文可看**；`-Overview` 是"交付前过一遍全稿"的经济方式 |
 | `theme` | `-Set <json 文件>` / `-Apply` / `-Reset` / 不带选项=查看 | **整稿风格打底**：primary/accent/title/text/muted 五色 + font/titleFont + footer（页脚文字）+ pageNumber + skipFooterOnCover。`-Set` 存到该文稿主题文件（%LOCALAPPDATA%\wps-office-cooperate\ppt-themes），之后所有预设页自动跟随；`-Apply` 把已有页的字体/配色刷一遍并补页脚页码（**落在深色色块上的文字自动改白**） |
-| `audit` | `-Doc [-From/-To] [-MinFont 12]` | **机械体检**：文字溢出文本框、字号过小、形状越出页面、形状重叠（装饰色块除外）、图片 <20% 页宽、空页、无标题页。返回到 页/形状/类型/细节 |
+| `audit` | `-Doc [-From/-To] [-MinFont 12]` | **机械体检**：文字溢出文本框、字号过小、形状越出页面、形状重叠（装饰色块除外）、图片 <20% 页宽、空页、无标题页。返回到 页/形状/类型/细节。⚠️ **人工制作的老稿误报率高**：整幅背景色块会报"重叠/越界"，标题用普通矩形会报"无标题页"，页面 logo 会报"图过小"——这些是设计意图，**结论以 `render` 目检为准**，audit 只当线索清单 |
 | `align` | `-Slide N -Mode left\|right\|top\|bottom\|center-h\|same-width\|same-height\|distribute-h\|distribute-v [-Shapes "a,b,c"]` | 对齐/等距分布/统一尺寸（`-Shapes` 省略=该页全部形状）；返回每个形状的最终几何 |
 | `zorder` | `-Slide N (-Name 名 \| -ShapeIdx n) [-Where front\|back]` | 置顶/置底（图片压字时用） |
 | `restore` | `-Doc [-Since 快照\|tag] [-Shapes "3!备注,4!title"]` | **文本级回滚**：把文字退回快照状态（版式/新增形状不还原）；改坏了先回滚再想别的 |
@@ -329,11 +336,11 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - `expect` 可选但强烈建议：该形状当前文字必须**以它开头**，不符即整批拒绝。
 - 中途 COM 出错会按序回滚已改项（"rolled back N item(s)"）。
 
-### PPT 视觉自检闭环（**默认必须走**）
+### PPT 视觉自检闭环（**本轮真的改动过这份稿才走**）
 
-生成/改完 PPT 后的收尾动作，顺序固定：
+前提是本轮确实动过这份稿（新建、改文字、换主题、调版式都算）。**只是连上、只是读、只是查，不走这一步**（见铁律 7）。顺序固定：
 
-1. **`audit -Doc`** —— 机械筛查（溢出/字号/越界/重叠/空页），便宜且确定性高；有 issue 先修。
+1. **`audit -Doc`** —— 机械筛查（溢出/字号/越界/重叠/空页），便宜但**对人工老稿误报多**（背景色块 / logo / 非占位符标题），先挑出真问题再修，别按条数硬修。
 2. **`render -Overview -Out <目录>`** —— 每 6 页拼一张图，**逐张看**：标题层级是否统一、色块对不齐、要点与表格图挤在一起、半空页。
 3. 对可疑页 **`render -From N -To M`** 单页放大确认。
 4. 修（`text` / `align` / `table` / `theme -Apply`）→ **再 `render` 确认** → 才 `save`。
