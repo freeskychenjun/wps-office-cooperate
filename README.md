@@ -8,13 +8,25 @@
 
 v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）于 2026-10-25 合并而成。
 
+## 效果
+
+一份用预设版式 + 主题一次生成的汇报稿（`render -Overview` 六页拼图，带页码），全部改动都发生在 WPS 窗口里：
+
+![PPT 样例：封面色带 / 要点页项目符号 / 章节页色块 / 表格页 / 结束页](docs/example-ppt-overview.png)
+
+Word 侧的修订与表格效果：
+
+| 修订模式改写 | 表格与版式 |
+|---|---|
+| ![修订](docs/example-revisions.png) | ![表格](docs/example-table.png) |
+
 ## 入口
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\office.ps1 word|excel <命令> [参数]
+powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\office.ps1 word|excel|ppt <命令> [参数]
 ```
 
-`word.ps1` / `excel.ps1` 也可直接调用。输出一段 JSON：`{"ok":true,"result":{...}}` 或 `{"ok":false,"error":{"code":"...","message":"..."}}`。
+`word.ps1` / `excel.ps1` / `ppt.ps1` 也可直接调用。输出一段 JSON：`{"ok":true,"result":{...}}` 或 `{"ok":false,"error":{"code":"...","message":"..."}}`。
 
 环境：Windows + WPS（没装微软 Office 也行）。首次调用用系统 `csc.exe` 编译 helper（约 1 秒，按源码哈希缓存）。
 
