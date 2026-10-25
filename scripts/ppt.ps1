@@ -70,6 +70,7 @@ param(
     # misc
     [string]$Since,
     [string]$Tag,
+    [string]$Note,
     [string]$As,
     [switch]$Show,
     [switch]$ReadOnly,
