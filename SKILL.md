@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.7（2026-10-25）**：PPT 新增 **`ppt font`** —— 全稿统一字体（`font -Doc -Font 宋体`），逐页扫**组合内部与表格单元格**，只写字体名、不动字号/颜色/加粗/版式。起因：用户要"所有页面改成宋体"，而已有 `format` 一次只能改一个形状且**进不到组合里**（该稿第 2 页就是 5 个组合）。实测 15 页 / 45 形状 / 5 组合 / 1 表格，0 失败；并记下"换字体 → 字身变宽 → 多折行"的连带风险（第 10 页末条曾被挤出页面，需 `format -Size` 收一档）。
+
 **版本 v1.6（2026-10-25）**：`word unit` 增加**上下文守卫 + "可疑碎片"报告 + 脚本段识别**。起因是真报告里有 3 页（实测第 256–258 页）是**公文模板/脚本语法说明**（`[for] … [/for]`、`[File]`、`k~a = 1`、`m1 = 1`／`n2 = 1` 成串赋值），其中的 `km2/m2/m3` 是**变量名**；无守卫的 v1.4 会把它们改成 `km²/m²/m³`（已在真实文档上复现）。现在：
 - **只修"挂在数值上"的单位**（前字符＝数字/万/亿/汉字/半全角左括号，或"数字 空格 单位"）；
 - **脚本段整段跳过**：段落命中 `[for]`/`[File]`/`k~a`/≥2 条 `x = 1` 赋值即判为模板示例，报告里单列 `scriptPages`（页码），此段的单位一律不动；
@@ -311,6 +313,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `table` | `-Slide N -Data <json: {"rows":[[...]]}> [-L -T -W -H] [-Size 14]` | 建表并填内容（首行默认加粗表头） |
 | `shape` | `-Action add -Type rect\|roundrect\|ellipse [-L -T -W -H] [-Fill 颜色] [-Line 颜色] [-Text ...]`；`-Action delete -Name <名>` | 画色块/圆角矩形/椭圆（可带字）；或按名删形状 |
 | `format` | `-Slide N -Shape <名> `+ 格式项 | 改文字格式（字体/字号/加粗/斜体/颜色/对齐/填充），返回回读值 |
+| `font` | `-Doc [-Font 宋体] [-From N] [-To M]` | **全稿统一字体**：逐页扫所有文字（**含组合内部与表格单元格**），只写 `Font.Name`+`NameFarEast`，**不动字号/颜色/加粗/版式**；返回 `shapes`/`groups`/`tables`/`failed` 与样例。⚠️ 换字体常使**字身变宽而多折行**，跑完必须 `render -Overview` 复核，个别挤爆的框用 `format -Size` 收一档 |
 | `notes` | `-Slide N (-Text\|-TextFile\|-Clear)` | 写/清演讲者备注 |
 | `view` | `-Slide N` | 把 WPS 窗口切到那一页（唯一"跟随"手段，不动内容） |
 | `render` | `-Doc [-From 1] [-To 4] -Out <目录> [-Width 1100]`；**总览：`-Overview`（每次 ≤24 页，6 页拼一张并带页码）** | 逐页 EMF→PNG（**每次最多 4 页**）；写盘者是 helper，**明文可看**；`-Overview` 是"交付前过一遍全稿"的经济方式 |
@@ -357,7 +360,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 1. **新建汇报稿**：`status` → `open -Doc 新路径 -Show`（自动建空稿）→ 可选 `theme -Set 主题.json`（一次定型：主色/字体/页脚）→ `slide -Preset title ...`（封面）→ `slide -Preset bullets -Items 提纲.json`（目录页）→ 逐节 `slide -Preset section -Number 01`。
 2. **填充内容页**：`slide -Preset bullets` 打骨架（正文占 25%–75%，下方留给表格/图）→ `table -Data 表.json`（默认 90% 页宽、y=62%）→ `image -Path 图.png` → 每页 `render` 目检。
 3. **改已有稿**：`read` 拿形状名 → `text -Items`（带 expect）批量改 → 比对 textAfter → `render` 抽查。
-4. **收拾版式**：`align` 对齐/等距、`zorder` 修压字、`audit` 兜底。
+4. **收拾版式**：`align` 对齐/等距、`zorder` 修压字、`audit` 兜底；要统一字体用 `font -Font <字体>`（一次全稿，含组合/表格），**换字体后必 `render -Overview` 查折行溢出**，挤爆的框用 `format -Size` 收一档。
 5. **人机接力**：`snapshot -Tag r1` → 干活 → `diff -Since r1` 看人改了什么；改坏 `restore -Since r1`。
 6. **收尾**：`theme -Apply`（统一配色页脚）→ `audit` → `render -Overview` **看一眼** → `save`（提醒落盘可能是密文）→ `close`（汇报 wpp 数）→ `finish`。
 

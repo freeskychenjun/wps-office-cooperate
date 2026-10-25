@@ -27,6 +27,8 @@ $includes = @(
     'scripts\excel.ps1',
     'scripts\ppt.ps1'
 )
+# README links these screenshots; ship them or the deployed README shows broken images.
+$includes += @(Get-ChildItem (Join-Path $root 'docs') -Filter *.png | ForEach-Object { 'docs\' + $_.Name })
 # All helper sources ship (each wrapper compiles every *.cs under its own helper subdir).
 $includes += @(Get-ChildItem (Join-Path $root 'scripts\helper') -Recurse -Filter *.cs | ForEach-Object { 'scripts\helper\' + $_.Directory.Name + '\' + $_.Name })
 
