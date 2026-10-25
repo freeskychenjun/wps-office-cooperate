@@ -4,9 +4,9 @@
 
 - **Word（WPS Writer，`KWPS.Application`）**：修订模式逐段改写（可逐条接受/拒绝）、批注、页面渲染核对、排版、表格/题注/图片/目录/参考文献、快照对比、undo、交接单。
 - **Excel（WPS 表格，`KET.Application`）**：批量写值/公式（锚点校验、原子批、失败回滚）、整列 fill、单元格批注、区域渲染、快照/对比/一键回滚、图表、行列表结构编辑。
-- PPT（WPS 演示）规划中。
+- **PPT（WPS 演示，`KWPP.Application`，v1.1 新增）**：预设版式建页（封面/章节/要点/两栏/结束）、形状级锚定改文字、表格/图片/文本框/色块、演讲备注、逐页渲染核对（剪贴板 EMF→明文 PNG）、文本快照对比；`open` 不存在的路径即新建演示文稿。
 
-由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）于 2026-10-25 合并而成，命令与行为不变。
+v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）于 2026-10-25 合并而成。
 
 ## 入口
 

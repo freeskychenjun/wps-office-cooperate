@@ -24,7 +24,8 @@ $includes = @(
     'reference\excel-acceptance.md',
     'scripts\office.ps1',
     'scripts\word.ps1',
-    'scripts\excel.ps1'
+    'scripts\excel.ps1',
+    'scripts\ppt.ps1'
 )
 # All helper sources ship (each wrapper compiles every *.cs under its own helper subdir).
 $includes += @(Get-ChildItem (Join-Path $root 'scripts\helper') -Recurse -Filter *.cs | ForEach-Object { 'scripts\helper\' + $_.Directory.Name + '\' + $_.Name })

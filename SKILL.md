@@ -1,39 +1,41 @@
 ---
 name: wps-office-cooperate
-description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式改写+批注+版式核对）与 Excel（.xlsx/.xls/.csv，批量写值公式+锚点校验+快照回滚+批注+图表），改动当场出现在用户正开着的 WPS 窗口里。当用户要求：在 WPS 里改这个文档/表格、在 WPS 里做修订、实时改 Word/Excel、一边看着一边改、加批注、核对排版/版式/表格格式，或提到 wps word、wps excel、live edit word/excel 时使用。不适用：纯离线批量处理（改副本、不要求用户在场，Word 用 docx-paragraph-polish，Excel 用 openpyxl/minimax-xlsx 等离线方案）、用户明确不要动原文件（只出旁挂报告）、微软 Office 窗口里的文档（本 skill 只走 WPS）。
+description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式改写+批注+版式核对）、Excel（.xlsx/.xls/.csv，批量写值公式+锚点校验+快照回滚+批注+图表）与 PowerPoint（.pptx，预设版式建页+形状级改文字+表格图片+逐页渲染核对+快照对比），改动当场出现在用户正开着的 WPS 窗口里。当用户要求：在 WPS 里改这个文档/表格/演示文稿/PPT、在 WPS 里做修订、实时改 Word/Excel/PPT、一边看着一边改、做汇报 PPT、加批注、核对排版/版式/表格格式，或提到 wps word、wps excel、wps ppt、live edit word/excel/ppt 时使用。不适用：纯离线批量处理（改副本、不要求用户在场，Word 用 docx-paragraph-polish，Excel 用 openpyxl/minimax-xlsx，PPT 用 pptx-generator 等离线方案）、用户明确不要动原文件（只出旁挂报告）、微软 Office 窗口里的文档（本 skill 只走 WPS）。
 ---
 
-# wps-office-cooperate：在 WPS 里实时改 Word / Excel
+# wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
-**版本 v1.0（2026-10-25）**：由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）合并而成，命令与行为完全不变，仅统一入口与文档；后续将增加 PPT（WPS 演示）。版本历史见 [reference/word-acceptance.md](reference/word-acceptance.md)、[reference/excel-acceptance.md](reference/excel-acceptance.md)。
+**版本 v1.1（2026-10-25）**：新增 **PPT（WPS 演示，`KWPP.Application`）** 支持——预设版式建页（封面/章节/要点/两栏/结束）、形状级锚定改文字、表格/图片/文本框、演讲备注、逐页渲染核对、文本快照对比。v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）合并而成。版本历史见 [reference/word-acceptance.md](reference/word-acceptance.md)、[reference/excel-acceptance.md](reference/excel-acceptance.md)。
 
-**能力边界（一句话）**：只走 **WPS**（Word=Writer `KWPS.Application`，Excel=表格 `KET.Application`，没装微软 Office 也照跑）。Word 侧所有文字改动都是**修订（track changes）**，用户能逐条接受/拒绝；Excel 侧改动**直写**单元格，靠**锚点校验 + 快照回滚**保证可核对（表格没有修订模式，Ctrl+Z 撤不回 Agent 的改动）。
+**能力边界（一句话）**：只走 **WPS**（Word=Writer `KWPS.Application`，Excel=表格 `KET.Application`，PPT=演示 `KWPP.Application`，没装微软 Office 也照跑）。Word 侧所有文字改动都是**修订（track changes）**，用户能逐条接受/拒绝；Excel 与 PPT 侧改动**直写**，靠**锚点校验 + 快照**保证可核对（**这两个 app 的 Ctrl+Z 撤不回 Agent 的改动**，外部 COM 修改不进撤销栈）。
 
 > 下文 `<skill>` = 本 skill 的安装目录。命令一律按**完整可跑**形式给出：
-> `powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\office.ps1 <word|excel> <命令> [参数]`
-> （`word.ps1` / `excel.ps1` 也可直接调用，参数完全一样。装有 PowerShell 7 的机器可把 `powershell` 换成 `pwsh`。）
+> `powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\office.ps1 <word|excel|ppt> <命令> [参数]`
+> （`word.ps1` / `excel.ps1` / `ppt.ps1` 也可直接调用，参数完全一样。装有 PowerShell 7 的机器可把 `powershell` 换成 `pwsh`。）
 > 输出只有一段 JSON：`{"ok":true,"result":{...}}` 或 `{"ok":false,"error":{"code":"...","message":"..."}}`。
 > 环境：Windows + WPS；首次调用会用系统自带 `csc.exe` 编译 helper（约 1 秒，之后按源码哈希缓存，不再编译）。
 
-## 铁律（两 app 通用，一条都不能省）
+## 铁律（三个 app 通用，一条都不能省）
 
 0. **一份文档，一条通道（最重要）。** 一旦本 skill 打开了某份文档、或接管了用户正开着的那份，**在这次协作期间，这份文档的一切处理都走本 skill**：
    - Word 校审 → `word audit` + `comment -Items`（**不要**加载 `design-report-review`）
    - Word 润色 / 改写 → `revise`（**不要**加载 `docx-paragraph-polish`）
    - Word 排版 → `format` / `style` / `page`（**不要**加载 `design-report-format`）
    - Excel 改表 → `write`/`fill`（**不要**再用 openpyxl/pandas/minimax-xlsx 直接改磁盘文件）
+   - PPT 改稿 → `slide`/`text`/`textbox`（**不要**再用 pptx-generator/python-pptx 生成副本替换它）
 
    理由不是"体验"，是**会坏**：那些 skill/工具改的是磁盘文件，而这份文档正被 WPS 独占（实测写盘 `PermissionError`）；它们还产出副本，会让你眼前这份和副本分成两条线。
    唯一例外：用户明确要"**不动原件、出一份新稿**"或"**无人值守批量跑**"——那时先 `save` → `close` 交出去，回来再 `open` 产出的文件、`snapshot` 重建基线（Excel 用 `save -As` 另出一份，或在用户关掉文件后离线处理）。
 1. **先 `status`，再动手，并说出在哪儿动手。** 每次开工第一条命令是 `status`，把"几个实例在跑 / 开着哪些文档 / 哪份是 active / 有没有未保存修改"念给用户，并明确报出**即将修改的那份文档的完整路径**（Excel 再加工作表名）。不碰用户没指定的文件。
 2. **`readOnly` 就是不许改。** `open`/`read` 返回 `readOnly: true`（文件被别处占用或有只读属性）时，写命令会直接报 `READONLY`。**不要**用另存、改文件属性、杀占用进程等方式绕过去——先问用户。
 3. **不替用户关文档。** `close` 只关本次明确要关的那一份；用户开着的其它文档、用户自己的 WPS 窗口一律不动。关之前先 `status` 确认这份是本次打开的。
-4. **结束必须 `close`，并汇报进程数。** 收尾命令 `close -Doc <路径>` 会返回 `processes`（Word 侧 wps.exe 计数 / Excel 侧 et.exe 计数）、`documentsLeft`。把这两个数报给用户；只清理自己起的无窗口 `/Automation` 实例，**绝不**按映像名批量杀进程。（注：WPS 退出后会自己预拉起 1–2 个隐藏进程，约 1 分钟自灭，别把它当成泄漏。）
+4. **结束必须 `close`，并汇报进程数。** 收尾命令 `close -Doc <路径>` 会返回 `processes`（Word 侧 wps.exe / Excel 侧 et.exe / PPT 侧 wpp.exe 计数）、`documentsLeft`。把这两个数报给用户；只清理自己起的无窗口 `/Automation` 实例，**绝不**按映像名批量杀进程。（注：WPS 退出后会自己预拉起 1–2 个隐藏进程，约 1 分钟自灭，别把它当成泄漏。）
 5. **交付前提醒"落盘可能是密文"。** 装了单位透明加密的机器上，WPS `save` 之后文件头变成 `17DA5FA01633CD9A`，直接发给同事打不开。保存后必须提这一句，并按 [reference/encryption.md](reference/encryption.md) 处理。
 6. **落盘前先想清楚反悔手段，别改完就存。**
    - **Word 修订类**（`revise`/`comment`）：拒绝修订不受 save 影响，可以及时存；
    - **Word 格式类**（`format`/`style`/`page`/`table`/`font`/`picture`/`caption`）：不进修订，唯一反悔手段是撤销栈，而 **save 会清空撤销栈（实测）**——必须在**用户看过/认可**或 `render` 复核通过**之后**才 save；
    - **Excel 一切写操作**：COM 修改不进撤销栈，改前 `snapshot`（`write`/`fill` 已自动落 pre-batch 快照）、改后比对 before/after 与 `diff`，别指望 Ctrl+Z；
+   - **PPT 一切写操作**：同 Excel，无修订层、无撤销；批量改前 `snapshot`、改后 `diff` + `render` 目检；
    - `snapshot`/`diff`/`handoff` 都走 COM 读活文档，不依赖 save，不构成提前落盘的理由。
 
 ---
@@ -255,11 +257,82 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 ---
 
+# PPT：在 WPS 演示里实时改演示文稿
+
+命令前缀：`office.ps1 ppt <命令>`（或直接 `ppt.ps1 <命令>`）。ProgID `KWPP.Application`；`open` 一个不存在的路径会**新建并立即保存**一份空稿到该路径（新稿身份靠这次落盘确立）。
+
+**关键限制（先读）**：PPT 无修订层、外部 COM 改动不进撤销栈（同 Excel）；**WPS 演示不接受公式**（不能建也不能贴）；`render` 走剪贴板（`Slide.Copy` → EMF → PNG，helper 自己写盘故是明文；`Slide.Export` 写的文件会被透明加密、读不回来，所以不用它）。
+
+## PPT 命令速查
+
+| 命令 | 参数 | 作用 |
+|---|---|---|
+| `doctor` | — | 自检：ProgID 安装/在跑、wpp 进程数、开着的演示文稿 |
+| `status` | — | 实例与文稿清单（name / path / saved / readOnly / slides / active） |
+| `open` | `-Doc <路径> [-Show] [-ReadOnly]` | 已开则复用；未开则打开；**路径不存在则新建空稿并保存到该路径**；返回 slides 与 slideSize |
+| `read` | `-Doc [-From 1] [-Count 30]` | 逐页：layout + 形状清单（编号/名称/类型/占位符/l/t/w/h/文字前 160 字）+ 备注；>30 页自动分页 |
+| `search` | `-Doc -Text <词> [-Max 50] [-Case]` | 跨页找文字：返回 页号/形状名/片段 |
+| `selection` | `-Doc` | 用户当前所在页与选中的形状名（需窗口开着） |
+| `slide` | `-Action add [-Preset title\|section\|bullets\|two\|end] [-Title ...] [-Subtitle ...] [-Number ...] [-Items <json>] [-Layout n] [-At N]`；`-Action dup\|move\|delete -Index N [-At\|-To M]` | **预设版式建页**（几何随文稿尺寸自适应；预设文本框已命名 title/subtitle/number/body/left/right，后续 `-Shape` 直达）；或复制/移动/删除页 |
+| `text` | 单条：`-Slide N [-Shape 名\|-ShapeIdx n] (-Text \| -TextFile) [-Expect 原文开头]`；**批量：`-Items <json>`** | 改形状文字；`expect` 锚校验不符则**整批一条不改**（`ANCHOR_MISSING`）；默认解析到标题占位符，否则第一个有字形状——**强烈建议显式 -Shape**；每条返回 before/textAfter，**立刻比对** |
+| `textbox` | `-Slide N (-Text\|-TextFile) [-Name 名] [-L -T -W -H pt]` + 格式项 | 加文本框（`-Name` 命名，后续定位用；中文字体/字号/对齐一起给） |
+| `image` | `-Slide N -Path <图片> [-L -T] [-W/-H pt]` | 插图（缺省居中）；返回最终尺寸；图占页宽 <20% 时提醒字母可能太小 |
+| `table` | `-Slide N -Data <json: {"rows":[[...]]}> [-L -T -W -H] [-Size 14]` | 建表并填内容（首行默认加粗表头） |
+| `shape` | `-Action add -Type rect\|roundrect\|ellipse [-L -T -W -H] [-Fill 颜色] [-Line 颜色] [-Text ...]`；`-Action delete -Name <名>` | 画色块/圆角矩形/椭圆（可带字）；或按名删形状 |
+| `format` | `-Slide N -Shape <名> `+ 格式项 | 改文字格式（字体/字号/加粗/斜体/颜色/对齐/填充），返回回读值 |
+| `notes` | `-Slide N (-Text\|-TextFile\|-Clear)` | 写/清演讲者备注 |
+| `view` | `-Slide N` | 把 WPS 窗口切到那一页（唯一"跟随"手段，不动内容） |
+| `render` | `-Doc [-From 1] [-To 4] -Out <目录> [-Width 1100]` | 逐页 EMF→PNG（**每次最多 4 页**，多了分批）；写盘者是 helper，**明文可看** |
+| `snapshot` | `-Doc [-Tag 名]` | 存文本级快照（每页形状名+文字，默认存 %LOCALAPPDATA%\wps-office-cooperate\ppt-snapshots） |
+| `diff` | `-Doc [-Since 快照\|tag]` | 与快照比：哪页哪个形状的文字变了（before→after）、页增删 |
+| `save` | `-Doc [-As <路径>]` | 保存 / 另存（`.pdf` = 导出 PDF） |
+| `close` | `-Doc [-Save]` | 关闭；最后一份时退出实例，回报 wpp 进程数 |
+| `quit` | — | 全部关闭并退出（不保存）。**慎用** |
+| `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | 完成信号（托盘气泡+提示音）；**不碰文稿任何内容**。任务收尾默认调用 |
+
+所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，多半是 WPS 弹了对话框。
+
+### `text -Items` 批量格式
+
+```json
+{"items":[
+  {"slide":4,"shape":"title","expect":"谢谢","text":"谢谢聆听"},
+  {"slide":3,"shape":"备注","text":"集水面积 1520 平方公里"}
+]}
+```
+
+- `shape` 用 `read` 里看到的名称（预设页的形状已命名）；不填则解析到标题占位符，否则第一个有字形状。
+- `expect` 可选但强烈建议：该形状当前文字必须**以它开头**，不符即整批拒绝。
+- 中途 COM 出错会按序回滚已改项（"rolled back N item(s)"）。
+
+### PPT 典型工作流
+
+1. **新建汇报稿**：`status` → `open -Doc 新路径 -Show`（自动建空稿）→ `slide -Preset title ...`（封面）→ `slide -Preset bullets -Items 提纲.json`（目录页，用 `-Items` 传要点数组）→ 逐节 `slide -Preset section -Number 01`。
+2. **填充内容页**：`slide -Preset bullets` 打骨架 → `table -Data 表.json` 放数据 → `image -Path 图.png` 放图 → **每页 `render` 目检**（文字溢出/表格超界只有图能看出来）。
+3. **改已有稿**：`read` 拿形状名 → `text -Items`（带 expect）批量改 → 比对 textAfter → `render` 抽查。
+4. **人机接力**：`snapshot -Tag r1` → 干活 → `diff -Since r1` 看人改了什么 → 继续。
+5. **收尾**：`save`（提醒落盘可能是密文）→ `close`（汇报 wpp 数）→ `finish`。
+
+## PPT 故障排查
+
+| 错误码 / 现象 | 怎么办 |
+|---|---|
+| `NO_APP` | 没装 WPS 演示或 KWPP COM 没注册；手动开一次 WPS 演示再试。 |
+| `NOT_OPEN` / `DOC_CLOSED` | 语义同 Excel：`-Doc` 路径与实际不符先 `status`；协作中被关闭不要静默重开，先问用户。 |
+| `ANCHOR_MISSING` | 形状当前文字与 `expect` 不符（人刚改了/定位错形状）。整批没改，重新 `read` 核对形状名。 |
+| `render` 报 `COM_ERROR`（clipboard） | 多半是弹了对话框占住剪贴板，或刚 Copy 完还没就绪。关掉对话框重试。 |
+| 同页形状重名（旧稿"文本框 1"满天飞） | `-Shape` 会命中第一个；用 `-ShapeIdx`（read 里的 i 列）或先 `format` 不行就 `textbox -Name` 加命名框替代。 |
+| 图片插入后糊/字小 | `render` 目检；图小于页宽 20% 时结果里会点名提醒。 |
+| wpp.exe 变多 | 同其它 app：`status` 看实例，只清无窗口实例，汇报数字。 |
+
+---
+
 ## 与其它 skill / 工具的关系
 
 - **`office_*` 工具（dsh-office 插件）**：装了那个插件时，`office_open/office_read/office_edit/office_render` 与本 skill 能力重叠、互不冲突——插件适合"顺手改一份"，本 skill 适合"要分发给同事、不想让每人装插件"的场合。两者都可用时**选一个用到底**，别交替（会各开实例）。
 - **`docx-paragraph-polish`**（离线润色）：**本机有 WPS 且用户要在场逐条过**时，改用本 skill Word 侧——修订直接出现在 WPS 窗口里、可当场接受/拒绝、顺手能核对版式；无人值守、上千段一次跑完的批量润色仍用 `docx-paragraph-polish`（不依赖 WPS，也不受"落盘即密文"影响）。
 - **`office_xlsx` / `minimax-xlsx` / openpyxl 等**：它们改磁盘文件。工作簿正开在 WPS 里时**必须**用本 skill Excel 侧；无人值守批量跑、或文件没开且不需要人在场时，用离线方案更快。
+- **`pptx-generator` / python-pptx 等**：同理——演示文稿正开在 WPS 里（或用户要在场边看边改）时用本 skill PPT 侧；从零生成、无人值守的整份 PPT 用离线方案。
 - **`design-report-review` / `design-report-format`**：见铁律 0——同一份文档在本 skill 手里时，用本 skill 的 `audit` + `comment` / `format`/`style`/`page` 在原稿处理，不另起离线流程；用户明确只要旁挂报告、不动原文时才另说。
 
 ## 参考
