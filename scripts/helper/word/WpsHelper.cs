@@ -427,6 +427,8 @@ internal static partial class Program
             case "diff": return DiffDoc(a);
             case "handoff": return HandoffDoc(a);
             case "audit": return AuditDoc(a);
+            case "unit": return UnitsDoc(a);
+            case "units": return UnitsDoc(a);
             case "save": return SaveDoc(a);
             case "close": return CloseDoc(a);
             case "quit": return QuitAll(a);

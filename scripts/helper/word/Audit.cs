@@ -93,7 +93,7 @@ internal static partial class Program
 
             Match m;
             m = unit.Match(text);
-            if (m.Success) c.Add("unit", m.Value, "改用上标写法（m³/s、km²、万m³），或写成公式");
+            if (m.Success) c.Add("unit", m.Value, "单位指数掉下来了（应为上标）。修法：word unit -Apply（按最长单位优先、逐处守卫地批量改成 m³/s、km² 这类 Unicode 上标，已正确的会自动跳过）");
 
             m = repeat.Match(text);
             if (m.Success) c.Add("repeat-word", m.Value, "疑似重复词，确认后删去一个");

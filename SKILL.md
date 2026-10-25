@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.4（2026-10-25）**：新增 **`word unit`** —— 单位上标批量修（把掉下来的 `m3/s`/`km2` 改成 `m³/s`/`km²`）。判据来自实测：同一篇文档里"对的上标"有两种形态（Unicode ²/³、run 级上标），只有 `Find.Font.Superscript = 0` 能挑出真正掉下来的；逐处修改 + 三重守卫（格式过滤、前字符非英文字母、后字符非数字），已正确的与 `item3`/`m23` 类英文数字形态自动跳过并回报上下文。300 页 / 13498 段真实报告实测 ~21 s，精确修 17 处、零误伤。
+
 **版本 v1.3（2026-10-25）**：按一份真实报告（饶河水系 297 页 / 85 张表）的使用记录补 Word 表格能力——`table -Action scan`（表格体检，只读）、`-Action caption`（题名做进第 1 行的一键提到框外，内部保证"插题名 → 删行 → 加边框"的顺序）、`-Action header-repeat`（跨页表头，自动迭代到稳定）、`-Action rows`（删行）；修掉 `insert -Where after` 在表格前落进表格的坑、`-HeaderRow` 静默失败（WPS 的 `Rows.Item(n)` 是残缺对象）、`audit` 新增"题名在第 1 行"规则、`page` 查询模式报页码断号 + `-PageNumberStart none`。
 
 **版本 v1.2（2026-10-25）**：PPT 侧补齐"能交付"这一层——`theme`（主色/字体/页脚/页码，一套 JSON 打底）、预设版式重做（封面色带、章节页色块+大数字、真项目符号、**深色底自动白字**、正文框留白给表格/图片）、`render -Overview`（6 页拼一张图并带页码）、`audit`（文字溢出/字号过小/越界/重叠/图过小/空页机械体检）、`align`/`zorder`/`restore`。
@@ -71,6 +73,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `toc` | `-Doc <路径> [-Para N] [-Title 目录] [-Levels 3]` | 插入并刷新目录（域），可从文首或指定段之前 |
 | `reference` | 列表：`-Action list -Items <json 数组> [-AtPara N] [-Heading 参考文献]`；引用：`-Action cite -Para N -Numbers "1,2,5"\|"3-6"` | 生成参考文献列表 / 在段末插入上标引用 |
 | `view` | `-Doc <路径> -Para N` 或 `-Page N` | 把 WPS 窗口滚到那一段/那一页（唯一能做的"跟随"，不动文档内容） |
+| `unit` / `units` | `-Doc <路径> [-Apply] [-Units "m3,km2,s2"] [-Normalize] [-Track]` | **单位上标批量修**：把掉下来的 `m3/s`、`km2`、`万m3` 里的指数改成 Unicode 上标（`m³/s`、`km²`）。括号里不带 `-Apply` = 只体检（页数/候选/已 Unicode 数/可疑词样例），带 `-Apply` = 修并报逐单位改了几处、跳过了哪几处。**已正确的两种形态自动跳过**（Unicode ²/³ 与 run 级上标），**英文/数字贴连形态自动跳过**（`item3`、`m23`、`km20`）；跳过项的上下文会一并返回供人复核。300 页/13k 段实测 ~20 s |
 | `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段、**题名做进表格第 1 行**（`table-caption-in-row`，直接给出该用哪条 `table -Action caption`）；返回段落号 + 建议，供你判断后落批注 |
 | `fields` | `-Doc <路径>` | **刷新全部域**：页码、目录、题注、引用（改完正文、交付前跑一次） |
 | `cell` | `-Doc <路径> (-Table n -Row r -Col c \| -Para N) -Text "..."` + 任意格式项 | 改一个表格单元格的文字（可带字体字号对齐） |
@@ -142,6 +145,10 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
     - 跨页缺表头：`table -Action header-repeat`（自动迭代到稳定；**先**处理题名，否则重复出去的是题名行）
     - 全文档边框加粗：`table -Borders thick`（**不带 -Table 即全表**，一次 COM 遍历 + 一个撤销记录；85 张表约十几秒，别逐张调）
     - 细节见 [reference/workflows.md](reference/workflows.md) 的「批量整理表格」一节
+11. **单位上标批量修（几百页报告的常见活）**：`unit -Doc X` 先看体量 → `unit -Doc X -Apply` 一键修（已正确的跳过）→ `render` 抽 1–2 页确认 → `save`。
+    - 判据：`unit` 的 `plainDigitHits` − `unicodeOk` 不等于坏例数，**坏例数以 `-Apply` 返回的 `fixed` 为准**（只有 Find 能看到 run 格式，文本层分不出"真掉"和"格式上标"）。
+    - `skippedSamples` 里若出现疑似真单位（例如换算表里的 `km3`），用 `-Units "km3,..."` 补上重跑；若确是英文词（`item3`）则不用管。
+    - 全文见 [reference/workflows.md](reference/workflows.md) 的「单位上标批量修」一节。
 10. **反悔**：自己刚写完且无 `changedOutside` 时 `undo -Count N`（排版批=1 步）。
 
 ## Word 故障排查

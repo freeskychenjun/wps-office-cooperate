@@ -9,7 +9,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'undo', 'revise', 'comment', 'render', 'font',
-                 'format', 'style', 'page', 'table', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit',
+                 'format', 'style', 'page', 'table', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit', 'unit', 'units',
                  'save', 'close', 'quit', 'finish')]
     [string]$Command,
 
@@ -93,6 +93,9 @@ param(
     [string]$Action,
     [int]$Passes = 0,
     [switch]$Force,
+    [switch]$Apply,
+    [switch]$Normalize,
+    [string]$Units,
     [string]$Numbers,
     [string]$Heading,
     [int]$Levels = 3,
@@ -426,6 +429,20 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'audit needs -Doc' }
         if ($Max -gt 0) { $request['max'] = $Max }
         if ($Action) { $request['rules'] = $Action }
+    }
+    'unit' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'unit needs -Doc' }
+        if ($Apply) { $request['apply'] = $true }
+        if ($Normalize) { $request['normalize'] = $true }
+        if ($Units) { $request['units'] = $Units }
+        if ($Track) { $request['track'] = $true }
+    }
+    'units' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'units needs -Doc' }
+        if ($Apply) { $request['apply'] = $true }
+        if ($Normalize) { $request['normalize'] = $true }
+        if ($Units) { $request['units'] = $Units }
+        if ($Track) { $request['track'] = $true }
     }
     'finish' {
         if ($Note) { $request['note'] = $Note }

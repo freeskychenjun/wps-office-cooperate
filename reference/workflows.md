@@ -264,3 +264,50 @@ office.ps1 word table -Doc $DOC -Action rows -Table 2 -Row 3
 - `page -Doc $DOC` 的查询模式会报每节 `pageNumbers`（`startNumberRaw` / `restartAtSectionRaw` / `firstDisplayedPage`），断号一眼看出；
 - `page -PageNumberStart none` 会尝试清掉"本节重新编号"，但 **WPS 常常做不到**（`RestartNumberingAtSection` 读回 `null`；写 `StartingNumber = 0` 会理解成"从 0 开始"，写 `-1` 会把分页搞乱）——命令会**明说失败**，别硬试；
 - 可行路线：关闭文档（不保存）→ 改 `word/document.xml` 删掉多余节的 `pgNumType@w:start`（保留第一节的 `start="1"`）→ 重新 `open` → 导出 PDF 逐页取页码验证连续 → `fields` 刷目录 → `save`。导出 PDF 落盘即密文，要先用 `decrypt-office-pdf` 解密再读。
+---
+
+## 13. 单位上标批量修（2026-10-25 实测，300 页 / 13498 段）
+
+**问题**：报告里 `2248m3/s`、`15300km2`、`1.2亿m3` 的指数"掉下来了"（普通数字）。而同一篇文档里**有些人是对的**，且"对"有两种形态：
+
+| 形态 | 文本层看到 | 怎么判 |
+|---|---|---|
+| Unicode 上标 | `m³`、`km²`（单字符 ²/³） | 文本本身就是 ²/³，`unit` 的 `unicodeOk` 统计 |
+| run 级上标 | 文本层仍是 `m3`、`km2`，但数字带 `Font.Superscript` | 只有 Find 的格式过滤能看见；`unit -Apply` 会自动跳过 |
+| **掉下来（要修）** | 普通 `3`/`2`，无任何格式 | 格式过滤 `Font.Superscript = 0` 命中 |
+
+```powershell
+office.ps1 word unit -Doc $DOC                      # 体检
+office.ps1 word unit -Doc $DOC -Apply               # 修（一次撤销记录）
+office.ps1 word unit -Doc $DOC -Apply -Units "km3,s2"   # 追加自定义单位
+```
+
+### 13.1 为什么不是"查找替换一把梭"
+
+盲目 `ReplaceAll` 会把英文词和非单位数字一起改掉——实测在测试文档里 `item3 → ite³`、`com2 → co²`、`m23 → m²3`、`km20 → km²0`。`unit` 的实现是**逐处 + 三重守卫**：
+
+1. **格式过滤**：`Find.Font.Superscript = 0`，已经正确的 run 级上标永不出现；
+2. **前一个字符不能是英文字母**：`item3` 跳过；`km2` 里的 `m2` 也跳过——因为**按最长单位优先**处理，`km2` 会由它自己那一趟整体修掉；
+3. **后一个字符不能是数字**：`m23`、`km20` 跳过（说明数字还在继续）。
+
+`Execute` 的第 9 个参数（Format）必须是 **true**，否则字体过滤会被丢弃——这是个坑：丢了这个参数，`ReplaceAll` 会把 format-ok 的也一起改掉（实测 598 处被误改）。
+
+### 13.2 实测数字（真实报告副本，300 页 / 36 MB）
+
+| 指标 | 结果 |
+|---|---|
+| 打开 + 体检 + 修复 全流程 | **~21–24 s**（其中 WPS 打开 36 MB 文档 ~8 s） |
+| 文本候选（`plainDigitHits`） | 156 |
+| 已 Unicode | 147 |
+| **实际修复** | **16**（km²×9、m³×3、m²×4） |
+| 跳过 | 1（换算表 `km3` 里的 `m3`；把 `km3` 加进 `-Units` 即可覆盖） |
+
+对比：合成测试文档 34 页 / 1818 候选 / 1220 处损坏 → 全修、1220 全中、format-ok 598 处一处未动、8 个诱饵词全部保留，耗时 21.6 s。**坏得越多越慢（≈17 ms/处），但 300 页文档通常只有十几到几十处，所以通常是秒级。**
+
+### 13.3 纪律
+
+- `unit` 是**内容改动**（把 `3` 换成 `³`），不是格式改动；默认**不进修订**，整批算**一个撤销记录**，配合 `snapshot` 用。要逐条可审时加 `-Track`（会生成大量修订对，慎用）。
+- **先跑不带 `-Apply` 的体检**：`skippedSamples` 里若有疑似真单位，用 `-Units` 补；若是英文词就不管。
+- 修完 `render` 抽 1–2 页看（重点看行高有没有被撑开、上下标是否与上下文一致），确认后再 `save`。
+- 单位只覆盖 metric 面积/立方系列（`km2/hm2/cm2/mm2/dm2/um2/nm2/km3/m3/m2`）；`m/s2`（加速度）、`Pa2` 之类按需 `-Units` 追加，且必须写全基名（如 `s2`、`km3`）。
+- 表格、表格单元格、正文都在 `doc.Content` 内，都会被处理；**页眉/页脚/脚注不在范围内**（水利率报告里单位极少出现在页眉）。
