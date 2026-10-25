@@ -279,7 +279,7 @@ office.ps1 word table -Doc $DOC -Action rows -Table 2 -Row 3
 ```powershell
 office.ps1 word unit -Doc $DOC                      # 体检
 office.ps1 word unit -Doc $DOC -Apply               # 修（一次撤销记录）
-office.ps1 word unit -Doc $DOC -Apply -Units "km3,s2"   # 追加自定义单位
+office.ps1 word unit -Doc $DOC -Apply -Units "s2"          # 追加真实使用的单位（笔误别往这里加）
 ```
 
 ### 13.1 为什么不是"查找替换一把梭"
@@ -300,7 +300,7 @@ office.ps1 word unit -Doc $DOC -Apply -Units "km3,s2"   # 追加自定义单位
 | 文本候选（`plainDigitHits`） | 156 |
 | 已 Unicode | 147 |
 | **实际修复** | **16**（km²×9、m³×3、m²×4） |
-| 跳过 | 1（换算表 `km3` 里的 `m3`；把 `km3` 加进 `-Units` 即可覆盖） |
+| 疑似笔误（只报不改） | 1：换算表里的 `km3` —— 面积/体积表里出现"立方公里"几乎必是 `km2` 的笔误，**不能自动修**（会把笔误变成"上标 3"，像故意的），报给作者确认后用 `revise`/`cell` 改数字 |
 
 对比：合成测试文档 34 页 / 1818 候选 / 1220 处损坏 → 全修、1220 全中、format-ok 598 处一处未动、8 个诱饵词全部保留，耗时 21.6 s。**坏得越多越慢（≈17 ms/处），但 300 页文档通常只有十几到几十处，所以通常是秒级。**
 
@@ -309,5 +309,6 @@ office.ps1 word unit -Doc $DOC -Apply -Units "km3,s2"   # 追加自定义单位
 - `unit` 是**内容改动**（把 `3` 换成 `³`），不是格式改动；默认**不进修订**，整批算**一个撤销记录**，配合 `snapshot` 用。要逐条可审时加 `-Track`（会生成大量修订对，慎用）。
 - **先跑不带 `-Apply` 的体检**：`skippedSamples` 里若有疑似真单位，用 `-Units` 补；若是英文词就不管。
 - 修完 `render` 抽 1–2 页看（重点看行高有没有被撑开、上下标是否与上下文一致），确认后再 `save`。
-- 单位只覆盖 metric 面积/立方系列（`km2/hm2/cm2/mm2/dm2/um2/nm2/km3/m3/m2`）；`m/s2`（加速度）、`Pa2` 之类按需 `-Units` 追加，且必须写全基名（如 `s2`、`km3`）。
+- 单位表**只放真实使用**的单位（metric 面积/体积系列：`km2/hm2/cm2/mm2/dm2/um2/nm2/m3/m2`）；`m/s2`（加速度）之类按需 `-Units` 追加，必须写全基名（如 `s2`）。
+- **疑似笔误只报不改**：`km3`、`km4`、`m4`、`hm3` 这类会被列进 `suspects` 并附上下文。经验：面积/库容报告里出现"立方公里"，多半是 `km2` 打错；自动加 ³ 会让笔误看起来像有意为之，比不改更糟。确认后手工改数字，或用 `-Units "km3"` 明确表示"这确实是立方单位"。
 - 表格、表格单元格、正文都在 `doc.Content` 内，都会被处理；**页眉/页脚/脚注不在范围内**（水利率报告里单位极少出现在页眉）。

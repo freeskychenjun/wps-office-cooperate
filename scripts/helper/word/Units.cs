@@ -28,10 +28,13 @@ using System.Text.RegularExpressions;
 
 internal static partial class Program
 {
-    // unit -> exponent digit (2 or 3); metric area/length units of a water report
+    // unit -> exponent digit (2 or 3); metric area/volume units of a water report.
+    // Only units that are genuinely used here. Anything else that merely LOOKS like a unit
+    // (e.g. "km3" for 立方公里, which in these reports is a typo for km2) is reported as a
+    // suspect for a human to judge - never silently superscripted, or the typo would come
+    // out looking deliberate.
     private static readonly string[][] UNIT_TABLE = new string[][]
     {
-        new string[] { "km3", "3" },
         new string[] { "km2", "2" },
         new string[] { "hm2", "2" },
         new string[] { "cm2", "2" },
@@ -42,6 +45,9 @@ internal static partial class Program
         new string[] { "m3",  "3" },
         new string[] { "m2",  "2" },
     };
+
+    // tokens that are almost always a typo in this kind of report: reported, never fixed
+    private static readonly string[] SUSPECT_TOKENS = new string[] { "km3", "km4", "m4", "hm3" };
 
     private static object UnitsDoc(Bag a)
     {
@@ -102,6 +108,31 @@ internal static partial class Program
             { "digitSuffixedSkipped", dangerDigit }
         };
         if (dangerSamples.Count > 0) r["skippedSamples"] = dangerSamples;
+
+        // Suspects: look like units but are almost certainly a typo (km3 for 立方公里 in a
+        // report about areas is a typo for km2). Report them; do not touch them.
+        List<object> suspects = new List<object>();
+        foreach (string tok in SUSPECT_TOKENS)
+        {
+            Regex rx = new Regex(@"(?<![A-Za-z0-9])" + Regex.Escape(tok) + @"(?![0-9])");
+            MatchCollection hits = rx.Matches(text);
+            if (hits.Count == 0) continue;
+            Dictionary<string, object> one = new Dictionary<string, object>();
+            one["token"] = tok;
+            one["count"] = hits.Count;
+            one["likely"] = tok.StartsWith("km", StringComparison.Ordinal) ? "km2 / km\u00B2" : "check by hand";
+            List<object> ctx = new List<object>();
+            foreach (Match m in hits) { if (ctx.Count < 4) ctx.Add(DangerSample(text, m.Index, m.Length, "suspect token")); }
+            one["samples"] = ctx;
+            suspects.Add(one);
+        }
+        if (suspects.Count > 0)
+        {
+            r["suspects"] = suspects;
+            r["suspectsNote"] = "these look like typos (e.g. km3 in an area table is probably km2), so they are NOT changed automatically - "
+                              + "the exponent would become a superscript 3 and the typo would look deliberate. Confirm with the author, "
+                              + "then fix the digit with revise/table cell, or re-run with -Units \"<token>\" only if it really is a cubic unit.";
+        }
 
         if (!apply)
         {
