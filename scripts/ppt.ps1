@@ -9,7 +9,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'slide', 'text', 'textbox', 'image', 'table', 'shape',
-                 'format', 'notes', 'view', 'render', 'snapshot', 'diff', 'save', 'close', 'quit', 'finish')]
+                 'format', 'theme', 'audit', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish')]
     [string]$Command,
 
     [string]$Doc,
@@ -44,6 +44,14 @@ param(
     [switch]$HeaderRow,
     [switch]$Clear,
     [switch]$Case,
+    [switch]$Overview,
+    [switch]$Apply,
+    [switch]$Reset,
+    [string]$Set,
+    [string]$Mode,
+    [string]$Shapes,
+    [string]$Where,
+    [int]$MinFont = 12,
     [switch]$Toast,
     [switch]$Sound,
     [switch]$Quiet,
@@ -271,6 +279,40 @@ switch ($Command) {
         if ($Slide -lt 1) { Write-Error-Json 'BAD_ARGS' 'view needs -Slide <n>' }
         $request['slide'] = $Slide
     }
+    'theme' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'theme needs -Doc' }
+        if ($Set) { $request['set'] = Resolve-FullPath $Set }
+        if ($Apply) { $request['apply'] = $true }
+        if ($Reset) { $request['reset'] = $true }
+    }
+    'audit' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'audit needs -Doc' }
+        if ($From -gt 1) { $request['from'] = $From }
+        if ($To -gt 0) { $request['to'] = $To }
+        if ($MinFont -ne 12) { $request['minFont'] = $MinFont }
+    }
+    'align' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'align needs -Doc' }
+        if ($Slide -lt 1) { Write-Error-Json 'BAD_ARGS' 'align needs -Slide <n>' }
+        if (-not $Mode) { Write-Error-Json 'BAD_ARGS' 'align needs -Mode left|right|top|bottom|center-h|same-width|same-height|distribute-h|distribute-v' }
+        $request['slide'] = $Slide
+        $request['mode'] = $Mode.ToLowerInvariant()
+        if ($Shapes) { $request['shapes'] = $Shapes }
+    }
+    'zorder' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'zorder needs -Doc' }
+        if ($Slide -lt 1) { Write-Error-Json 'BAD_ARGS' 'zorder needs -Slide <n>' }
+        if (-not $Name -and $ShapeIdx -lt 1) { Write-Error-Json 'BAD_ARGS' 'zorder needs -Name <shape> or -ShapeIdx <n>' }
+        $request['slide'] = $Slide
+        if ($Name) { $request['name'] = $Name }
+        if ($ShapeIdx -gt 0) { $request['shapeIdx'] = $ShapeIdx }
+        $request['where'] = if ($Where) { $Where.ToLowerInvariant() } else { 'front' }
+    }
+    'restore' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'restore needs -Doc' }
+        if ($Since) { $request['since'] = $Since } else { $request['since'] = 'last' }
+        if ($Shapes) { $request['shapes'] = $Shapes }
+    }
     'render' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'render needs -Doc' }
         if (-not $Out) { Write-Error-Json 'BAD_ARGS' 'render needs -Out <directory>' }
@@ -278,6 +320,7 @@ switch ($Command) {
         if ($To -gt 0) { $request['to'] = $To }
         $request['out'] = Resolve-FullPath $Out
         $request['width'] = if ($Width) { [int]$Width } else { 1100 }
+        if ($Overview) { $request['overview'] = $true }
     }
     'snapshot' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'snapshot needs -Doc' }

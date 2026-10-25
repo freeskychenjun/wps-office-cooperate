@@ -5,7 +5,9 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
-**版本 v1.1（2026-10-25）**：新增 **PPT（WPS 演示，`KWPP.Application`）** 支持——预设版式建页（封面/章节/要点/两栏/结束）、形状级锚定改文字、表格/图片/文本框、演讲备注、逐页渲染核对、文本快照对比。v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）合并而成。版本历史见 [reference/word-acceptance.md](reference/word-acceptance.md)、[reference/excel-acceptance.md](reference/excel-acceptance.md)。
+**版本 v1.2（2026-10-25）**：PPT 侧补齐"能交付"这一层——`theme`（主色/字体/页脚/页码，一套 JSON 打底）、预设版式重做（封面色带、章节页色块+大数字、真项目符号、**深色底自动白字**、正文框留白给表格/图片）、`render -Overview`（6 页拼一张图并带页码）、`audit`（文字溢出/字号过小/越界/重叠/图过小/空页机械体检）、`align`/`zorder`/`restore`。
+
+**版本 v1.1（2026-10-25）**：新增 **PPT（WPS 演示，`KWPP.Application`）** 支持——预设版式建页、形状级锚定改文字、表格/图片/文本框、演讲备注、逐页渲染核对、文本快照对比。v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）合并而成。版本历史见 [reference/word-acceptance.md](reference/word-acceptance.md)、[reference/excel-acceptance.md](reference/excel-acceptance.md)。
 
 **能力边界（一句话）**：只走 **WPS**（Word=Writer `KWPS.Application`，Excel=表格 `KET.Application`，PPT=演示 `KWPP.Application`，没装微软 Office 也照跑）。Word 侧所有文字改动都是**修订（track changes）**，用户能逐条接受/拒绝；Excel 与 PPT 侧改动**直写**，靠**锚点校验 + 快照**保证可核对（**这两个 app 的 Ctrl+Z 撤不回 Agent 的改动**，外部 COM 修改不进撤销栈）。
 
@@ -282,7 +284,12 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `format` | `-Slide N -Shape <名> `+ 格式项 | 改文字格式（字体/字号/加粗/斜体/颜色/对齐/填充），返回回读值 |
 | `notes` | `-Slide N (-Text\|-TextFile\|-Clear)` | 写/清演讲者备注 |
 | `view` | `-Slide N` | 把 WPS 窗口切到那一页（唯一"跟随"手段，不动内容） |
-| `render` | `-Doc [-From 1] [-To 4] -Out <目录> [-Width 1100]` | 逐页 EMF→PNG（**每次最多 4 页**，多了分批）；写盘者是 helper，**明文可看** |
+| `render` | `-Doc [-From 1] [-To 4] -Out <目录> [-Width 1100]`；**总览：`-Overview`（每次 ≤24 页，6 页拼一张并带页码）** | 逐页 EMF→PNG（**每次最多 4 页**）；写盘者是 helper，**明文可看**；`-Overview` 是"交付前过一遍全稿"的经济方式 |
+| `theme` | `-Set <json 文件>` / `-Apply` / `-Reset` / 不带选项=查看 | **整稿风格打底**：primary/accent/title/text/muted 五色 + font/titleFont + footer（页脚文字）+ pageNumber + skipFooterOnCover。`-Set` 存到该文稿主题文件（%LOCALAPPDATA%\wps-office-cooperate\ppt-themes），之后所有预设页自动跟随；`-Apply` 把已有页的字体/配色刷一遍并补页脚页码（**落在深色色块上的文字自动改白**） |
+| `audit` | `-Doc [-From/-To] [-MinFont 12]` | **机械体检**：文字溢出文本框、字号过小、形状越出页面、形状重叠（装饰色块除外）、图片 <20% 页宽、空页、无标题页。返回到 页/形状/类型/细节 |
+| `align` | `-Slide N -Mode left\|right\|top\|bottom\|center-h\|same-width\|same-height\|distribute-h\|distribute-v [-Shapes "a,b,c"]` | 对齐/等距分布/统一尺寸（`-Shapes` 省略=该页全部形状）；返回每个形状的最终几何 |
+| `zorder` | `-Slide N (-Name 名 \| -ShapeIdx n) [-Where front\|back]` | 置顶/置底（图片压字时用） |
+| `restore` | `-Doc [-Since 快照\|tag] [-Shapes "3!备注,4!title"]` | **文本级回滚**：把文字退回快照状态（版式/新增形状不还原）；改坏了先回滚再想别的 |
 | `snapshot` | `-Doc [-Tag 名]` | 存文本级快照（每页形状名+文字，默认存 %LOCALAPPDATA%\wps-office-cooperate\ppt-snapshots） |
 | `diff` | `-Doc [-Since 快照\|tag]` | 与快照比：哪页哪个形状的文字变了（before→after）、页增删 |
 | `save` | `-Doc [-As <路径>]` | 保存 / 另存（`.pdf` = 导出 PDF） |
@@ -305,13 +312,25 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - `expect` 可选但强烈建议：该形状当前文字必须**以它开头**，不符即整批拒绝。
 - 中途 COM 出错会按序回滚已改项（"rolled back N item(s)"）。
 
+### PPT 视觉自检闭环（**默认必须走**）
+
+生成/改完 PPT 后的收尾动作，顺序固定：
+
+1. **`audit -Doc`** —— 机械筛查（溢出/字号/越界/重叠/空页），便宜且确定性高；有 issue 先修。
+2. **`render -Overview -Out <目录>`** —— 每 6 页拼一张图，**逐张看**：标题层级是否统一、色块对不齐、要点与表格图挤在一起、半空页。
+3. 对可疑页 **`render -From N -To M`** 单页放大确认。
+4. 修（`text` / `align` / `table` / `theme -Apply`）→ **再 `render` 确认** → 才 `save`。
+
+**能力不同时的降级**：当前模型能读图 → 第 2 步必须真看（`read_image`）；读不了图（某些模型不声明图像输入）→ 只能依赖 `audit` 并把 `render` 的结果路径交给用户看，**不要**声称"已核对版式"。
+
 ### PPT 典型工作流
 
-1. **新建汇报稿**：`status` → `open -Doc 新路径 -Show`（自动建空稿）→ `slide -Preset title ...`（封面）→ `slide -Preset bullets -Items 提纲.json`（目录页，用 `-Items` 传要点数组）→ 逐节 `slide -Preset section -Number 01`。
-2. **填充内容页**：`slide -Preset bullets` 打骨架 → `table -Data 表.json` 放数据 → `image -Path 图.png` 放图 → **每页 `render` 目检**（文字溢出/表格超界只有图能看出来）。
+1. **新建汇报稿**：`status` → `open -Doc 新路径 -Show`（自动建空稿）→ 可选 `theme -Set 主题.json`（一次定型：主色/字体/页脚）→ `slide -Preset title ...`（封面）→ `slide -Preset bullets -Items 提纲.json`（目录页）→ 逐节 `slide -Preset section -Number 01`。
+2. **填充内容页**：`slide -Preset bullets` 打骨架（正文占 25%–75%，下方留给表格/图）→ `table -Data 表.json`（默认 90% 页宽、y=62%）→ `image -Path 图.png` → 每页 `render` 目检。
 3. **改已有稿**：`read` 拿形状名 → `text -Items`（带 expect）批量改 → 比对 textAfter → `render` 抽查。
-4. **人机接力**：`snapshot -Tag r1` → 干活 → `diff -Since r1` 看人改了什么 → 继续。
-5. **收尾**：`save`（提醒落盘可能是密文）→ `close`（汇报 wpp 数）→ `finish`。
+4. **收拾版式**：`align` 对齐/等距、`zorder` 修压字、`audit` 兜底。
+5. **人机接力**：`snapshot -Tag r1` → 干活 → `diff -Since r1` 看人改了什么；改坏 `restore -Since r1`。
+6. **收尾**：`theme -Apply`（统一配色页脚）→ `audit` → `render -Overview` **看一眼** → `save`（提醒落盘可能是密文）→ `close`（汇报 wpp 数）→ `finish`。
 
 ## PPT 故障排查
 

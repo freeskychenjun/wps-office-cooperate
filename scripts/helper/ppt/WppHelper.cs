@@ -379,6 +379,11 @@ internal static class Program
             case "shape": return ShapeCmd(a);
             case "format": return FormatCmd(a);
             case "notes": return NotesCmd(a);
+            case "theme": return ThemeCmd(a);
+            case "audit": return AuditCmd(a);
+            case "align": return AlignCmd(a);
+            case "zorder": return ZorderCmd(a);
+            case "restore": return RestoreCmd(a);
             case "view": return ViewCmd(a);
             case "render": return RenderPres(a);
             case "snapshot": return SnapshotPres(a);
@@ -387,7 +392,7 @@ internal static class Program
             case "close": return ClosePres(a);
             case "quit": return QuitAll(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|slide|text|textbox|image|table|shape|format|notes|view|render|snapshot|diff|save|close|quit|finish");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|slide|text|textbox|image|table|shape|format|theme|audit|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish");
         }
     }
 
@@ -403,6 +408,26 @@ internal static class Program
     {
         try { return f(); }
         catch (Exception) { return fallback; }
+    }
+
+    /// <summary>WPS answers RPC_E_CALL_REJECTED while it is busy (a dialog, a repaint, a
+    /// just-created window). Retrying briefly is what a human would do, and it turns a
+    /// mysterious failure into a slightly slower success.</summary>
+    private static T ComRetry<T>(Func<T> action)
+    {
+        Exception last = null;
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try { return action(); }
+            catch (COMException e)
+            {
+                last = e;
+                bool busy = e.HResult == unchecked((int)0x80010001) || e.HResult == unchecked((int)0x8001010A);
+                if (!busy) throw;
+            }
+            Thread.Sleep(400 + attempt * 300);
+        }
+        throw last;
     }
 
     private static bool Installed(string progId)
@@ -536,16 +561,20 @@ internal static class Program
             // PowerPoint's most common task is a NEW deck: opening a missing path creates one
             // (unnamed in memory; the first save -As/<path> gives it that identity).
             app = App(true, show);
-            try { p = app.Presentations.Add(show ? -1 : 0); }
+            try { p = ComRetry(() => app.Presentations.Add(show ? -1 : 0)); }
             catch (Exception e) { throw new Fail("COM_ERROR", "could not create a new presentation: " + Clean(e.Message)); }
             // Save immediately: an unnamed deck has FullName "演示文稿N" and could never be
             // found again by later commands (each command is a fresh helper process).
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(full));
-                p.SaveAs(full, 24); // ppSaveAsOpenXMLPresentation
+                ComRetry(() => { p.SaveAs(full, 24); return 0; }); // ppSaveAsOpenXMLPresentation
             }
-            catch (Exception e) { throw new Fail("COM_ERROR", "created the deck but could not save it to " + full + ": " + Clean(e.Message)); }
+            catch (Exception e)
+            {
+                try { p.Close(); } catch (Exception) { }
+                throw new Fail("COM_ERROR", "created the deck but could not save it to " + full + ": " + Clean(e.Message));
+            }
             return p;
         }
         app = App(true, show);
@@ -650,8 +679,113 @@ internal static class Program
         return null;
     }
 
+    // ------------------------------------------------------------ theme
+    // A deck keeps its own theme (colours / fonts / footer) between commands: every
+    // command is a fresh helper process, so the theme lives in a small JSON file keyed
+    // by the deck path rather than in memory.
+
+    private sealed class DeckTheme
+    {
+        public int Primary = ColorOf("#1F4E79", 0);          // 主色：水利深蓝
+        public int Accent = ColorOf("#C99700", 0);           // 强调色：金
+        public int Title = ColorOf("#1F4E79", 0);            // 标题色
+        public int Text = ColorOf("#333333", 0);             // 正文色
+        public int Muted = ColorOf("#808080", 0);            // 页脚/次要
+        public int White = ColorOf("#FFFFFF", 0);
+        public string Font = "\u5fae\u8f6f\u96c5\u9ed1";         // 微软雅黑
+        public string TitleFont = "\u5fae\u8f6f\u96c5\u9ed1";
+        public string Footer = "";
+        public bool PageNumber = true;
+        public bool SkipFooterOnCover = true;
+
+        public static DeckTheme Load(dynamic pres)
+        {
+            DeckTheme t = new DeckTheme();
+            string path = ThemePath(pres);
+            if (!File.Exists(path)) return t;
+            try
+            {
+                Bag b = new Bag(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
+                return FromBag(b, t);
+            }
+            catch (Exception) { return t; }
+        }
+
+        public static DeckTheme FromBag(Bag b, DeckTheme fallback)
+        {
+            DeckTheme t = new DeckTheme();
+            if (fallback != null) t = fallback;
+            if (b.Has("primary")) t.Primary = ColorOf(b.Str("primary", null), t.Primary);
+            if (b.Has("accent")) t.Accent = ColorOf(b.Str("accent", null), t.Accent);
+            if (b.Has("title")) t.Title = ColorOf(b.Str("title", null), t.Title);
+            if (b.Has("text")) t.Text = ColorOf(b.Str("text", null), t.Text);
+            if (b.Has("muted")) t.Muted = ColorOf(b.Str("muted", null), t.Muted);
+            if (b.Has("font")) t.Font = b.Str("font", t.Font);
+            if (b.Has("titleFont")) t.TitleFont = b.Str("titleFont", t.TitleFont);
+            if (b.Has("footer")) t.Footer = b.Str("footer", t.Footer);
+            if (b.Has("pageNumber")) t.PageNumber = b.Flag("pageNumber", t.PageNumber);
+            if (b.Has("skipFooterOnCover")) t.SkipFooterOnCover = b.Flag("skipFooterOnCover", t.SkipFooterOnCover);
+            return t;
+        }
+
+        public Dictionary<string, object> ToBag()
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["primary"] = Hex(Primary);
+            d["accent"] = Hex(Accent);
+            d["title"] = Hex(Title);
+            d["text"] = Hex(Text);
+            d["muted"] = Hex(Muted);
+            d["font"] = Font;
+            d["titleFont"] = TitleFont;
+            d["footer"] = Footer;
+            d["pageNumber"] = PageNumber;
+            d["skipFooterOnCover"] = SkipFooterOnCover;
+            return d;
+        }
+
+        public static string Hex(int ole)
+        {
+            int r = ole & 0xFF, g = (ole >> 8) & 0xFF, b = (ole >> 16) & 0xFF;
+            return "#" + r.ToString("X2", CultureInfo.InvariantCulture) + g.ToString("X2", CultureInfo.InvariantCulture) + b.ToString("X2", CultureInfo.InvariantCulture);
+        }
+    }
+
+    private static string ThemeDir()
+    {
+        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "wps-office-cooperate", "ppt-themes");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static string Sha16(string s)
+    {
+        using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+        {
+            byte[] h = sha.ComputeHash(Encoding.UTF8.GetBytes(s));
+            StringBuilder sb = new StringBuilder();
+            for (int k = 0; k < 8; k++) sb.Append(h[k].ToString("x2", CultureInfo.InvariantCulture));
+            return sb.ToString();
+        }
+    }
+
+    private static string DeckIdentity(dynamic pres)
+    {
+        string full = Convert.ToString(TryGet(() => (object)pres.FullName, ""), CultureInfo.InvariantCulture);
+        if (full == null || full.Length == 0)
+            full = Convert.ToString(TryGet(() => (object)pres.Name, "deck"), CultureInfo.InvariantCulture);
+        return full.ToLowerInvariant();
+    }
+
+    private static string ThemePath(dynamic pres)
+    {
+        return Path.Combine(ThemeDir(), Sha16(DeckIdentity(pres)) + ".json");
+    }
+
+
     // ------------------------------------------------------------ colors / text options
 
+    /// <summary>Parse "#RRGGBB" into an OLE colour (0x00BBGGRR: red in the LOW byte).</summary>
     private static int ColorOf(string spec, int fallback)
     {
         if (spec == null) return fallback;
@@ -661,7 +795,7 @@ internal static class Program
             int r = int.Parse(s.Substring(0, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
             int g = int.Parse(s.Substring(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
             int b = int.Parse(s.Substring(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
-            return (r << 16) | (g << 8) | b;   // OLE color: 0x00BBGGRR
+            return (b << 16) | (g << 8) | r;   // OLE color = 0x00BBGGRR
         }
         return fallback;
     }
@@ -960,65 +1094,155 @@ internal static class Program
     private static string BuildPreset(dynamic pres, dynamic slide, Bag a, out List<string> problems)
     {
         problems = new List<string>();
+        List<string> notes = problems;   // C#5: an out parameter cannot be captured by a lambda
         string preset = a.Str("preset", "").ToLowerInvariant();
+        DeckTheme th = DeckTheme.Load(pres);
         double W = Convert.ToDouble(TryGet(() => (object)pres.PageSetup.SlideWidth, (object)960.0), CultureInfo.InvariantCulture);
         double H = Convert.ToDouble(TryGet(() => (object)pres.PageSetup.SlideHeight, (object)540.0), CultureInfo.InvariantCulture);
         string title = a.Str("title", "");
         if (preset != "end" && title.Length == 0) throw new Fail("BAD_ARGS", "presets need -Title (except end)");
 
-        Action<double, double, double, double, string, float, int, string, string> box =
-            delegate(double l, double t, double w, double h, string text, float size, int bold, string align, string boxName)
+        // colour block / rule
+        Action<double, double, double, double, int, string> bar =
+            delegate(double l, double t, double w, double h, int fill, string barName)
+        {
+            dynamic shp = slide.Shapes.AddShape(1, (float)l, (float)t, (float)w, (float)h);  // msoShapeRectangle
+            try { shp.Fill.Solid(); shp.Fill.ForeColor.RGB = fill; } catch (Exception) { }
+            try { shp.Line.Visible = 0; } catch (Exception) { }
+            if (barName != null) { try { shp.Name = barName; } catch (Exception) { } }
+        };
+
+        // text box: geometry, text, size, bold(-1/0), align, colour, font overrides, bullets
+        Action<double, double, double, double, string, float, int, string, int, string, string, bool> box =
+            delegate(double l, double t, double w, double h, string text, float size, int bold, string align, int color, string boxName, string fontName, bool bulleted)
         {
             if (text == null || text.Length == 0) return;
             dynamic tb = slide.Shapes.AddTextbox(1, (float)l, (float)t, (float)w, (float)h);
             if (boxName != null) { try { tb.Name = boxName; } catch (Exception) { } }
             dynamic tr = tb.TextFrame.TextRange;
-            tr.Text = text.Replace("\\n", "\n");
-            try { tr.Font.Size = size; tr.Font.Bold = bold; } catch (Exception) { }
+            // \r = a real paragraph mark (a \n stays an in-paragraph line break in WPS, which
+            // would give the whole block a single bullet); bullets therefore need \r.
+            tr.Text = bulleted ? text.Replace("\\n", "\r").Replace("\n", "\r") : text.Replace("\\n", "\n");
+            size = AutoFitSize(text, size, w, h);   // shrink instead of overflowing
+            try
+            {
+                tr.Font.Size = size;
+                tr.Font.Bold = bold;
+                tr.Font.Color.RGB = color;
+                string fn = fontName != null ? fontName : th.Font;
+                tr.Font.Name = fn;
+                tr.Font.NameFarEast = fn;
+            }
+            catch (Exception) { }
             int al = align == "center" ? 2 : align == "right" ? 3 : 1;
             try { tr.ParagraphFormat.Alignment = al; } catch (Exception) { }
             try { tb.TextFrame.WordWrap = -1; } catch (Exception) { }
+            if (bulleted)
+            {
+                try
+                {
+                    // per paragraph: setting ParagraphFormat once only reached the first one
+                    int pc = (int)tr.Paragraphs().Count;
+                    for (int pi = 1; pi <= pc; pi++)
+                    {
+                        dynamic pf = tr.Paragraphs(pi).ParagraphFormat;
+                        pf.Bullet.Visible = -1;
+                        pf.Bullet.Type = 1;          // ppBulletUnnumbered
+                        pf.Bullet.Character = 8226;   // bullet dot
+                        pf.Bullet.RelativeSize = 0.9;
+                        try { pf.SpaceWithin = 1.25f; } catch (Exception) { }
+                        try { pf.SpaceAfter = 10f; } catch (Exception) { }
+                    }
+                }
+                catch (Exception) { notes.Add("bullet formatting not accepted by this WPS build; text was written without bullets"); }
+            }
         };
+
+        List<object> items = a.List("items");
+        StringBuilder lines = new StringBuilder();
+        foreach (object it in items)
+        {
+            if (it is string) { lines.Append((string)it); }
+            else
+            {
+                Bag ib = null;
+                try { ib = new Bag(it); }
+                catch (Exception) { }
+                if (ib != null) lines.Append(ib.Str("text", ""));
+                else lines.Append(Convert.ToString(it, CultureInfo.InvariantCulture));
+            }
+            lines.Append("\n");
+        }
+        string bodyText = lines.ToString().TrimEnd('\n');
+        string subtitle = a.Str("subtitle", null);
+        string number = a.Str("number", null);
 
         if (preset == "title")
         {
-            box(W * 0.1, H * 0.28, W * 0.8, H * 0.3, title, 40, -1, "center", "title");
-            box(W * 0.1, H * 0.62, W * 0.8, H * 0.15, a.Str("subtitle", null), 18, 0, "center", "subtitle");
+            bar(0, H * 0.74, W, H * 0.26, th.Primary, "coverBand");
+            box(W * 0.08, H * 0.26, W * 0.84, H * 0.26, title, 40, -1, "center", th.Title, "title", th.TitleFont, false);
+            bar(W * 0.42, H * 0.545, W * 0.16, 5, th.Accent, "accentLine");
+            box(W * 0.08, H * 0.77, W * 0.84, H * 0.18, subtitle, 20, 0, "center", th.White, "subtitle", th.Font, false);
             return "title";
         }
         if (preset == "section")
         {
-            string num = a.Str("number", null);
-            if (num != null) box(W * 0.1, H * 0.30, W * 0.8, H * 0.2, num, 28, 0, "center", "number");
-            box(W * 0.1, num != null ? H * 0.44 : H * 0.36, W * 0.8, H * 0.25, title, 36, -1, "center", "sectionTitle");
+            bar(0, 0, W * 0.30, H, th.Primary, "sectionBand");
+            box(0, H * 0.34, W * 0.30, H * 0.22, number, 54, -1, "center", th.White, "number", th.TitleFont, false);
+            box(W * 0.38, H * 0.40, W * 0.56, H * 0.18, title, 36, -1, "left", th.Title, "sectionTitle", th.TitleFont, false);
+            bar(W * 0.38, H * 0.605, W * 0.10, 5, th.Accent, "accentLine");
             return "section";
         }
         if (preset == "bullets")
         {
-            box(W * 0.06, H * 0.06, W * 0.88, H * 0.14, title, 30, -1, "left", "title");
-            StringBuilder sb = new StringBuilder();
-            foreach (object item in a.List("items")) sb.Append(Convert.ToString(item, CultureInfo.InvariantCulture)).Append("\n");
-            box(W * 0.08, H * 0.24, W * 0.84, H * 0.68, sb.ToString().TrimEnd('\n'), 20, 0, "left", "body");
+            box(W * 0.06, H * 0.055, W * 0.88, H * 0.13, title, 30, -1, "left", th.Title, "title", th.TitleFont, false);
+            bar(W * 0.06, H * 0.195, W * 0.09, 5, th.Accent, "accentLine");
+            // body stops at 78% so a table or a picture can still go underneath without collisions
+            box(W * 0.08, H * 0.25, W * 0.84, H * 0.50, bodyText, 20, 0, "left", th.Text, "body", th.Font, true);
             return "bullets";
         }
         if (preset == "two")
         {
-            box(W * 0.06, H * 0.06, W * 0.88, H * 0.14, title, 30, -1, "left", "title");
-            List<object> items = a.List("items");
-            string left = items.Count > 0 ? Convert.ToString(items[0], CultureInfo.InvariantCulture) : "";
-            string right = items.Count > 1 ? Convert.ToString(items[1], CultureInfo.InvariantCulture) : "";
-            box(W * 0.05, H * 0.24, W * 0.42, H * 0.68, left, 18, 0, "left", "left");
-            box(W * 0.53, H * 0.24, W * 0.42, H * 0.68, right, 18, 0, "left", "right");
+            box(W * 0.06, H * 0.055, W * 0.88, H * 0.13, title, 30, -1, "left", th.Title, "title", th.TitleFont, false);
+            bar(W * 0.06, H * 0.195, W * 0.09, 5, th.Accent, "accentLine");
+            string leftText = items.Count > 0 ? Convert.ToString(items[0], CultureInfo.InvariantCulture) : "";
+            string rightText = items.Count > 1 ? Convert.ToString(items[1], CultureInfo.InvariantCulture) : "";
+            box(W * 0.05, H * 0.26, W * 0.42, H * 0.62, leftText, 18, 0, "left", th.Text, "left", th.Font, true);
+            bar(W * 0.495, H * 0.28, 2, H * 0.56, th.Muted, "divider");
+            box(W * 0.53, H * 0.26, W * 0.42, H * 0.62, rightText, 18, 0, "left", th.Text, "right", th.Font, true);
             return "two";
         }
         if (preset == "end")
         {
-            box(W * 0.1, H * 0.36, W * 0.8, H * 0.25, a.Str("title", "\u8c22\u8c22"), 40, -1, "center", "title");
-            box(W * 0.1, H * 0.62, W * 0.8, H * 0.15, a.Str("subtitle", null), 18, 0, "center", "subtitle");
+            bar(0, 0, W, H, th.Primary, "endBackground");
+            box(W * 0.08, H * 0.34, W * 0.84, H * 0.22, a.Str("title", "\u8c22\u8c22"), 40, -1, "center", th.White, "title", th.TitleFont, false);
+            bar(W * 0.42, H * 0.60, W * 0.16, 5, th.Accent, "accentLine");
+            box(W * 0.08, H * 0.66, W * 0.84, H * 0.14, subtitle, 18, 0, "center", th.White, "subtitle", th.Font, false);
             return "end";
         }
         throw new Fail("BAD_ARGS", "unknown preset \"" + preset + "\"; use title|section|bullets|two|end (or -Layout <n> for a raw PowerPoint layout)");
     }
+
+    /// <summary>Rough Chinese-text capacity check: shrink the font instead of letting text spill
+    /// out of its box (a spilled box is the most common defect in generated decks).</summary>
+    private static float AutoFitSize(string text, float size, double w, double h)
+    {
+        if (text == null || text.Length == 0 || w <= 0 || h <= 0) return size;
+        // CJK glyph ≈ 1.0 em wide, Latin ≈ 0.55 em; line height ≈ 1.3 em
+        double em = 0;
+        foreach (char c in text)
+        {
+            if (c == '\n' || c == '\r') continue;
+            em += c > 0x2E80 ? 1.0 : 0.55;
+        }
+        double perLine = Math.Max(1.0, w / size);
+        double lineCount = Math.Ceiling(em / perLine);
+        double needed = lineCount * size * 1.35;
+        if (needed <= h) return size;
+        float shrunk = (float)Math.Floor(size * (h / needed) * 10) / 10f;
+        return Math.Max(9f, shrunk);
+    }
+
 
     // ------------------------------------------------------------ text batch (anchor-checked, atomic)
 
@@ -1209,7 +1433,8 @@ internal static class Program
 
         double W = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideWidth, (object)960.0), CultureInfo.InvariantCulture);
         double H = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideHeight, (object)540.0), CultureInfo.InvariantCulture);
-        double l = a.Dbl("l", W * 0.08), t = a.Dbl("t", H * 0.25), w = a.Dbl("w", W * 0.84), h = a.Dbl("h", Math.Min(H * 0.6, 36 * rows.Count));
+        string deckFont = DeckTheme.Load(p).Font;
+        double l = a.Dbl("l", W * 0.05), t = a.Dbl("t", H * 0.62), w = a.Dbl("w", W * 0.90), h = a.Dbl("h", Math.Min(H * 0.32, 34 * rows.Count));
         dynamic table = slide.Shapes.AddTable(rows.Count, cols, (float)l, (float)t, (float)w, (float)h).Table;
         for (int ri = 0; ri < rows.Count; ri++)
         {
@@ -1218,12 +1443,21 @@ internal static class Program
             {
                 dynamic cell = table.Cell(ri + 1, ci + 1);
                 string v = row[ci] == null ? "" : Convert.ToString(row[ci], CultureInfo.InvariantCulture);
-                cell.Shape.TextFrame.TextRange.Text = v.Replace("\\n", "\n");
-                if (ri == 0 && a.Flag("headerRow", true))
+                dynamic cr = cell.Shape.TextFrame.TextRange;
+                cr.Text = v.Replace("\\n", "\n");
+                bool header = ri == 0 && a.Flag("headerRow", true);
+                try { cr.Font.Size = (float)a.Dbl("size", header ? 15 : 13); } catch (Exception) { }
+                try
                 {
-                    try { cell.Shape.TextFrame.TextRange.Font.Bold = -1; } catch (Exception) { }
+                    cr.Font.Name = deckFont;
+                    cr.Font.NameFarEast = deckFont;
                 }
-                try { cell.Shape.TextFrame.TextRange.Font.Size = (float)a.Dbl("size", 14); } catch (Exception) { }
+                catch (Exception) { }
+                if (header)
+                {
+                    try { cr.Font.Bold = -1; } catch (Exception) { }
+                    try { cr.Font.Color.RGB = ColorOf("#FFFFFF", 0); } catch (Exception) { }
+                }
             }
         }
         string name = Convert.ToString(TryGet(() => (object)table.Parent.Name, ""), CultureInfo.InvariantCulture);
@@ -1352,8 +1586,10 @@ internal static class Program
         int to = a.Int("to", 0);
         if (to <= 0 || to > n) to = n;
         if (from > to) throw new Fail("BAD_ARGS", "-From " + from + " > last slide " + to);
-        if (to - from + 1 > 4) throw new Fail("BAD_ARGS", "render at most 4 slides per call (got " + (to - from + 1) + "); page through with -From/-To");
+        bool overview = a.Flag("overview", false);
         int width = a.Int("width", 1100);
+        if (overview) return RenderOverview(p, outDir, from, to, width);
+        if (to - from + 1 > 4) throw new Fail("BAD_ARGS", "render at most 4 slides per call (got " + (to - from + 1) + "); use -Overview to see many slides at once, or page through with -From/-To");
 
         List<object> files = new List<object>();
         for (int k = from; k <= to; k++)
@@ -1361,9 +1597,12 @@ internal static class Program
             dynamic slide = p.Slides.Item(k);
             slide.Copy();
             Thread.Sleep(250);
-            string png = Path.Combine(outDir, "slide-" + k.ToString(CultureInfo.InvariantCulture) + ".png");
-            if (!SaveClipboardImage(png, width))
+            Bitmap bmp = ClipboardBitmap(width);
+            if (bmp == null)
                 throw new Fail("COM_ERROR", "could not get slide " + k + " as an image from the clipboard (is WPS showing a dialog?)");
+            string png = Path.Combine(outDir, "slide-" + k.ToString(CultureInfo.InvariantCulture) + ".png");
+            bmp.Save(png, ImageFormat.Png);
+            bmp.Dispose();
             files.Add(png);
         }
         Dictionary<string, object> r = new Dictionary<string, object>();
@@ -1372,15 +1611,74 @@ internal static class Program
         return r;
     }
 
-    [STAThread]
-    private static bool SaveClipboardImage(string pngPath, int targetWidth)
+    /// <summary>Render up to 24 slides as 2x3 contact sheets with page numbers.</summary>
+    private static object RenderOverview(dynamic p, string outDir, int from, int to, int width)
+    {
+        if (to - from + 1 > 24) throw new Fail("BAD_ARGS", "overview covers at most 24 slides per call; page through with -From/-To");
+        int cellW = Math.Max(320, Math.Min(720, width / 2));
+        List<object> sheets = new List<object>();
+        const int perSheet = 6;
+        for (int start = from; start <= to; start += perSheet)
+        {
+            int end = Math.Min(to, start + perSheet - 1);
+            List<int> indexes = new List<int>();
+            List<Bitmap> cells = new List<Bitmap>();
+            double ratio = 0.5625;
+            for (int k = start; k <= end; k++)
+            {
+                dynamic slide = p.Slides.Item(k);
+                slide.Copy();
+                Thread.Sleep(220);
+                Bitmap bmp = ClipboardBitmap(cellW);
+                if (bmp == null) throw new Fail("COM_ERROR", "could not get slide " + k + " as an image from the clipboard");
+                cells.Add(bmp);
+                indexes.Add(k);
+                ratio = (double)bmp.Width / bmp.Height;
+            }
+            int cellH = (int)Math.Round(cellW / ratio);
+            int pad = 18, label = 26, cols = 2;
+            int rows = (cells.Count + cols - 1) / cols;
+            int sheetW = cols * cellW + (cols + 1) * pad;
+            int sheetH = rows * (cellH + label) + (rows + 1) * pad;
+            string path = Path.Combine(outDir, "overview-" + start.ToString(CultureInfo.InvariantCulture) + "-" + end.ToString(CultureInfo.InvariantCulture) + ".png");
+            using (Bitmap sheet = new Bitmap(sheetW, sheetH))
+            using (Graphics g = Graphics.FromImage(sheet))
+            using (Font f = new Font("\u5fae\u8f6f\u96c5\u9ed1", 12f))
+            using (SolidBrush txt = new SolidBrush(Color.FromArgb(60, 60, 60)))
+            using (Pen border = new Pen(Color.FromArgb(205, 205, 205)))
+            {
+                g.Clear(Color.FromArgb(246, 246, 246));
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                for (int k = 0; k < cells.Count; k++)
+                {
+                    int col = k % cols, row = k / cols;
+                    int x = pad + col * (cellW + pad);
+                    int y = pad + row * (cellH + label + pad);
+                    g.DrawString("\u7b2c " + indexes[k] + " \u9875", f, txt, x, y);
+                    g.DrawImage(cells[k], x, y + label, cellW, cellH);
+                    g.DrawRectangle(border, x, y + label, cellW, cellH);
+                }
+                sheet.Save(path, ImageFormat.Png);
+            }
+            foreach (Bitmap b in cells) b.Dispose();
+            sheets.Add(path);
+        }
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["overview"] = sheets;
+        r["slides"] = to - from + 1;
+        r["note"] = "one image per 6 slides with page numbers; check overflow, misalignment and empty areas before saving";
+        return r;
+    }
+
+    /// <summary>Bitmap of the slide currently on the clipboard (EMF preferred).</summary>
+    private static Bitmap ClipboardBitmap(int targetWidth)
     {
         for (int attempt = 0; attempt < 6; attempt++)
         {
-            Image result = null;
-            // EMF via raw Win32: Clipboard.GetData("EnhancedMetafile") crashes some
-            // hosts (access violation observed on this machine family when WPS holds
-            // the source); GetClipboardData + CopyEnhMetaFile is the safe route.
+            Bitmap result = null;
+            // EMF via raw Win32: Clipboard.GetData("EnhancedMetafile") crashes some hosts
+            // (access violation observed on this machine family when WPS holds the source);
+            // GetClipboardData + CopyEnhMetaFile is the safe route.
             try
             {
                 if (OpenClipboard(IntPtr.Zero))
@@ -1418,7 +1716,6 @@ internal static class Program
                 }
             }
             catch (Exception) { if (result != null) { result.Dispose(); result = null; } }
-            // fallback: bitmap format on the clipboard (lower resolution, always works)
             if (result == null)
             {
                 try
@@ -1443,21 +1740,11 @@ internal static class Program
                 }
                 catch (Exception) { }
             }
-            if (result != null)
-            {
-                try
-                {
-                    result.Save(pngPath, ImageFormat.Png);
-                    result.Dispose();
-                    return true;
-                }
-                catch (Exception) { result.Dispose(); }
-            }
+            if (result != null) return result;
             Thread.Sleep(200);
         }
-        return false;
+        return null;
     }
-
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool OpenClipboard(IntPtr hWndNewOwner);
     [DllImport("user32.dll")]
@@ -1470,6 +1757,514 @@ internal static class Program
     private static extern IntPtr CopyEnhMetaFile(IntPtr hemfSrc, IntPtr lpszFile);
     [DllImport("gdi32.dll")]
     private static extern bool DeleteEnhMetaFile(IntPtr hemf);
+
+    // ------------------------------------------------------------ theme command
+
+    private static object ThemeCmd(Bag a)
+    {
+        dynamic p = RequirePres(a, true);
+        string path = ThemePath(p);
+        bool reset = a.Flag("reset", false);
+        string setPath = a.Str("set", null);
+
+        if (reset)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return new Dictionary<string, object> { { "reset", true }, { "theme", DeckTheme.Load(p).ToBag() } };
+        }
+        if (setPath != null)
+        {
+            if (!File.Exists(setPath)) throw new Fail("BAD_ARGS", "theme file not found: " + setPath);
+            Bag b = new Bag(Json.Parse(File.ReadAllText(setPath, Encoding.UTF8)));
+            DeckTheme t = DeckTheme.FromBag(b, new DeckTheme());
+            File.WriteAllText(path, Json.Write(t.ToBag()), new UTF8Encoding(false));
+            Dictionary<string, object> r = new Dictionary<string, object>();
+            r["set"] = path;
+            r["theme"] = t.ToBag();
+            if (a.Flag("apply", false)) r["applied"] = ApplyThemeAll(p, t);
+            return r;
+        }
+        if (a.Flag("apply", false))
+        {
+            DeckTheme t = DeckTheme.Load(p);
+            Dictionary<string, object> r = new Dictionary<string, object>();
+            r["theme"] = t.ToBag();
+            r["applied"] = ApplyThemeAll(p, t);
+            return r;
+        }
+        return new Dictionary<string, object> {
+            { "path", path },
+            { "theme", DeckTheme.Load(p).ToBag() },
+            { "note", "theme is per deck; set it with -Set <json>, restyle existing slides with -Apply. Defaults: \u6c34\u5229\u6df1\u84dd #1F4E79 + \u91d1 #C99700 + \u5fae\u8f6f\u96c5\u9ed1" }
+        };
+    }
+
+    private static object ApplyThemeAll(dynamic p, DeckTheme th)
+    {
+        int n = 0;
+        try { n = (int)p.Slides.Count; }
+        catch (Exception) { }
+        int styled = 0, footers = 0;
+        for (int k = 1; k <= n; k++)
+        {
+            dynamic s = p.Slides.Item(k);
+            styled += ApplyThemeToSlide(s, th, k);
+            footers += AddFooter(s, th, k, k == 1);
+        }
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["slides"] = n;
+        r["restyledShapes"] = styled;
+        r["footers"] = footers;
+        return r;
+    }
+
+    /// <summary>Dark colour blocks on a slide (the presets' bands). Text sitting on one of
+    /// them must be white, otherwise a theme pass turns an end-slide title invisible.</summary>
+    private static List<double[]> DarkRects(dynamic slide)
+    {
+        List<double[]> list = new List<double[]>();
+        int count = 0;
+        try { count = (int)slide.Shapes.Count; }
+        catch (Exception) { }
+        for (int k = 1; k <= count; k++)
+        {
+            dynamic sh = null;
+            try { sh = slide.Shapes.Item(k); }
+            catch (Exception) { continue; }
+            string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+            if (!IsDecoration(name) || name.ToLowerInvariant() == "accentline" || name.ToLowerInvariant() == "divider") continue;
+            double l = Convert.ToDouble(TryGet(() => (object)sh.Left, (object)0.0), CultureInfo.InvariantCulture);
+            double t = Convert.ToDouble(TryGet(() => (object)sh.Top, (object)0.0), CultureInfo.InvariantCulture);
+            double w = Convert.ToDouble(TryGet(() => (object)sh.Width, (object)0.0), CultureInfo.InvariantCulture);
+            double h = Convert.ToDouble(TryGet(() => (object)sh.Height, (object)0.0), CultureInfo.InvariantCulture);
+            if (w > 0 && h > 0) list.Add(new double[] { l, t, w, h });
+        }
+        return list;
+    }
+
+    private static bool OverDark(List<double[]> rects, double cx, double cy)
+    {
+        foreach (double[] r in rects)
+            if (cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3]) return true;
+        return false;
+    }
+
+    /// <summary>Re-colour and re-font the text shapes of one slide according to the theme.</summary>
+    private static int ApplyThemeToSlide(dynamic slide, DeckTheme th, int index)
+    {
+        int count = 0, done = 0;
+        try { count = (int)slide.Shapes.Count; }
+        catch (Exception) { }
+        List<double[]> darks = DarkRects(slide);
+        for (int k = 1; k <= count; k++)
+        {
+            dynamic sh = null;
+            try { sh = slide.Shapes.Item(k); }
+            catch (Exception) { continue; }
+            string text = ShapeText(sh);
+            if (text.Length == 0) continue;
+            string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+            if (IsDecoration(name)) continue;
+            bool isTitle = name == "title" || name == "sectionTitle" || name == "number";
+            bool isSub = name == "subtitle" || name == "footer" || name == "pageNo";
+            if (!isTitle && !isSub)
+            {
+                double sz = Convert.ToDouble(TryGet(() => (object)sh.TextFrame.TextRange.Font.Size, (object)0.0), CultureInfo.InvariantCulture);
+                isTitle = sz >= 26;
+            }
+            double l = Convert.ToDouble(TryGet(() => (object)sh.Left, (object)0.0), CultureInfo.InvariantCulture);
+            double t = Convert.ToDouble(TryGet(() => (object)sh.Top, (object)0.0), CultureInfo.InvariantCulture);
+            double w = Convert.ToDouble(TryGet(() => (object)sh.Width, (object)0.0), CultureInfo.InvariantCulture);
+            double h = Convert.ToDouble(TryGet(() => (object)sh.Height, (object)0.0), CultureInfo.InvariantCulture);
+            bool dark = OverDark(darks, l + w / 2, t + h / 2);
+            try
+            {
+                dynamic tr = sh.TextFrame.TextRange;
+                string font = isTitle ? th.TitleFont : th.Font;
+                tr.Font.Name = font;
+                tr.Font.NameFarEast = font;
+                if (dark) tr.Font.Color.RGB = th.White;
+                else if (isSub) tr.Font.Color.RGB = th.Muted;
+                else if (isTitle) tr.Font.Color.RGB = th.Title;
+                else tr.Font.Color.RGB = th.Text;
+                done++;
+            }
+            catch (Exception) { }
+        }
+        return done;
+    }
+
+    /// <summary>Bottom footer line + page number (skipped on the cover when the theme says so).</summary>
+    private static int AddFooter(dynamic slide, DeckTheme th, int index, bool isCover)
+    {
+        if (isCover && th.SkipFooterOnCover) return 0;
+        if (th.Footer == null || (th.Footer.Length == 0 && !th.PageNumber)) return 0;
+        double W = 960, H = 540;
+        // page size is not on the slide object; derive from an existing shape or use defaults
+        try
+        {
+            dynamic shp = slide.Shapes.Item(1);
+            W = Math.Max(Convert.ToDouble(shp.Left, CultureInfo.InvariantCulture) * 2 + Convert.ToDouble(shp.Width, CultureInfo.InvariantCulture), 640);
+        }
+        catch (Exception) { }
+        int added = 0;
+        List<double[]> darks = DarkRects(slide);
+        bool footerDark = OverDark(darks, 40 + W * 0.3, H - 23);
+        bool pageDark = OverDark(darks, W - 60, H - 23);
+        int footerColor = footerDark ? th.White : th.Muted;
+        int pageColor = pageDark ? th.White : th.Muted;
+        // replace an old footer/page number so repeated -Apply does not stack them
+        int count = 0;
+        try { count = (int)slide.Shapes.Count; }
+        catch (Exception) { }
+        for (int k = count; k >= 1; k--)
+        {
+            dynamic sh = null;
+            try { sh = slide.Shapes.Item(k); }
+            catch (Exception) { continue; }
+            string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+            if (name == "footer" || name == "pageNo") { try { sh.Delete(); } catch (Exception) { } }
+        }
+        if (!string.IsNullOrEmpty(th.Footer))
+        {
+            try
+            {
+                dynamic tb = slide.Shapes.AddTextbox(1, 40f, (float)(H - 34), (float)(W * 0.6), 22f);
+                tb.Name = "footer";
+                dynamic tr = tb.TextFrame.TextRange;
+                tr.Text = th.Footer;
+                tr.Font.Size = 10f;
+                tr.Font.Color.RGB = footerColor;
+                tr.Font.Name = th.Font;
+                tr.Font.NameFarEast = th.Font;
+                added++;
+            }
+            catch (Exception) { }
+        }
+        if (th.PageNumber)
+        {
+            try
+            {
+                dynamic tb = slide.Shapes.AddTextbox(1, (float)(W - 90), (float)(H - 34), 50f, 22f);
+                tb.Name = "pageNo";
+                dynamic tr = tb.TextFrame.TextRange;
+                tr.Text = index.ToString(CultureInfo.InvariantCulture);
+                tr.Font.Size = 10f;
+                tr.Font.Color.RGB = pageColor;
+                tr.Font.Name = th.Font;
+                tr.Font.NameFarEast = th.Font;
+                tr.ParagraphFormat.Alignment = 3; // right
+                added++;
+            }
+            catch (Exception) { }
+        }
+        return added;
+    }
+
+    // ------------------------------------------------------------ audit (mechanical pre-check)
+
+    private static object AuditCmd(Bag a)
+    {
+        dynamic p = RequirePres(a, true);
+        double W = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideWidth, (object)960.0), CultureInfo.InvariantCulture);
+        double H = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideHeight, (object)540.0), CultureInfo.InvariantCulture);
+        int minFont = a.Int("minFont", 12);
+        int n = 0;
+        try { n = (int)p.Slides.Count; }
+        catch (Exception) { }
+        int from = Math.Max(1, a.Int("from", 1));
+        int to = a.Int("to", 0);
+        if (to <= 0 || to > n) to = n;
+
+        List<object> issues = new List<object>();
+        for (int k = from; k <= to; k++)
+        {
+            dynamic s = p.Slides.Item(k);
+            int count = 0;
+            try { count = (int)s.Shapes.Count; }
+            catch (Exception) { }
+            List<double[]> boxes = new List<double[]>();
+            List<string> boxNames = new List<string>();
+            bool hasText = false, hasPicture = false, hasTitle = false;
+            for (int j = 1; j <= count; j++)
+            {
+                dynamic sh = null;
+                try { sh = s.Shapes.Item(j); }
+                catch (Exception) { continue; }
+                string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                int type = (int)TryGet(() => (object)(int)sh.Type, (object)0);
+                double l = Convert.ToDouble(TryGet(() => (object)sh.Left, (object)0.0), CultureInfo.InvariantCulture);
+                double t = Convert.ToDouble(TryGet(() => (object)sh.Top, (object)0.0), CultureInfo.InvariantCulture);
+                double w = Convert.ToDouble(TryGet(() => (object)sh.Width, (object)0.0), CultureInfo.InvariantCulture);
+                double h = Convert.ToDouble(TryGet(() => (object)sh.Height, (object)0.0), CultureInfo.InvariantCulture);
+                string text = ShapeText(sh);
+                if (text.Trim().Length > 0) hasText = true;
+                if (type == 13 || type == 11) hasPicture = true;
+                if (name == "title" || name == "sectionTitle") hasTitle = true;
+                try
+                {
+                    if ((int)sh.IsPlaceholder != 0 && (int)sh.PlaceholderFormat.Type == 1) hasTitle = true;
+                }
+                catch (Exception) { }
+
+                // 1) outside the slide frame
+                if (l < -2 || t < -2 || (w > 0 && l + w > W + 2) || (h > 0 && t + h > H + 2))
+                    issues.Add(Issue(k, name, "outOfFrame", "shape sits outside the slide (" + R(l) + "," + R(t) + " " + R(w) + "x" + R(h) + ")"));
+
+                if (text.Trim().Length > 0)
+                {
+                    // 2) text taller than its box (the classic overflow)
+                    double boundH = Convert.ToDouble(TryGet(() => (object)sh.TextFrame.TextRange.BoundHeight, (object)0.0), CultureInfo.InvariantCulture);
+                    if (boundH > 0 && h > 0 && boundH > h + 4)
+                        issues.Add(Issue(k, name, "textOverflow", "text needs " + R(boundH) + "pt but the box is " + R(h) + "pt tall"));
+                    // 3) too small to read when projected (footer / page number are legitimately small)
+                    bool isFurniture = name == "footer" || name == "pageNo";
+                    double sz = Convert.ToDouble(TryGet(() => (object)sh.TextFrame.TextRange.Font.Size, (object)0.0), CultureInfo.InvariantCulture);
+                    if (!isFurniture && sz >= 1 && sz < minFont)
+                        issues.Add(Issue(k, name, "fontTooSmall", R(sz) + "pt < " + minFont + "pt"));
+                }
+
+                // 4) picture too small to show its lettering
+                if ((type == 13 || type == 11) && w > 0 && w < W * 0.2)
+                    issues.Add(Issue(k, name, "imageTooSmall", "picture is only " + R(w / W * 100) + "% of slide width"));
+
+                if (w > 0 && h > 0) { boxes.Add(new double[] { l, t, w, h }); boxNames.Add(name); }
+            }
+
+            // 5) pairwise overlap (a picture under a text box is almost always an accident;
+            //    colour bands and rules are meant to sit under text, so they are skipped)
+            for (int i = 0; i < boxes.Count; i++)
+                for (int m = i + 1; m < boxes.Count; m++)
+                {
+                    if (IsDecoration(boxNames[i]) || IsDecoration(boxNames[m])) continue;
+                    double ox = Math.Min(boxes[i][0] + boxes[i][2], boxes[m][0] + boxes[m][2]) - Math.Max(boxes[i][0], boxes[m][0]);
+                    double oy = Math.Min(boxes[i][1] + boxes[i][3], boxes[m][1] + boxes[m][3]) - Math.Max(boxes[i][1], boxes[m][1]);
+                    if (ox <= 0 || oy <= 0) continue;
+                    double inter = ox * oy;
+                    double small = Math.Min(boxes[i][2] * boxes[i][3], boxes[m][2] * boxes[m][3]);
+                    if (small > 0 && inter / small > 0.30)
+                        issues.Add(Issue(k, boxNames[i] + " x " + boxNames[m], "overlap", R(inter / small * 100) + "% of the smaller shape is covered"));
+                }
+
+            // 6) empty / untitled slide
+            if (!hasText && !hasPicture) issues.Add(Issue(k, "-", "emptySlide", "no text and no picture"));
+            else if (hasText && !hasTitle) issues.Add(Issue(k, "-", "noTitle", "no title shape (name title/sectionTitle or a title placeholder)"));
+        }
+
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["slides"] = n;
+        r["checked"] = new Dictionary<string, object> { { "from", from }, { "to", to } };
+        r["issues"] = issues;
+        r["count"] = issues.Count;
+        r["note"] = "mechanical pre-check only: it cannot judge aesthetics. Render the flagged slides (and -Overview for the whole deck) before telling the user it is ready.";
+        return r;
+    }
+
+    private static Dictionary<string, object> Issue(int slide, string shape, string kind, string detail)
+    {
+        return new Dictionary<string, object> {
+            { "slide", slide }, { "shape", shape }, { "kind", kind }, { "detail", detail }
+        };
+    }
+
+    private static double R(double v) { return Math.Round(v, 1); }
+
+    /// <summary>Colour bands / rules created by the presets: they are supposed to be covered.</summary>
+    private static bool IsDecoration(string name)
+    {
+        if (name == null) return false;
+        string n = name.ToLowerInvariant();
+        return n == "coverband" || n == "sectionband" || n == "endbackground" || n == "accentline" || n == "divider";
+    }
+
+    // ------------------------------------------------------------ align / z-order
+
+    private static object AlignCmd(Bag a)
+    {
+        dynamic p = RequirePres(a, true);
+        dynamic slide = SlideAt(p, a.Int("slide", 0));
+        string mode = a.Need("mode").ToLowerInvariant();
+        List<dynamic> shapes = ResolveShapes(slide, a.Str("shapes", null));
+        if (shapes.Count == 0) throw new Fail("BAD_ARGS", "no shapes matched; read the slide to get shape names");
+        double W = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideWidth, (object)960.0), CultureInfo.InvariantCulture);
+
+        if (mode == "left") { double v = Min(shapes, "Left"); foreach (dynamic s in shapes) s.Left = (float)v; }
+        else if (mode == "right") { double v = Max(shapes, "Left", "Width"); foreach (dynamic s in shapes) s.Left = (float)(v - Convert.ToDouble(s.Width, CultureInfo.InvariantCulture)); }
+        else if (mode == "top") { double v = Min(shapes, "Top"); foreach (dynamic s in shapes) s.Top = (float)v; }
+        else if (mode == "bottom") { double v = Max(shapes, "Top", "Height"); foreach (dynamic s in shapes) s.Top = (float)(v - Convert.ToDouble(s.Height, CultureInfo.InvariantCulture)); }
+        else if (mode == "center-h") { foreach (dynamic s in shapes) s.Left = (float)((W - Convert.ToDouble(s.Width, CultureInfo.InvariantCulture)) / 2); }
+        else if (mode == "same-width") { double v = Convert.ToDouble(shapes[0].Width, CultureInfo.InvariantCulture); foreach (dynamic s in shapes) s.Width = (float)v; }
+        else if (mode == "same-height") { double v = Convert.ToDouble(shapes[0].Height, CultureInfo.InvariantCulture); foreach (dynamic s in shapes) s.Height = (float)v; }
+        else if (mode == "distribute-h" || mode == "distribute-v")
+        {
+            bool horiz = mode == "distribute-h";
+            shapes.Sort((x, y) => Convert.ToDouble(horiz ? x.Left : x.Top, CultureInfo.InvariantCulture)
+                .CompareTo(Convert.ToDouble(horiz ? y.Left : y.Top, CultureInfo.InvariantCulture)));
+            if (shapes.Count < 3) throw new Fail("BAD_ARGS", "distribute needs at least 3 shapes");
+            double first = Convert.ToDouble(horiz ? shapes[0].Left : shapes[0].Top, CultureInfo.InvariantCulture);
+            double last = Convert.ToDouble(horiz ? shapes[shapes.Count - 1].Left : shapes[shapes.Count - 1].Top, CultureInfo.InvariantCulture);
+            double total = horiz ? Convert.ToDouble(shapes[shapes.Count - 1].Width, CultureInfo.InvariantCulture)
+                                  : Convert.ToDouble(shapes[shapes.Count - 1].Height, CultureInfo.InvariantCulture);
+            double span = last + total - first;
+            double sum = 0;
+            foreach (dynamic s in shapes) sum += Convert.ToDouble(horiz ? s.Width : s.Height, CultureInfo.InvariantCulture);
+            double gap = (span - sum) / (shapes.Count - 1);
+            double cursor = first;
+            foreach (dynamic s in shapes)
+            {
+                if (horiz) { s.Left = (float)cursor; cursor += Convert.ToDouble(s.Width, CultureInfo.InvariantCulture) + gap; }
+                else { s.Top = (float)cursor; cursor += Convert.ToDouble(s.Height, CultureInfo.InvariantCulture) + gap; }
+            }
+        }
+        else throw new Fail("BAD_ARGS", "unknown mode \"" + mode + "\"; use left|right|top|bottom|center-h|same-width|same-height|distribute-h|distribute-v");
+
+        List<object> done = new List<object>();
+        foreach (dynamic s in shapes)
+            done.Add(new Dictionary<string, object> {
+                { "name", Convert.ToString(TryGet(() => (object)s.Name, ""), CultureInfo.InvariantCulture) },
+                { "l", R(Convert.ToDouble(TryGet(() => (object)s.Left, (object)0.0), CultureInfo.InvariantCulture)) },
+                { "t", R(Convert.ToDouble(TryGet(() => (object)s.Top, (object)0.0), CultureInfo.InvariantCulture)) },
+                { "w", R(Convert.ToDouble(TryGet(() => (object)s.Width, (object)0.0), CultureInfo.InvariantCulture)) },
+                { "h", R(Convert.ToDouble(TryGet(() => (object)s.Height, (object)0.0), CultureInfo.InvariantCulture)) }
+            });
+        return new Dictionary<string, object> { { "mode", mode }, { "shapes", done }, { "note", "geometry is reported back; render the slide if it matters" } };
+    }
+
+    private static double Min(List<dynamic> shapes, string prop)
+    {
+        double v = double.MaxValue;
+        foreach (dynamic s in shapes)
+        {
+            double cur = Convert.ToDouble(prop == "Left" ? s.Left : s.Top, CultureInfo.InvariantCulture);
+            v = Math.Min(v, cur);
+        }
+        return v == double.MaxValue ? 0 : v;
+    }
+
+    private static double Max(List<dynamic> shapes, string prop, string sizeProp)
+    {
+        double v = double.MinValue;
+        foreach (dynamic s in shapes)
+        {
+            double start = Convert.ToDouble(sizeProp == "Width" ? s.Left : s.Top, CultureInfo.InvariantCulture);
+            double size = Convert.ToDouble(sizeProp == "Width" ? s.Width : s.Height, CultureInfo.InvariantCulture);
+            v = Math.Max(v, start + size);
+        }
+        return v == double.MinValue ? 0 : v;
+    }
+
+    private static List<dynamic> ResolveShapes(dynamic slide, string list)
+    {
+        List<dynamic> result = new List<dynamic>();
+        int count = 0;
+        try { count = (int)slide.Shapes.Count; }
+        catch (Exception) { }
+        if (list == null || list.Trim().Length == 0 || list.Trim() == "*" || list.Trim().ToLowerInvariant() == "all")
+        {
+            for (int k = 1; k <= count; k++) { try { result.Add(slide.Shapes.Item(k)); } catch (Exception) { } }
+            return result;
+        }
+        foreach (string raw in list.Split(','))
+        {
+            string want = raw.Trim();
+            if (want.Length == 0) continue;
+            int idx;
+            if (int.TryParse(want, out idx))
+            {
+                if (idx >= 1 && idx <= count) result.Add(slide.Shapes.Item(idx));
+                continue;
+            }
+            for (int k = 1; k <= count; k++)
+            {
+                dynamic sh = slide.Shapes.Item(k);
+                string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                if (string.Equals(name, want, StringComparison.OrdinalIgnoreCase)) { result.Add(sh); break; }
+            }
+        }
+        return result;
+    }
+
+    private static object ZorderCmd(Bag a)
+    {
+        dynamic p = RequirePres(a, true);
+        dynamic slide = SlideAt(p, a.Int("slide", 0));
+        dynamic sh = ResolveShape(slide, a, "name", "shapeIdx", true);
+        string where = a.Str("where", "front").ToLowerInvariant();
+        if (where == "front") sh.ZOrder(0);        // msoBringToFront
+        else if (where == "back") sh.ZOrder(1);    // msoSendToBack
+        else throw new Fail("BAD_ARGS", "-Where must be front|back");
+        return new Dictionary<string, object> {
+            { "shape", Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture) },
+            { "where", where },
+            { "index", TryGet(() => (object)(int)sh.ZOrderPosition, null) }
+        };
+    }
+
+    // ------------------------------------------------------------ restore (text level)
+
+    private static object RestoreCmd(Bag a)
+    {
+        dynamic p = RequirePres(a, true);
+        string since = a.Str("since", "last");
+        string path;
+        if (File.Exists(since)) path = since;
+        else
+        {
+            string name = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
+            path = Path.Combine(SnapshotDir(), (name.Replace(".pptx", "").Replace(".ppt", "")) + "-" + since + ".json");
+        }
+        if (!File.Exists(path)) throw new Fail("BAD_ARGS", "snapshot not found: " + path + ". Take snapshot first (or pass -Since <file>).");
+        Bag snap = new Bag(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
+        List<object> before = snap.List("slides");
+        string only = a.Str("shapes", null);
+        HashSet<string> wanted = null;
+        if (only != null)
+        {
+            wanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string raw in only.Split(',')) if (raw.Trim().Length > 0) wanted.Add(raw.Trim());
+        }
+
+        int n = 0;
+        try { n = (int)p.Slides.Count; }
+        catch (Exception) { }
+        int restored = 0, skipped = 0;
+        List<object> details = new List<object>();
+        for (int k = 0; k < Math.Min(before.Count, n); k++)
+        {
+            Dictionary<string, object> snapshotTexts = ShapeTextMap((List<object>)before[k]);
+            dynamic s = p.Slides.Item(k + 1);
+            int count = 0;
+            try { count = (int)s.Shapes.Count; }
+            catch (Exception) { }
+            for (int j = 1; j <= count; j++)
+            {
+                dynamic sh = null;
+                try { sh = s.Shapes.Item(j); }
+                catch (Exception) { continue; }
+                string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                string key = name;
+                if (!snapshotTexts.ContainsKey(key)) continue;
+                if (wanted != null && !wanted.Contains(key) && !wanted.Contains((k + 1) + "!" + key)) continue;
+                string want = Convert.ToString(snapshotTexts[key], CultureInfo.InvariantCulture);
+                string now = ShapeText(sh);
+                if (string.Equals(want, now, StringComparison.Ordinal)) continue;
+                try
+                {
+                    sh.TextFrame.TextRange.Text = want;
+                    restored++;
+                    details.Add(new Dictionary<string, object> { { "slide", k + 1 }, { "shape", name }, { "now", Clip(now, 50) }, { "restored", Clip(want, 50) } });
+                }
+                catch (Exception) { skipped++; }
+            }
+        }
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["since"] = path;
+        r["restored"] = restored;
+        r["failed"] = skipped;
+        if (details.Count > 0) r["details"] = details;
+        r["note"] = "texts only: layout, sizes and shapes added after the snapshot are not reverted; run diff to confirm, then render before saving";
+        return r;
+    }
 
     // ------------------------------------------------------------ snapshot / diff
 
