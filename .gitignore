@@ -1,0 +1,6 @@
+tests/work/
+*.tmp/
+.tmp/
+sandbox-*/
+*.exe
+guide.html

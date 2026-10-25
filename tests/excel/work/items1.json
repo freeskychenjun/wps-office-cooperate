@@ -1,0 +1,6 @@
+{"items":[
+  {"sheet":"test","cell":"E1","value":"avg"},
+  {"sheet":"test","cell":"E2","formula":"=AVERAGE(C2:C3)"},
+  {"sheet":"test","cell":"E3","formula":"=AVERAGE(C4:C5)","expect":""},
+  {"sheet":"test","cell":"F1:G2","values":[[1,2],[3,4]]}
+]}
