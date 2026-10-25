@@ -68,7 +68,7 @@ param(
     [string]$HeaderText,
     [string]$FooterText,
     [string]$PageNumber,
-    [int]$PageNumberStart = -1,
+    [string]$PageNumberStart,
     [switch]$All,
     [switch]$Case,
     [string]$Data,
@@ -91,6 +91,8 @@ param(
     [int]$CropTop = -1,
     [int]$CropBottom = -1,
     [string]$Action,
+    [int]$Passes = 0,
+    [switch]$Force,
     [string]$Numbers,
     [string]$Heading,
     [int]$Levels = 3,
@@ -274,13 +276,17 @@ switch ($Command) {
                             @('PageNumber', 'pageNumber'))) {
             if ($PSBoundParameters.ContainsKey($pair[0])) { $request[$pair[1]] = $PSBoundParameters[$pair[0]] }
         }
-        if ($PageNumberStart -ge 0) { $request['pageNumberStart'] = $PageNumberStart }
+        if ($PageNumberStart) { $request['pageNumberStart'] = $PageNumberStart }
         if ($All) { $request['all'] = $true }
     }
     'table' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'table needs -Doc' }
         if ($PSBoundParameters.ContainsKey('Para') -and $Para -gt 0) { $request['para'] = $Para }
         if ($Table -gt 0) { $request['table'] = $Table }
+        if ($Action) { $request['action'] = $Action.ToLowerInvariant() }
+        if ($Passes -gt 0) { $request['passes'] = $Passes }
+        if ($Row -gt 0) { $request['row'] = $Row }
+        if ($Force) { $request['force'] = $true }
         if ($Data) {
             if (-not (Test-Path -LiteralPath $Data)) { Write-Error-Json 'BAD_ARGS' ('Data file not found: ' + $Data) }
             $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $Data), [System.Text.Encoding]::UTF8)

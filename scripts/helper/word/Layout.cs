@@ -280,6 +280,25 @@ internal static partial class Program
                     };
                     one["headerText"] = Head(CleanPara(Convert.ToString(TryGet(() => (object)doc.Sections.Item(s).Headers.Item(1).Range.Text, ""), CultureInfo.InvariantCulture)), 40);
                     one["footerText"] = Head(CleanPara(Convert.ToString(TryGet(() => (object)doc.Sections.Item(s).Footers.Item(1).Range.Text, ""), CultureInfo.InvariantCulture)), 40);
+
+                    // Page numbering: a section that "restarts at 1" shows up as a jump in the
+                    // printed pages (1,2,3 ... then 1 again). Report what is readable and the
+                    // page that is actually displayed at the section start.
+                    Dictionary<string, object> pn = new Dictionary<string, object>();
+                    try
+                    {
+                        dynamic pnums = doc.Sections.Item(s).Footers.Item(1).PageNumbers;
+                        pn["startNumberRaw"] = TryGet(() => (object)pnums.StartingNumber, null);
+                        pn["restartAtSectionRaw"] = TryGet(() => (object)pnums.RestartNumberingAtSection, null);
+                    }
+                    catch (Exception) { pn["readable"] = false; }
+                    try
+                    {
+                        int at = (int)doc.Sections.Item(s).Range.Start;
+                        pn["firstDisplayedPage"] = TryGet(() => (object)doc.Range(at, at).Information(3), null);
+                    }
+                    catch (Exception) { }
+                    one["pageNumbers"] = pn;
                 }
                 catch (Exception e) { one["section"] = s; one["error"] = Clean(e.Message); }
                 secs.Add(one);
@@ -401,7 +420,32 @@ internal static partial class Program
 
         if (a.Has("pageNumberStart"))
         {
+            string rawStart = a.Str("pageNumberStart", "").Trim().ToLowerInvariant();
+            if (rawStart == "none" || rawStart == "off" || rawStart == "clear" || rawStart == "remove" || rawStart == "0")
+            {
+                // "restart numbering at this section" that the sectPr carries as
+                // <w:pgNumType w:start="1"/>. WPS implements the property half-heartedly:
+                // readback may be null and writing 0 means "start at 0". Try, verify, and
+                // if it does not take, say so instead of pretending it worked.
+                bool cleared = false;
+                string detail = null;
+                try
+                {
+                    dynamic pn = section.Footers.Item(1).PageNumbers;
+                    try { pn.RestartNumberingAtSection = 0; } catch (Exception e) { detail = Clean(e.Message); }
+                    object back = TryGet(() => (object)pn.RestartNumberingAtSection, null);
+                    if (back != null && Convert.ToInt32(back, CultureInfo.InvariantCulture) == 0) cleared = true;
+                    else if (detail == null) detail = "readback " + (back == null ? "null (not implemented by WPS)" : back.ToString());
+                }
+                catch (Exception e) { detail = Clean(e.Message); }
+                if (cleared) return "pageNumber restart cleared";
+                return "pageNumber restart NOT cleared (" + detail + "); this WPS build cannot do it over COM - "
+                     + "close the document, drop w:start from <w:pgNumType> in word/document.xml, then reopen "
+                     + "(see reference/workflows.md, section on page numbers)";
+            }
             int n = a.Int("pageNumberStart", 1);
+            if (n < 1)
+                return "pageNumber start ignored: use a positive number, or none to clear the restart";
             try { section.Headers.Item(1).PageNumbers.StartingNumber = n; }
             catch (Exception e) { return "pageNumber " + where + " (starting number not supported: " + Clean(e.Message) + ")"; }
         }

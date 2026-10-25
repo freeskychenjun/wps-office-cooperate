@@ -203,7 +203,26 @@ internal static partial class Program
         {
             if (where == "before") { anchor.Range.InsertParagraphBefore(); from = at; }
             else if (where == "end") { doc.Content.InsertParagraphAfter(); from = (int)doc.Paragraphs.Count; }
-            else { anchor.Range.InsertParagraphAfter(); from = at + 1; }
+            else
+            {
+                // A paragraph that ends right before a table is the classic trap:
+                // InsertParagraphAfter there lands INSIDE the table's first cell. Create the
+                // new paragraph by inserting a CR just before the anchor's paragraph mark.
+                bool tableFollows = false;
+                try
+                {
+                    if (TabOfParagraph(doc, at) == 0 && at + 1 <= (int)doc.Paragraphs.Count && TabOfParagraph(doc, at + 1) > 0)
+                        tableFollows = true;
+                }
+                catch (Exception) { }
+                if (tableFollows)
+                {
+                    int pos = (int)anchor.Range.End - 1;
+                    doc.Range(pos, pos).InsertAfter("\r");
+                    from = at + 1;
+                }
+                else { anchor.Range.InsertParagraphAfter(); from = at + 1; }
+            }
             if (from > (int)doc.Paragraphs.Count) from = (int)doc.Paragraphs.Count;
 
             string block = string.Join("\r", texts.ToArray());

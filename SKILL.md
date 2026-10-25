@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.3（2026-10-25）**：按一份真实报告（饶河水系 297 页 / 85 张表）的使用记录补 Word 表格能力——`table -Action scan`（表格体检，只读）、`-Action caption`（题名做进第 1 行的一键提到框外，内部保证"插题名 → 删行 → 加边框"的顺序）、`-Action header-repeat`（跨页表头，自动迭代到稳定）、`-Action rows`（删行）；修掉 `insert -Where after` 在表格前落进表格的坑、`-HeaderRow` 静默失败（WPS 的 `Rows.Item(n)` 是残缺对象）、`audit` 新增"题名在第 1 行"规则、`page` 查询模式报页码断号 + `-PageNumberStart none`。
+
 **版本 v1.2（2026-10-25）**：PPT 侧补齐"能交付"这一层——`theme`（主色/字体/页脚/页码，一套 JSON 打底）、预设版式重做（封面色带、章节页色块+大数字、真项目符号、**深色底自动白字**、正文框留白给表格/图片）、`render -Overview`（6 页拼一张图并带页码）、`audit`（文字溢出/字号过小/越界/重叠/图过小/空页机械体检）、`align`/`zorder`/`restore`。
 
 **版本 v1.1（2026-10-25）**：新增 **PPT（WPS 演示，`KWPP.Application`）** 支持——预设版式建页、形状级锚定改文字、表格/图片/文本框、演讲备注、逐页渲染核对、文本快照对比。v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）合并而成。版本历史见 [reference/word-acceptance.md](reference/word-acceptance.md)、[reference/excel-acceptance.md](reference/excel-acceptance.md)。
@@ -62,17 +64,17 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `font` | `-Doc <路径> -Name <字体名> [-Track]` | 把**正文、页眉、页脚、文本框**里的字体统一改成指定字体（中英文一起改，`-Name 仿宋`）；返回每个区段的结果与回读值。默认**不产生修订**，整批算一个撤销单元 |
 | `format` | `-Doc <路径> [-Para N \| -From N -To M \| -Style 样式名 \| -Match <正则>]` + 任意格式项 | 对**整篇/一段/一段区间/某样式的所有段/文本匹配正则的所有段**套字符与段落格式（`-Match` 例：`"^\s*(图\|附图)\s*\d"` 一次选中全部图名；返回命中数与前 5 个样例） |
 | `style` | `-Doc <路径> -Style <样式名> [-NoNumbering]` + 任意格式项 | 改**样式本身**（正文、标题 1…），所有用它的段落一起变 |
-| `page` | `-Doc <路径>`（**不带任何选项=查询各节设置**）`[-Paper A4] [-Orientation portrait\|landscape] [-Top/-Bottom/-Left/-Right 厘米] [-HeaderText] [-FooterText] [-PageNumber center\|right\|left\|none] [-PageNumberStart N] [-All]` | 纸张/方向/页边距/页眉页脚/页码（逐节应用）；查询模式报每节纸张/方向/边距/页眉页脚 |
-| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]` | 建表 / 改表（`thick`=外框 1.5pt 粗线+内线 0.5pt 细线，中文报告常用；`grid` 全 0.5pt；三线表；表头跨页重复；行不跨页；列宽；行高） |
+| `page` | `-Doc <路径>`（**不带任何选项=查询各节设置**）`[-Paper A4] [-Orientation portrait\|landscape] [-Top/-Bottom/-Left/-Right 厘米] [-HeaderText] [-FooterText] [-PageNumber center\|right\|left\|none] [-PageNumberStart N\|none] [-All]` | 纸张/方向/页边距/页眉页脚/页码（逐节应用）；查询模式报每节纸张/方向/边距/页眉页脚 **+ `pageNumbers`（起始号/是否节内重启/该节首段的实际显示页码——页码断号一眼看出）**；`-PageNumberStart none` 试图清掉「本节重新编号」（WPS 常做不到，会**明说失败**并给 XML 路线） |
+| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`** | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法） |
 | `caption` | `-Para N -Label 表\|图 -Title "..." [-Above] [-Align center]` | 生成**域**式题注「表 1 xxx」（自动编号，增删后重排） |
 | `picture` | 插图：`-Path <图片> -Para N [-Width "12cm"] [-Caption] [-Align]`；调整：`-Image n [-Width/-Height] [-CropLeft/-CropRight/-CropTop/-CropBottom 百分比]` | 插入图片（可带图题）/ 调尺寸与裁剪 |
 | `toc` | `-Doc <路径> [-Para N] [-Title 目录] [-Levels 3]` | 插入并刷新目录（域），可从文首或指定段之前 |
 | `reference` | 列表：`-Action list -Items <json 数组> [-AtPara N] [-Heading 参考文献]`；引用：`-Action cite -Para N -Numbers "1,2,5"\|"3-6"` | 生成参考文献列表 / 在段末插入上标引用 |
 | `view` | `-Doc <路径> -Para N` 或 `-Page N` | 把 WPS 窗口滚到那一段/那一页（唯一能做的"跟随"，不动文档内容） |
-| `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段；返回段落号 + 建议，供你判断后落批注 |
+| `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段、**题名做进表格第 1 行**（`table-caption-in-row`，直接给出该用哪条 `table -Action caption`）；返回段落号 + 建议，供你判断后落批注 |
 | `fields` | `-Doc <路径>` | **刷新全部域**：页码、目录、题注、引用（改完正文、交付前跑一次） |
 | `cell` | `-Doc <路径> (-Table n -Row r -Col c \| -Para N) -Text "..."` + 任意格式项 | 改一个表格单元格的文字（可带字体字号对齐） |
-| `insert` | `-Doc <路径> [-Para N] [-Where after\|before\|end] -Items <json> [-Track]` | **批量插入段落**（默认干净写入、不进修订；`-Track` 才走修订），可带样式与格式 |
+| `insert` | `-Doc <路径> [-Para N] [-Where after\|before\|end] -Items <json> [-Track]` | **批量插入段落**（默认干净写入、不进修订；`-Track` 才走修订），可带样式与格式。**锚点是表格前一段时自动改用"段末标记之前插入 CR"的写法**，不会掉进表格第一格 |
 | `revisions` | `-Doc <路径> [-Action list\|accept\|reject] [-Index N \| -All]` | 列出**未处理**的修订（类型/作者/所在段/文本），或按人要求接受/拒绝 |
 | `snapshot` | `-Doc <路径> [-Tag 名字] [-Out <路径>]` | 存一份段落文本快照（给 `diff` 用，默认存 %LOCALAPPDATA% 不污染文档目录；`-Out` 写到指定路径，跨机器/交接时随文档走） |
 | `diff` | `-Doc <路径> [-Since 快照路径\|last]` | 和快照比：哪些段被改了（before→after）、哪些增删了——**人改的和 Agent 改的都算** |
@@ -135,6 +137,11 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 7. **表格/题注/图片**：`table`（三线表+表头跨页）/ `caption`（SEQ 域，表上图下）/ `picture`（插后必 render）。
 8. **目录/引用**：`toc`（依赖标题样式）/ `reference list+cite` / 交付前 `fields` 刷全部域。
 9. **协作接力（核心用法）**：每轮 `snapshot` → 干活 → 人裁决 → `diff`+`revisions` 读结果 → `handoff` 交接单。跨机器接力用 `snapshot -Out` 把快照随文档带走。写命令结果里的 `changedOutside` = 文档被人动过，先 `diff` 再继续。
+10. **批量整理表格（中文报告高频）**：`table -Action scan` 先出体检表（哪张表题名在框内、哪张跨页没表头、边框粗细）→ 按结果选做：
+    - 题名在框内：`table -Action caption -Table n -Borders thick`（提题名 → 删该行 → 加边框，顺序已在命令内部保证）
+    - 跨页缺表头：`table -Action header-repeat`（自动迭代到稳定；**先**处理题名，否则重复出去的是题名行）
+    - 全文档边框加粗：`table -Borders thick`（**不带 -Table 即全表**，一次 COM 遍历 + 一个撤销记录；85 张表约十几秒，别逐张调）
+    - 细节见 [reference/workflows.md](reference/workflows.md) 的「批量整理表格」一节
 10. **反悔**：自己刚写完且无 `changedOutside` 时 `undo -Count N`（排版批=1 步）。
 
 ## Word 故障排查
@@ -153,6 +160,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `wps.exe` 变多 | 中途异常没 `close`，或别处 `New-Object` 开了新实例。先 `status` 看实例数，只结束无窗口的 `/Automation` 实例，用户窗口留着，然后汇报数字。 |
 | Ctrl+Z 撤不干净批量改动 | 三个前提：①改动必须走本 skill 的命令（自带 UndoRecord 分组，实测 WPS 支持；**绕过 skill 手写 COM 循环 = 每段一条撤销记录**）；②**save 会清空撤销栈**，要反悔必须在保存前；③格式套成与原值相同的段不产生撤销记录（再撤也不会变）。 |
 | `undo` 撤不动 | 撤销栈已被 save 清空或已见底；文本类改动优先走修订（`revise`），随时可拒绝，不依赖撤销栈。 |
+| `table` 报 `0x800A1767` / 行操作炸 | WPS 的 `Row` 对象残缺（`Rows.Item(n).Delete/.HeadingFormat/.Range/.Cells` 都不可靠）。**不要自己写 `Rows.Item(n)` 循环**——用 `table -Action rows/header-repeat/caption`，内部走"选中整行 → `Selection.Rows`"的写法 |
+| `insert -Where after` 的段落进了表格 | 已修：锚点后紧跟表格时，helper 改在段末标记之前插 CR。若仍见到 `inTable:true` 而锚点不在表格里，先 `undo` 再报告 |
 
 ---
 

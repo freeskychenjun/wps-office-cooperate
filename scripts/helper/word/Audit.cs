@@ -138,6 +138,17 @@ internal static partial class Program
                 }
                 c.Para = at;
                 if (!ok) c.Add("caption-missing", "表格 " + t + "（第 " + at + " 段之前）", "表格前缺少「表 N」题注");
+
+                // The caption typed INTO the first (usually merged) row - extremely common in
+                // Chinese reports, and it makes the table look framed around its own title.
+                try
+                {
+                    string firstCell = CleanPara(Convert.ToString(TryGet(() => (object)tb.Cell(1, 1).Range.Text, ""), CultureInfo.InvariantCulture)).Trim();
+                    if (IsCaptionText(firstCell))
+                        c.Add("table-caption-in-row", "表格 " + t + " 第 1 行：" + Head(firstCell, 40),
+                              "题名做进了表格第 1 行；用 table -Action caption -Table " + t + " 提到框外（会自动删该行并可顺带加粗边框）");
+                }
+                catch (Exception) { }
             }
 
             int shapes = (int)doc.InlineShapes.Count;

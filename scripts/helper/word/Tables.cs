@@ -182,7 +182,15 @@ internal static partial class Program
     private static object TableDoc(Bag a)
     {
         dynamic doc = RequireDoc(a, true);
+        string action = a.Str("action", "").Trim().ToLowerInvariant();
+        if (action == "scan" || action == "inspect") return TabScan(a);   // read-only, allowed on a locked doc
         if (IsReadOnly(doc)) throw new Fail("READONLY", "The document is open read-only; no table was changed.");
+
+        if (action == "header-repeat" || action == "headerrepeat" || action == "repeat-header") return TabHeaderRepeat(a);
+        if (action == "caption" || action == "uncaption") return TabCaptionMove(a);
+        if (action == "rows" || action == "row" || action == "delete-row" || action == "deleterow") return TabRowDelete(a);
+        if (action.Length > 0 && action != "format" && action != "modify")
+            throw new Fail("BAD_ARGS", "unknown table action \"" + action + "\" (scan | header-repeat | caption | rows | format; inserting a table uses \"data\")");
 
         // "data" means insert; without it the command reformats tables that are already there.
         if (a.Has("data")) return TabInsert(doc, a);
@@ -925,15 +933,26 @@ internal static partial class Program
         List<string> done = new List<string>();
         int rows = (int)TryGet(() => (object)(int)table.Rows.Count, 0);
         if (rows < 1) return done;
+        // table.Rows.Item(1).HeadingFormat throws 0x800A1767 in WPS (half-implemented Row
+        // object): go through the Selection instead, and verify by reading it back.
+        dynamic app = App(true, true);
         try
         {
-            dynamic first = table.Rows.Item(1);
-            first.HeadingFormat = -1;                       // repeat on every page
-            first.Range.Font.Bold = 1;
-            first.Range.ParagraphFormat.Alignment = ALIGN_ROW_CENTER;
-            done.Add("header row 1 repeated on each page, bold and centred");
+            SelectRows(app, table, 1);
+            app.Selection.Rows.HeadingFormat = -1;
+            int back = ReadHeadingFormat(app, table);
+            if (back != -1) throw new Fail("COM_ERROR", "WPS did not keep HeadingFormat (read back " + back + ")");
+            done.Add("header row 1 repeats on every page");
         }
-        catch (Exception e) { done.Add("header row: " + Clean(e.Message)); }
+        catch (Exception e) { done.Add("header row repeat failed: " + Clean(e.Message)); }
+        // bold/centre is a formatting decision of its own - keep it, but report separately
+        try
+        {
+            table.Rows.Item(1).Range.Font.Bold = 1;
+            table.Rows.Item(1).Range.ParagraphFormat.Alignment = ALIGN_ROW_CENTER;
+            done.Add("header row 1 set bold and centred");
+        }
+        catch (Exception e) { done.Add("header row font/align: " + Clean(e.Message)); }
         return done;
     }
 

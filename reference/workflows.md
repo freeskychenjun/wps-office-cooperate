@@ -192,3 +192,75 @@ Agent 接管一段 → 人裁决/手改 → Agent 读人的结果继续。四个
 8. **紧挨批注的文字，位置会差 1 个字符**：WPS 里批注锚点占一个位置、却不出现在 `Range.Text` 里，所以对着批注旁边的字做 `replace` 会错位（实测把"对无实测"改成了"对无实测测"）。现在 `replace` 会**先读回目标片段校验**，位置不对时在 ±3 字符内自动纠正，纠正不了就报 `ANCHOR_MISSING` 而**不会写坏**。确实要改那段：`comment -Delete -Index n` 摘掉批注 → 改 → 再 `comment` 按原词补回。
 9. **排版类命令都不进修订**（`format`/`style`/`page`/`table`/`caption`/`picture`），整批一次 Ctrl+Z（或 `undo`）可撤；`revise`/`comment` 才是走修订的那两个。
 10. **`undo` 是全局撤销、不分作者**：人在你之后改过也会被一起撤掉。只在**自己刚写完、且结果里没有 `changedOutside`** 时用；拿不准就别撤，让人在 WPS 里 Ctrl+Z。
+
+---
+
+## 12. 批量整理表格（2026-10-25 实战，饶河报告 85 张表）
+
+中文报告最常见的四类表格毛病，一条 `table -Action scan` 先体检再动手。**实测提醒：不要凭"中文报告都有这个毛病"预设大面积命中**——那份 85 张表的报告里，题名做进第 1 行的只有 1 张。
+
+```powershell
+office.ps1 word table -Doc $DOC -Action scan
+```
+
+返回 `summary`（`tables` / `multipage` / `multipageWithoutHeaderRepeat` / `captionInFirstRow` / `bordersNotThick`）+ 每张表一行。只读，不改文档、不进撤销栈，只读打开的文档也能跑。
+
+### 12.1 题名做进了第 1 行（`captionInFirstRow: true`）
+
+```powershell
+office.ps1 word table -Doc $DOC -Action caption -Table 1 -Borders thick
+```
+
+一条命令完成三件事，**顺序由命令内部保证**（顺序错了会丢题名或白干）：
+
+1. 在表格**前一个段落的段末标记之前**插入「CR + 题名文本」——不能用 `InsertParagraphAfter`，那会落进表格第一格；
+2. 按选中整行 → `Selection.Rows.Delete()` 删掉题名行（`Rows.Item(n).Delete()` 在 WPS 里报 `0x800A1767`）；
+3. 最后套边框（先删行会重算首行边框，先套等于白套）。
+
+返回 `caption` / `newPara` / `rowsBefore→rowsAfter` / `firstRowText` / `borderRead`。删完一定要看 `firstRowText` 变成真表头（如 `序号`）。
+
+### 12.2 跨页却没重复表头
+
+```powershell
+office.ps1 word table -Doc $DOC -Action header-repeat          # 全文档，迭代到稳定
+office.ps1 word table -Doc $DOC -Action header-repeat -Table 6 -Row 2   # 强制 2 行表头
+```
+
+**必须迭代**：设了重复会让续页多出表头行 → 分页位移 → 原本一页放得下的表变成跨页 → 又冒出新的待补表。实测 22 张 → 又冒 6 张 → 稳定，共 3 轮；命令自动跑到稳定，返回 `passesUsed` 与 `multipageStillMissing`（应为 0，非 0 就加 `-Passes`）。
+
+表头行数自动判断：第 1 行单元格数 < 列数 ⇒ 两级表头 ⇒ 2 行。**仍要抽查**，若第 2 行其实是数据行，重复出去会把数据抄到每页。
+
+顺序：**先提取题名，再设表头重复**，否则重复的是题名行。
+
+### 12.3 全文档边框加粗
+
+```powershell
+office.ps1 word table -Doc $DOC -Borders thick        # 不带 -Table = 所有表
+```
+
+一次 COM 遍历 + 单个撤销记录（85 张表约十几秒）。**不要**逐张调（85 次进程附着 ≈ 4–5 分钟）。回读：四个外边 `[1,12]`（1.5 pt）、两条内线 `[1,4]`（0.5 pt）。
+
+批量套边框前先确认没有"用表格做的排版/图片框"——`scan` 里 `bordersNotThick` 会把它们一并算进来；如有，按表号排除、不要一刀切。
+
+### 12.4 删行
+
+```powershell
+office.ps1 word table -Doc $DOC -Action rows -Table 2 -Row 3
+```
+
+返回 `rowsBefore/rowsAfter` 与删后的首行文本。删行会连同文字一起删（等同退格），删前想留内容先 `cell` 读出来。
+
+### 12.5 验证闭环
+
+1. `scan` 复跑：`captionInFirstRow` 归零、`multipageWithoutHeaderRepeat` 归零、`bordersNotThick` 归零；
+2. `render` 目标页：题名在框外居中、外框明显粗于内线、续页顶部有列名、数据条数没变；
+3. `pages` 基本不变（只有改页面结构时才该变）；
+4. 格式类改动不进修订，**save 之前** `render` 让用户看过。
+
+### 12.6 页码断号（另一类坑，COM 做不到）
+
+现象：正文 `1,2,3` 之后某些物理页反复跳回 `1`。根因是 `sectPr` 里带了 `<w:pgNumType w:start="1"/>`。
+
+- `page -Doc $DOC` 的查询模式会报每节 `pageNumbers`（`startNumberRaw` / `restartAtSectionRaw` / `firstDisplayedPage`），断号一眼看出；
+- `page -PageNumberStart none` 会尝试清掉"本节重新编号"，但 **WPS 常常做不到**（`RestartNumberingAtSection` 读回 `null`；写 `StartingNumber = 0` 会理解成"从 0 开始"，写 `-1` 会把分页搞乱）——命令会**明说失败**，别硬试；
+- 可行路线：关闭文档（不保存）→ 改 `word/document.xml` 删掉多余节的 `pgNumType@w:start`（保留第一节的 `start="1"`）→ 重新 `open` → 导出 PDF 逐页取页码验证连续 → `fields` 刷目录 → `save`。导出 PDF 落盘即密文，要先用 `decrypt-office-pdf` 解密再读。
