@@ -295,7 +295,7 @@ internal sealed class Bag
 
 // ---------------------------------------------------------------- helper
 
-internal static class Program
+internal static partial class Program
 {
     private const string WPS_WPP = "KWPP.Application";
 
@@ -370,18 +370,28 @@ internal static class Program
             case "open": return OpenPres(a);
             case "read": return ReadPres(a);
             case "search": return SearchPres(a);
+            case "replace": return ReplaceCmd(a);
             case "selection": return SelectionCmd(a);
             case "slide": return SlideCmd(a);
+            case "split": return SplitCmd(a);
+            case "merge": return MergeCmd(a);
             case "text": return TextCmd(a);
             case "textbox": return TextboxCmd(a);
             case "image": return ImageCmd(a);
+            case "picture": return PictureCmd(a);
+            case "comment": return CommentCmd(a);
+            case "export": return ExportCmd(a);
             case "table": return TableCmd(a);
+            case "chart": return ChartCmd(a);
             case "shape": return ShapeCmd(a);
             case "format": return FormatCmd(a);
             case "font": return FontCmd(a);
             case "notes": return NotesCmd(a);
             case "theme": return ThemeCmd(a);
+            case "master": return MasterCmd(a);
             case "audit": return AuditCmd(a);
+            case "check": return CheckCmd(a);
+            case "outline": return OutlineCmd(a);
             case "align": return AlignCmd(a);
             case "zorder": return ZorderCmd(a);
             case "restore": return RestoreCmd(a);
@@ -393,7 +403,7 @@ internal static class Program
             case "close": return ClosePres(a);
             case "quit": return QuitAll(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|slide|text|textbox|image|table|shape|format|font|theme|audit|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|replace|selection|slide|split|merge|text|textbox|image|picture|comment|export|table|chart|shape|format|font|theme|master|audit|check|outline|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish");
         }
     }
 
@@ -492,11 +502,20 @@ internal static class Program
 
     private static dynamic RequirePres(Bag a, bool create)
     {
+        return RequirePres(a, create, false);
+    }
+
+    /// <summary>reopen=true is the `open` command: an explicit open must be able to
+    /// bring back a deck the helper remembered and the user closed afterwards (the
+    /// DOC_CLOSED guard exists to stop *silent* re-creation in the middle of a batch,
+    /// not to block a deliberate reopen).</summary>
+    private static dynamic RequirePres(Bag a, bool create, bool reopen)
+    {
         string path = a.Need("doc");
         string full = FullPathOf(path);
         dynamic p = FindOpen(full);
         if (p != null) { MarkerSet(full); return p; }
-        if (MarkerHas(full))
+        if (!reopen && MarkerHas(full))
             throw new Fail("DOC_CLOSED",
                 "The presentation " + full + " was attached by this skill earlier but is no longer open"
                 + " - it was probably closed by the user just now (any unsaved changes were lost with it)."
@@ -903,7 +922,7 @@ internal static class Program
     {
         string full = FullPathOf(a.Need("doc"));
         bool existed = FindOpen(full) != null;
-        dynamic p = RequirePres(a, true);
+        dynamic p = RequirePres(a, true, true);
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["name"] = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
         r["path"] = Convert.ToString(TryGet(() => (object)p.FullName, full), CultureInfo.InvariantCulture);
@@ -1403,9 +1422,13 @@ internal static class Program
         if (t < 0 && h > 0) t = (H - h) / 2;
         if (l < 0) l = W * 0.1;
         if (t < 0) t = H * 0.1;
+        // AddPicture refuses a non-ASCII path (this machine's work folder alone contains
+        // Chinese: 0x800C0005 / "Illegal characters in path"), so insert through an ASCII copy.
+        string insertPath = AsciiTempCopy(path);
         dynamic pic;
-        try { pic = slide.Shapes.AddPicture(path, 0, -1, (float)l, (float)t, wArg, hArg); }
+        try { pic = slide.Shapes.AddPicture(insertPath, 0, -1, (float)l, (float)t, wArg, hArg); }
         catch (COMException e) { throw new Fail("COM_ERROR", "AddPicture failed: " + Clean(e.Message) + " (if the file is encrypted, open it once in WPS or decrypt first)"); }
+        finally { TryDelete(insertPath); }
         string name = Convert.ToString(TryGet(() => (object)pic.Name, ""), CultureInfo.InvariantCulture);
         double fw = Convert.ToDouble(TryGet(() => (object)pic.Width, (object)0.0), CultureInfo.InvariantCulture);
         double fh = Convert.ToDouble(TryGet(() => (object)pic.Height, (object)0.0), CultureInfo.InvariantCulture);
@@ -2332,6 +2355,9 @@ internal static class Program
         }
         if (!File.Exists(path)) throw new Fail("BAD_ARGS", "snapshot not found: " + path + ". Take snapshot first (or pass -Since <file>).");
         Bag snap = new Bag(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
+        // `replace` writes a richer snapshot (groups, table cells, notes, header/footer);
+        // it restores through the same slot walker that produced it.
+        if (snap.Has("cells")) return RestoreSlots(p, snap, a.Str("shapes", null), path);
         List<object> before = snap.List("slides");
         string only = a.Str("shapes", null);
         HashSet<string> wanted = null;
@@ -2544,13 +2570,29 @@ internal static class Program
         dynamic p = FindOpen(full);
         if (p == null) throw new Fail("NOT_OPEN", "The presentation is not open: " + full);
         bool save = a.Flag("save", false);
+        bool saved = false;
+        if (save)
+        {
+            bool dirty = true;
+            try { dirty = (int)p.Saved == 0; } catch (Exception) { }
+            if (dirty)
+            {
+                try { ComRetry(() => { p.Save(); return 0; }); saved = true; }
+                catch (Exception e)
+                {
+                    throw new Fail("COM_ERROR", "could not save before closing " + full + ": " + Clean(e.Message));
+                }
+            }
+        }
         p.Close();
+        MarkerRemove(full);   // otherwise a later `open -Doc` of the same path is refused as DOC_CLOSED
         dynamic app = App(false, false);
         int left = 0;
         try { left = (int)app.Presentations.Count; }
         catch (Exception) { left = 0; }
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["closed"] = full;
+        r["saved"] = saved;
         r["presentationsLeft"] = left;
         if (left == 0)
         {

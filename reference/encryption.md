@@ -43,11 +43,20 @@
 顺序固定，别跳步：
 
 1. `save` 之后跑第 1 节的自查命令，确认头部。
-2. 要发给同事 / 上传 / 归档前，按文件类型用对应技能解密：
-   - Office / PDF / CAD / 图片 → **`decrypt-office-pdf`** 技能（批量脚本 `decrypt-files.ps1`，可对整个目录 `-Recurse`）。
-   - 只想在资源管理器里就地右键解密 → 本机自研的 **`FastDycrypt`** 右键菜单。
-   - 两者的用法与参数以各自技能的说明为准，本文不复述其内部实现。
-   - **没有装这些技能的机器**（比如拿到本 skill 的同事电脑）：用单位统一的解密途径——本单位的透明加密通常配套右键解密菜单或解密工具（如 `D:\应用软件\右键解密\`）；再没有就联系单位 IT。**不要**因此尝试用脚本改写文件。
+2. 要发给同事 / 上传 / 归档前，解密。**首选本机自研的 `FastDycrypt`**（离线算法实现，不依赖白名单进程，~9 s/份，任意格式）：
+
+   ```powershell
+   # 就地解密（原密文在解密成功后立即删除，不留 .dgsbak）
+   powershell -NoProfile -ExecutionPolicy Bypass -File `
+     "D:\DSH工作区\FastDycrypter\FastDycrypt\engine\dec.ps1" `
+     -Paths "<文件或目录>" -InPlace -DeleteBackupAfterSuccess -NoPause -NoLog
+   ```
+   - 资源管理器里右键 `FastDycrypt` 走的是同一引擎；批量/脚本化就用上面这条。
+   - 默认只处理 Office/PDF/图片/CAD 扩展名；其它类型加 `-AllFiles`；目录递归加 `-Recurse`。
+   - 日志默认追加到 `%LOCALAPPDATA%\FastDycrypt\decrypt.log`（`-NoLog` 关闭、`-LogFile` 改路径）。
+   - 备选：**`decrypt-office-pdf`** 技能（`decrypt-files.ps1`，走 `D:\应用软件\右键解密\` 的伪装白名单程序，~43 s/份；伪装 `powerpnt.exe` 是单实例，残留实例会把下一次调用卡死）。
+   - 两者的用法与参数以各自工具/技能的说明为准，本文不复述其内部实现。
+   - **没有装这些工具的机器**（比如拿到本 skill 的同事电脑）：用单位统一的解密途径——本单位的透明加密通常配套右键解密菜单或解密工具（如 `D:\应用软件\右键解密\`）；再没有就联系单位 IT。**不要**因此尝试用脚本改写文件。
 3. 解密后再跑一次自查：头部应恢复成 `PK`（PDF 恢复 `%PDF`）。**没恢复就是没成功**，别发。
 4. 发给同事的文件用解密后的那份；源文件保持原状即可。
 

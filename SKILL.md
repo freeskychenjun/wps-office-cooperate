@@ -305,11 +305,17 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `open` | `-Doc <路径> [-Show] [-ReadOnly]` | 已开则复用；未开则打开；**路径不存在则新建空稿并保存到该路径**；返回 slides 与 slideSize |
 | `read` | `-Doc [-From 1] [-Count 30]` | 逐页：layout + 形状清单（编号/名称/类型/占位符/l/t/w/h/文字前 160 字）+ 备注；>30 页自动分页 |
 | `search` | `-Doc -Text <词> [-Max 50] [-Case]` | 跨页找文字：返回 页号/形状名/片段 |
+| `replace` | `-Doc -Find <词> [-Replace <新词>] [-Scope all\|slides\|groups\|tables\|notes\|footer\|master] [-Slides "1-5,8"] [-Regex] [-Case] [-Max 500] [-DryRun]`；**批量：`-Items <json>`** | **全稿查找替换**（Word 侧 `revise`、Excel 侧 `write` 的对等能力）：扫**正文 / 组合内部 / 表格单元格 / 备注页 / 页眉页脚**；**母版默认不动**，要改必须显式 `-Scope master`（一改波及全稿）。默认**忽略大小写**（`-Case` 区分）、`-Regex` 支持 `$1`；**每处写入前用 `Characters()` 回读校验**，不符进 `skipped` 绝不盲写；返回逐处 `before→after`+`context`，并自动存 `prereplace` 快照，`restore -Since prereplace` 一键盘回滚。`-Replace` 省略 = 删除匹配 |
 | `selection` | `-Doc` | 用户当前所在页与选中的形状名（需窗口开着） |
 | `slide` | `-Action add [-Preset title\|section\|bullets\|two\|end] [-Title ...] [-Subtitle ...] [-Number ...] [-Items <json>] [-Layout n] [-At N]`；`-Action dup\|move\|delete -Index N [-At\|-To M]` | **预设版式建页**（几何随文稿尺寸自适应；预设文本框已命名 title/subtitle/number/body/left/right，后续 `-Shape` 直达）；或复制/移动/删除页 |
+| `split` | `-Doc -Chunks "1-20,21-45,46-80" -Out <目录> [-Prefix 名字] [-DryRun]` | **拆分册**：每个区间存成一个独立文稿（`<前缀>-part01.pptx`…），**源稿不动**。区间必须从 1 起连续覆盖全稿——**有空隙直接报错**（静默丢页比报错更贵）。新稿的页尺寸先按源稿设好再粘贴，否则整册被缩放 |
+| `merge` | `-Doc <目标稿> -Sources "a.pptx,b.pptx"` 或 `-Items <json: {"sources":[…]}>` `[-After N] [-DryRun]` | **合并多稿**：把来源稿的页依次插到目标稿 `-After N` 之后（默认追加到末尾），插完关掉来源稿。**每页保留它原来的版式**；要全篇统一外观再跑 `theme -Apply`，交付前跑 `check`。返回 `from/to` 页码范围，撤销就删这段再保存 |
 | `text` | 单条：`-Slide N [-Shape 名\|-ShapeIdx n] (-Text \| -TextFile) [-Expect 原文开头]`；**批量：`-Items <json>`** | 改形状文字；`expect` 锚校验不符则**整批一条不改**（`ANCHOR_MISSING`）；默认解析到标题占位符，否则第一个有字形状——**强烈建议显式 -Shape**；每条返回 before/textAfter，**立刻比对** |
 | `textbox` | `-Slide N (-Text\|-TextFile) [-Name 名] [-L -T -W -H pt]` + 格式项 | 加文本框（`-Name` 命名，后续定位用；中文字体/字号/对齐一起给） |
-| `image` | `-Slide N -Path <图片> [-L -T] [-W/-H pt]` | 插图（缺省居中）；返回最终尺寸；图占页宽 <20% 时提醒字母可能太小 |
+| `image` | `-Slide N -Path <图片> [-L -T] [-W/-H pt]` | 插图（缺省居中）；返回最终尺寸；图占页宽 <20% 时提醒字母可能太小。**路径含中文也行**：内部先拷到 ASCII 临时目录再插（`AddPicture` 不认非 ASCII 路径） |
+| `picture` | `-Action list [-Slides "1-5"]`；`-Action replace -New <图> [-Match "name:X"\|"size:56x57"\|"pos:0,0" \| -Ids "12,3"] [-Slides] [-DryRun] [-FitInside] [-KeepCrop]` | **全稿换 logo / 换效果图**：`list` 先看清有哪些图（页/形状/路径/几何/是否链接/是否在组合里），`replace` 按 `-Match` 或 `-Ids` 选中后**沿用原几何**换图（先插新图→还原位置尺寸→再删旧图），并**默认清掉旧裁剪**（新图通常不该继承旧图的裁切）。`-FitInside` 改成"等比缩进原框内"、`-KeepCrop` 保留旧裁剪。链接图走 `LinkFormat` 直接换源、几何不动。⚠️ **组合内的图只列不换**：子形状坐标是组合局部坐标，COM 拿不到 chOff/chExt，硬换会把 logo 丢到别处——这类会进 `skipped` 并说明原因 |
+| `comment` | `-Action add -Slide N [-Shape 名] (-Text\|-TextFile) [-Author AI]`；**批量：`-Items <json>`**；`-Action list`；`-Action delete -Slide N (-Index n \| -All)` | **PPT 批注**（与 Word 侧对齐）：锚到形状时自动在正文前加 `@形状名：`。⚠️ WPS 会自己摆批注钉位置（传 100,100 读回 5,5），**所以锚点信息必须写在文字里**，判据就是 `list` 里能读到 `@形状名`。批量中途失败**整批回滚**（`rolled back N`） |
+| `export` | `-Format pdf\|png\|jpg\|md [-Slides "1-5,8"] [-Out <路径或目录>] [-Width 1600] [-Quality 88]` | **交付导出**：`pdf` 走 `SaveCopyAs(...,32)`（真 PDF，且**不改打开中文稿的身份**）；`png/jpg` 走剪贴板→helper 写盘（**明文**，页范围生效）；`md` 直接出大纲（等于 `outline`）。⚠️ **本机 PDF 落盘是密文**，返回里 `encrypted:true` 会明确提示，发人前先解密 |
 | `table` | `-Slide N -Data <json: {"rows":[[...]]}> [-L -T -W -H] [-Size 14]` | 建表并填内容（首行默认加粗表头） |
 | `shape` | `-Action add -Type rect\|roundrect\|ellipse [-L -T -W -H] [-Fill 颜色] [-Line 颜色] [-Text ...]`；`-Action delete -Name <名>` | 画色块/圆角矩形/椭圆（可带字）；或按名删形状 |
 | `format` | `-Slide N -Shape <名> `+ 格式项 | 改文字格式（字体/字号/加粗/斜体/颜色/对齐/填充），返回回读值 |
@@ -318,14 +324,18 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `view` | `-Slide N` | 把 WPS 窗口切到那一页（唯一"跟随"手段，不动内容） |
 | `render` | `-Doc [-From 1] [-To 4] -Out <目录> [-Width 1100]`；**总览：`-Overview`（每次 ≤24 页，6 页拼一张并带页码）** | 逐页 EMF→PNG（**每次最多 4 页**）；写盘者是 helper，**明文可看**；`-Overview` 是"交付前过一遍全稿"的经济方式 |
 | `theme` | `-Set <json 文件>` / `-Apply` / `-Reset` / 不带选项=查看 | **整稿风格打底**：primary/accent/title/text/muted 五色 + font/titleFont + footer（页脚文字）+ pageNumber + skipFooterOnCover。`-Set` 存到该文稿主题文件（%LOCALAPPDATA%\wps-office-cooperate\ppt-themes），之后所有预设页自动跟随；`-Apply` 把已有页的字体/配色刷一遍并补页脚页码（**落在深色色块上的文字自动改白**） |
+| `master` | `-Action list`；`-Action footer [-Text 页脚] [-PageNum] [-Date] [-SkipCover] [-Slides] [-Clear]`；`-Action layout -Layout 1..11 [-Slides] [-DryRun]`；`-Action rebase -Path <模板稿> -Out <新稿> [-Layout n] [-KeepTemplatePages] [-Slides]` | **版式 / 页脚 / 套外来模板**。`list` 给出设计、版式清单与每页现状；`footer` 批量页脚+页码+日期（封面可跳过，`-Clear` 全清）；`layout` 批量换版式；`rebase` **以外来模板为底，把本稿的页搬进去**，内容页继承模板的母版与版式，模板自带的示例页默认删掉。⚠️ 换版式**只能用 `-Layout 1..11` 旧常量**（`Slide.CustomLayout = 对象` 在 WPS 里静默无效，`ApplyTemplate` 返回成功但什么都不做）；换完必须 `render` 看有没有丢占位符内容 |
+| `chart` | `-Action add -Slide N -Data <json> [-Type column\|barh\|line\|pie\|area\|doughnut\|scatter] [-Title] [-XTitle] [-YTitle] [-Legend] [-L -T -W -H]`；`-Action list` | **原生可编辑图表**（不是图，是图表对象）：数据经图表**内嵌工作簿**写入，所以读者能就地改数、换类型、重设样式。⚠️ **必须有窗口**：`open -Show` 之后再画，无窗口时 `AddChart` 直接 E_FAIL（`NO_WINDOW`）。WPS 只收**字面值**（不放公式）；种子是 3 系列×4 点，多余系列会删、点位靠**增删工作表行**对齐（`SetSourceData` 被拒）；超过 3 个系列会明确报"未写入"而不是静默丢 |
 | `audit` | `-Doc [-From/-To] [-MinFont 12]` | **机械体检**：文字溢出文本框、字号过小、形状越出页面、形状重叠（装饰色块除外）、图片 <20% 页宽、空页、无标题页。返回到 页/形状/类型/细节。⚠️ **人工制作的老稿误报率高**：整幅背景色块会报"重叠/越界"，标题用普通矩形会报"无标题页"，页面 logo 会报"图过小"——这些是设计意图，**结论以 `render` 目检为准**，audit 只当线索清单 |
+| `check` | `-Doc [-Profile report\|review\|bid\|internal] [-Rules all\|overflow,outframe,…] [-MinSeverity info\|minor\|major\|blocker] [-Config 规则.json] [-Out 报告.md\|.json] [-ExitCode]` | **交付前门禁**（audit 的判据版，**只读零风险**）：每条发现带 rule + 严重度（blocker/major/minor/info）+ fix 建议，返回 `summary`/{`issues`}/{`suppressed`}/`fonts`/`verdict`。规则库：`overflow` 文字撑破框、`outframe` 出页面、`placeholder` 残留"单击此处添加"、`fontsize` 标题<28/正文<14/脚注<10（按 profile 变）、`pagenum` 非封面缺页码/封面有页码、`title` 标题字号不一致、`contrast` 对比度<4.5:1、`density` 单页>300 字或>40 形状、`image-small` 图<20% 页宽、`empty` 空页。`-Config` 可覆盖阈值 + 按 `slide`/`shape`/`rule` 白名单抑制（抑制项**单列**在 `suppressed`，不消失）；`-ExitCode` 有 blocker 时返回码 3（给 CI/脚本用）；`-Out` 出 markdown 或 json 报告 |
+| `outline` | `-Doc [-Out 大纲.md\|.json]` | **导出大纲**：每页标题 + 要点 + 备注（按上→下、左→右的阅读序）。给"AI 写讲稿"这条链路供料：命令只负责抽取，写讲稿交给模型，`notes` 写回。⚠️ **中文参数别走命令行**（PS 5.1 会把 `-Profile 投标` 变成乱码），profile 用 ASCII 别名 `report/review/bid/internal`；中文一律走 JSON 文件 |
 | `align` | `-Slide N -Mode left\|right\|top\|bottom\|center-h\|same-width\|same-height\|distribute-h\|distribute-v [-Shapes "a,b,c"]` | 对齐/等距分布/统一尺寸（`-Shapes` 省略=该页全部形状）；返回每个形状的最终几何 |
 | `zorder` | `-Slide N (-Name 名 \| -ShapeIdx n) [-Where front\|back]` | 置顶/置底（图片压字时用） |
-| `restore` | `-Doc [-Since 快照\|tag] [-Shapes "3!备注,4!title"]` | **文本级回滚**：把文字退回快照状态（版式/新增形状不还原）；改坏了先回滚再想别的 |
+| `restore` | `-Doc [-Since 快照\|tag] [-Shapes "3!备注,4!title"]` | **文本级回滚**：把文字退回快照状态（版式/新增形状不还原）；`-Since prereplace` = 退回上一次 `replace` 之前（含组合/表格/备注/页脚）。改坏了先回滚再想别的 |
 | `snapshot` | `-Doc [-Tag 名]` | 存文本级快照（每页形状名+文字，默认存 %LOCALAPPDATA%\wps-office-cooperate\ppt-snapshots） |
 | `diff` | `-Doc [-Since 快照\|tag]` | 与快照比：哪页哪个形状的文字变了（before→after）、页增删 |
 | `save` | `-Doc [-As <路径>]` | 保存 / 另存（`.pdf` = 导出 PDF） |
-| `close` | `-Doc [-Save]` | 关闭；最后一份时退出实例，回报 wpp 进程数 |
+| `close` | `-Doc [-Save]` | 关闭；`-Save` 会先保存（有改动才存，返回 `saved:true`）；最后一份时退出实例，回报 wpp 进程数。**关闭后同一路径可以再 `open`** |
 | `quit` | — | 全部关闭并退出（不保存）。**慎用** |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | 完成信号（托盘气泡+提示音）；**不碰文稿任何内容**。任务收尾默认调用 |
 
@@ -344,11 +354,136 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - `expect` 可选但强烈建议：该形状当前文字必须**以它开头**，不符即整批拒绝。
 - 中途 COM 出错会按序回滚已改项（"rolled back N item(s)"）。
 
-### PPT 视觉自检闭环（**本轮真的改动过这份稿才走**）
+### `replace` 用法与边界（**批量改字必读**）
 
+```powershell
+# 一条规则
+ppt replace -Doc 稿.pptx -Find "2024" -Replace "2025" -DryRun      # 先只看清单
+ppt replace -Doc 稿.pptx -Find "2024" -Replace "2025"
+# 多条规则一次跑（批内按顺序，后一条看到前一条的结果）
+ppt replace -Doc 稿.pptx -Items 规则.json
+```
+```json
+{"items":[
+  {"find":"2024","replace":"2025","label":"年份"},
+  {"find":"XX水利水电勘测设计院","replace":"中铁水利水电规划设计集团"},
+  {"find":"(\\d{4})年(\\d{1,2})月","replace":"$1年$2月","regex":true,"label":"日期规范化"}
+]}
+```
+
+- **返回什么**：`scanned`（扫了多少页/形状/组合/表格单元格/备注/页脚/文字槽）、`changed`、`shapesTouched`、`hits[]`（`slide/where/shape/path/start/before/after/context`）、`skipped[]`（带 `reason`：`cross-paragraph` / `unverified-span`）、`preSnapshot`。
+- **`-DryRun` 先跑**：`changed` 就是"会改几处"，`applied:false`，**不落盘、不写快照**，`diff` 为空。给人看清单就是这个模式。
+- **跨 run 命中能改**（"2024"被拆成两个格式不同的 run 也能替换），靠的是写入前 `Characters(start,len)` 回读比对；**跨段落命中一律跳过**（`cross-paragraph`），因为替换会把两段并成一段，宁可不改。
+- **保格式**：替换后把 span 首字符的字体（字号/latin/中文字体/粗体/斜体/下划线/颜色）回填到新文字，且**只回填真正不同的项**。原因：WPS 在 span 覆盖整段 run 时会拿**后面**那个 run 的字体，实测 26pt 绿字会被写成 16pt 灰字——不回填就是肉眼可见的掉格式。
+- **母版默认不动**：`-Scope` 默认 `slides,groups,tables,notes,footer`。改母版就 `-Scope master`（会扫 SlideMaster + 全部 CustomLayouts），**改完必须 `render -Overview`**，因为措辞会出现在每一页。
+- **页脚只在已显示时改**：`HeadersFooters` 里隐藏的页脚会被跳过——为了改一个词而把页脚翻出来显示，等于偷偷改了版式。
+- **幂等**：同一条命令跑第二次 `changed:0`；`changed:0` 且 `skipped` 为空时返回里会提示先查 `-Case`/`-Scope`/全角半角。
+- **回滚**：`restore -Doc -Since prereplace` 把**整批**退回（含组合/表格/备注/页脚）。快照是"上一次 replace 之前"的那份，连跑两批只会留最后一批的。
+
+### 原生图表（`chart`）
+
+```powershell
+ppt open -Doc 稿.pptx -Show            # 必须有窗口，否则 AddChart 报 NO_WINDOW
+ppt chart -Doc 稿.pptx -Slide 3 -Data 数据.json -Type column -Title "实测流量" -YTitle "m³/s" -XTitle "年份"
+ppt chart -Doc 稿.pptx -Action list    # 已有图表清单（类型/系列/几何）
+```
+```json
+{"categories":["2020","2021","2022"],
+ "series":[{"name":"流量","values":[1200,1580,2248]},
+           {"name":"设计值","values":[1100,1500,2100]}]}
+```
+- **为什么用图表而不是贴图**：数据留在稿子里，读者能改数、切类型、重设样式；`outline`/`check` 也照常工作。
+- **WPS 的硬约束**（都实测过）：① 只在**有窗口**的稿里能建图表；② 只收**字面值**，公式不生效；③ `Series.Values` 写了不落盘，只有写内嵌工作簿才算数；④ `SetSourceData` 被拒，点数/系列数靠**增删工作表行**和删多余系列来对齐；⑤ `NewSeries` 不可用，超过种子（3）的系列会被告知未写入。
+- 建完 **必须 `render` 那一页**：默认几何是"页宽 55%×页高 45% 居中"，字号偏小是常态，必要时 `-W/-H` 调大或 `format` 调字号。
+
+### 套外来模板与批量页脚（`master`）
+
+```powershell
+ppt master -Doc 稿.pptx                                  # list：设计/版式清单 + 每页版式与页脚状态
+ppt master -Doc 稿.pptx -Action footer -Text "中铁水利 · 2025" -PageNum -SkipCover
+ppt master -Doc 稿.pptx -Action footer -Clear            # 全清（页码、页脚、日期）
+ppt master -Doc 稿.pptx -Action layout -Layout 6 -Slides "2-9"   # 换版式（旧常量）
+ppt master -Doc 外单位稿.pptx -Action rebase -Path 我们的模板.pptx -Out 套好模板.pptx -Layout 6
+```
+- **套模板的方向很重要**：把**内容页粘进模板稿**，内容才继承模板的母版；反过来往空白稿里粘只会把你的设计丢掉（实测）。`rebase` 走的就是前者，源稿不动。
+- **`-Layout` 只认 1..11 旧常量**（1 标题页、2 标题和文本、3 节标题、4 两栏、5 比较、6 仅标题、7 空白、8 带标题内容、9 带题注图片、10 竖排标题、11 竖排标题和文本）。传 `CustomLayout` 对象在 WPS 里**静默不生效**。
+- **页脚/页码是"每页占位符"**：开了以后每页会多出 `页脚占位符`／`灯片编号占位符` 两个形状（WPS 不写 `<p:hf>`）。所以开页脚会改变每页的形状数，`check -density` 会跟着变。
+- **换版式会重排占位符**：`layout` 返回每页 `shapesBefore/shapesAfter` 与 `layoutBefore/layoutAfter`，形状变少的页会进 `warnings`——那正是内容可能掉的地方，必须 `render` 复核。
+- 模板与源稿尺寸不一致时，`rebase` 会给 `warning`：形状只按绝对坐标搬，大页内容塞进小页会溢出。
+
+### 分册拆分与多稿合并（`split` / `merge`）
+
+```powershell
+# 80 页拆 5 个分册：区间必须连续覆盖全稿，有缺口直接报错
+ppt split -Doc 总报告.pptx -Chunks "1-16,17-32,33-48,49-64,65-80" -Out 分册\ -Prefix 上册
+ppt split -Doc 总报告.pptx -Chunks "1-16,17-32" -Out 分册\ -DryRun     # 先看计划
+
+# 三个县的稿合成一份（路径含逗号或不好写时走 JSON）
+ppt merge -Doc 汇总.pptx -Sources "a县.pptx,b县.pptx,c县.pptx"
+ppt merge -Doc 汇总.pptx -Items sources.json      # {"sources":["a.pptx","b.pptx"]}
+ppt merge -Doc 汇总.pptx -Sources a.pptx -After 1 # 插到第 1 页之后，而不是末尾
+```
+- **别用 `Slides.InsertFromFile`**：本机实测它会**把目标稿清成 0 页**。这里走的是 `Slide.Copy()` + `Slides.Paste()`。
+- **拆分册不能靠粘贴**：跨文稿粘贴**不带设计**（母版标记会丢）——所以 `split` 是"整份复制再删区间外的页"，设计、版式、备注母版全部保留（测试用母版标记逐份验过）。
+- **页尺寸是"每份文稿"的属性**：合并时新页进目标稿会按目标稿尺寸摆放，源稿与目标稿尺寸不同要留神溢出。
+- 拆/合都是**新建或追加**，不做破坏性覆盖：`split` 不动源稿，`merge` 只在目标稿插入，返回 `from/to` 页码，撤销就是删这一段。
+- 合出来的稿**每页保留原版式**，所以外观可能花——要统一再 `theme -Apply`，交付前 `check`。
+
+### `picture` / `comment` / `export` 三条常用链路
+
+```powershell
+# 全稿换 logo：先看清有哪些图，再按需替换
+ppt picture -Doc 稿.pptx                       # list：页/形状/几何/链接/是否在组合里
+ppt picture -Doc 稿.pptx -Action replace -New 新logo.png -DryRun
+ppt picture -Doc 稿.pptx -Action replace -New 新logo.png -Match "size:56x57"
+
+# 校审意见落到页面上（批量，失败整批回滚）
+ppt comment -Doc 稿.pptx -Items 意见.json -Author AI
+ppt comment -Doc 稿.pptx -Action list
+ppt comment -Doc 稿.pptx -Action delete -Slide 4 -All
+
+# 交付
+ppt export -Doc 稿.pptx -Format pdf -Out 稿.pdf
+ppt export -Doc 稿.pptx -Format png -Slides "1-2" -Out 图\ -Width 1600
+ppt export -Doc 稿.pptx -Format md  -Out 稿.md
+```
+```json
+{"items":[
+  {"slide":4,"shape":"note1","text":"数据来源需补充：《江西省水文年鉴》2020—2024。"},
+  {"slide":1,"text":"封面色带建议加深一档。"}
+]}
+```
+
+- **换图的正确姿势**：`list` → 挑 `-Match`/`-Ids` → `-DryRun` 看清单 → 真跑 → `render` 目检。新图纵横比不同时，**几何沿用旧图**意味着画面被拉伸，这点只有肉眼能判。
+- **组合内的图只列不换**（`skipped.reason = "inside a group"`）：子形状坐标是组合局部坐标，COM 不给 chOff/chExt，硬换必然丢位置。要换请先在 WPS 里把它移出组合。
+- **批注锚点写在文字里**（`@形状名：…`）：WPS 会自己摆钉位置，`Left/Top` 传 100,100 读回 5,5，靠坐标对不上的东西不算锚点。
+- **导出 PDF 会落密文**：返回 `encrypted:true` 就是提醒，发人前先解密（本机用 FastDycrypt，见 `reference/encryption.md`）。
+
+### `check` 用法（交付前必跑，只读）
+
+```powershell
+ppt check -Doc 稿.pptx                                  # 全规则，出分级清单
+ppt check -Doc 稿.pptx -MinSeverity blocker -ExitCode    # 门禁：有 blocker 就失败（返回码 3）
+ppt check -Doc 稿.pptx -Profile bid                      # 投标场合：正文下限抬到 18pt
+ppt check -Doc 稿.pptx -Config 院标规则.json -Out check.md
+```
+```json
+{"titleMin":28,"bodyMin":14,"footMin":10,"densityChars":300,"densityShapes":40,
+ "contrastMin":4.5,"overflowFactor":1.05,"imageWidthPct":20,
+ "suppress":[{"slide":7,"shape":"背景 1"},{"rule":"contrast","slide":12}]}
+```
+
+- **严重度分级**，交付前只看 `blocker`：`blocker` = 撑破框 / 出页面 / 残留占位符；`major` = 字号过小 / 缺页码 / 空页 / 标题字号不一致；`minor` = 对比度 / 密度 / 图过小。
+- **误报控制靠 `-Config` 白名单**：设计意图（整幅背景块、页脚小字、故意的小 logo）用 `slide`/`shape`/`rule` 抑制，被抑制的**列在 `suppressed` 里**而不是消失——下一篇同模板稿就能复用同一份配置。
+- **`verdict`** 直接给结论：`not ready:` / `readable but rough:` / `mechanically clean`。
+- **别把它当审美判据**：它只说"机械上能不能交"，内容对不对、好不好看仍要 `render` 目检。
+- ⚠️ **查不出"缺字体"**：实测 WPS 在打开时就把不存在的字体替换成已装的（fixture 里 `Definitely-Not-Installed-Font` 经 COM 读回来是 `Arial`），信息在我们看到之前就没了。`fonts` 只报"WPS 解析成了什么"，换机前请在有目标字体的机器上打开看一眼——这条限制作为 `limits` 字段随结果返回，不假装能查。
+
+### PPT 视觉自检闭环（**本轮真的改动过这份稿才走**）
 前提是本轮确实动过这份稿（新建、改文字、换主题、调版式都算）。**只是连上、只是读、只是查，不走这一步**（见铁律 7）。顺序固定：
 
 1. **`audit -Doc`** —— 机械筛查（溢出/字号/越界/重叠/空页），便宜但**对人工老稿误报多**（背景色块 / logo / 非占位符标题），先挑出真问题再修，别按条数硬修。
+   要"能不能交"的判据而不是线索清单时用 `check -MinSeverity blocker`（分级 + `-ExitCode` 门禁）。
 2. **`render -Overview -Out <目录>`** —— 每 6 页拼一张图，**逐张看**：标题层级是否统一、色块对不齐、要点与表格图挤在一起、半空页。
 3. 对可疑页 **`render -From N -To M`** 单页放大确认。
 4. 修（`text` / `align` / `table` / `theme -Apply`）→ **再 `render` 确认** → 才 `save`。
@@ -360,16 +495,20 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 1. **新建汇报稿**：`status` → `open -Doc 新路径 -Show`（自动建空稿）→ 可选 `theme -Set 主题.json`（一次定型：主色/字体/页脚）→ `slide -Preset title ...`（封面）→ `slide -Preset bullets -Items 提纲.json`（目录页）→ 逐节 `slide -Preset section -Number 01`。
 2. **填充内容页**：`slide -Preset bullets` 打骨架（正文占 25%–75%，下方留给表格/图）→ `table -Data 表.json`（默认 90% 页宽、y=62%）→ `image -Path 图.png` → 每页 `render` 目检。
 3. **改已有稿**：`read` 拿形状名 → `text -Items`（带 expect）批量改 → 比对 textAfter → `render` 抽查。
+   **同一个词散落在几十页时不要用 `text` 逐条改**：`replace -Find ... -Replace ... -DryRun` 先出清单，确认后再去掉 `-DryRun` 跑一遍（一次覆盖正文/组合/表格/备注/页脚），`diff` 验收，改坏了 `restore -Since prereplace`。
 4. **收拾版式**：`align` 对齐/等距、`zorder` 修压字、`audit` 兜底；要统一字体用 `font -Font <字体>`（一次全稿，含组合/表格），**换字体后必 `render -Overview` 查折行溢出**，挤爆的框用 `format -Size` 收一档。
 5. **人机接力**：`snapshot -Tag r1` → 干活 → `diff -Since r1` 看人改了什么；改坏 `restore -Since r1`。
-6. **收尾**：`theme -Apply`（统一配色页脚）→ `audit` → `render -Overview` **看一眼** → `save`（提醒落盘可能是密文）→ `close`（汇报 wpp 数）→ `finish`。
+6. **收尾**：`theme -Apply`（统一配色页脚）→ `check -MinSeverity blocker`（交不交得出去）→ `audit` → `render -Overview` **看一眼** → `save`（提醒落盘可能是密文）→ `close`（汇报 wpp 数）→ `finish`。
 
 ## PPT 故障排查
 
 | 错误码 / 现象 | 怎么办 |
 |---|---|
 | `NO_APP` | 没装 WPS 演示或 KWPP COM 没注册；手动开一次 WPS 演示再试。 |
-| `NOT_OPEN` / `DOC_CLOSED` | 语义同 Excel：`-Doc` 路径与实际不符先 `status`；协作中被关闭不要静默重开，先问用户。 |
+| `NOT_OPEN` / `DOC_CLOSED` | 语义同 Excel：`-Doc` 路径与实际不符先 `status`；协作中被关闭不要静默重开，先问用户。**用户自己关掉后想继续**，直接 `open -Doc <同一路径>` 即可（显式 open 会重新打开并刷新标记） |
+| `replace` 返回 `changed:0` | 依次排查：`-Case`（默认忽略大小写，你反而可能想要区分）、`-Scope`（母版/备注/页脚默认是否在范围内）、全角半角与原稿是否一致、`-Slides` 是否限窄了。返回里的 `note` 会给出这条提示 |
+| `replace` 的 `skipped[].reason=cross-paragraph` | 匹配跨了段落标记（替换会把两段并成一段）；缩小 `-Find` 或手工改这两处 |
+| `replace` 的 `skipped[].reason=unverified-span` | 写入前回读到的不是原匹配文字（通常是合并单元格被重复寻址，或用户同时手改了）；**没写入是好事**，`read` 后手工补 |
 | `ANCHOR_MISSING` | 形状当前文字与 `expect` 不符（人刚改了/定位错形状）。整批没改，重新 `read` 核对形状名。 |
 | `render` 报 `COM_ERROR`（clipboard） | 多半是弹了对话框占住剪贴板，或刚 Copy 完还没就绪。关掉对话框重试。 |
 | 同页形状重名（旧稿"文本框 1"满天飞） | `-Shape` 会命中第一个；用 `-ShapeIdx`（read 里的 i 列）或先 `format` 不行就 `textbox -Name` 加命名框替代。 |

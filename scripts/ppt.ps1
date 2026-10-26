@@ -8,8 +8,8 @@
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'slide', 'text', 'textbox', 'image', 'table', 'shape',
-                 'format', 'font', 'theme', 'audit', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish')]
+    [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'replace', 'selection', 'slide', 'split', 'merge', 'text', 'textbox', 'image', 'picture', 'comment', 'export', 'table', 'chart', 'shape',
+                 'format', 'font', 'theme', 'master', 'audit', 'check', 'outline', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish')]
     [string]$Command,
 
     [string]$Doc,
@@ -24,6 +24,43 @@ param(
     [string]$Expect,
     [string]$Text,
     [string]$TextFile,
+    # replace options
+    [string]$Find,
+    [string]$Replace,
+    [string]$Scope,
+    [string]$Slides,
+    [switch]$Regex,
+    [switch]$DryRun,
+    # check / outline options
+    [string]$Profile,
+    [string]$Rules,
+    [string]$MinSeverity,
+    [string]$Config,
+    [switch]$ExitCode,
+    # comment / export / picture options
+    [string]$Format,
+    [string]$New,
+    [string]$Match,
+    [string]$Ids,
+    [string]$Author,
+    # split / merge options
+    [string]$Chunks,
+    [string]$Sources,
+    [string]$Prefix,
+    [int]$After = -1,
+    # master options
+    [switch]$PageNum,
+    [switch]$Date,
+    [switch]$SkipCover,
+    [switch]$KeepTemplatePages,
+    # chart options
+    [string]$XTitle,
+    [string]$YTitle,
+    [switch]$Legend,
+    [int]$Quality = 88,
+    [switch]$KeepCrop,
+    [switch]$FitInside,
+    [switch]$All,
     [string]$Preset,
     [string]$Title,
     [string]$Subtitle,
@@ -96,11 +133,11 @@ function Resolve-FullPath([string]$p) {
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sourceDir = Join-Path $scriptRoot 'helper\ppt'
 if (-not (Test-Path -LiteralPath $sourceDir)) { Write-Error-Json 'NO_HELPER' ("Helper folder not found: " + $sourceDir) }
-$sources = @(Get-ChildItem -LiteralPath $sourceDir -Filter *.cs | Sort-Object Name)
-if ($sources.Count -eq 0) { Write-Error-Json 'NO_HELPER' ('No .cs in ' + $sourceDir) }
+$helperSources = @(Get-ChildItem -LiteralPath $sourceDir -Filter *.cs | Sort-Object Name)
+if ($helperSources.Count -eq 0) { Write-Error-Json 'NO_HELPER' ('No .cs in ' + $sourceDir) }
 
 # The cache key covers every source file, so editing any of them rebuilds.
-$hashInput = ($sources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
+$hashInput = ($helperSources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
 $shaGen = [System.Security.Cryptography.SHA256]::Create()
 $sha = ([System.BitConverter]::ToString($shaGen.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($hashInput))) -replace '-', '').ToLowerInvariant().Substring(0, 12)
 $cacheDir = Join-Path $env:LOCALAPPDATA ('wps-office-cooperate\ppt-helper-' + $sha)
@@ -116,7 +153,7 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
     $tempExe = Join-Path $cacheDir ('build-' + $PID + '.exe')
     $refs = @('-r:System.dll', '-r:System.Core.dll', '-r:System.Drawing.dll', '-r:System.Windows.Forms.dll', '/codepage:65001')
-    $compileLog = & $csc -nologo -optimize+ -target:exe ("-out:" + $tempExe) $refs ($sources | ForEach-Object { $_.FullName }) 2>&1 | Out-String
+    $compileLog = & $csc -nologo -optimize+ -target:exe ("-out:" + $tempExe) $refs ($helperSources | ForEach-Object { $_.FullName }) 2>&1 | Out-String
     if (-not (Test-Path -LiteralPath $tempExe)) {
         Write-Error-Json 'COMPILE_FAILED' ("csc failed: " + $compileLog.Trim())
     }
@@ -171,6 +208,23 @@ switch ($Command) {
     'selection' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'selection needs -Doc' }
     }
+    'replace' {
+        # whole-deck find/replace; -Items <json> takes [{find,replace,regex?,case?,label?}]
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'replace needs -Doc' }
+        if ($Items) { $request['items'] = Read-Items-Json $Items }
+        else {
+            if (-not $Find) { Write-Error-Json 'BAD_ARGS' 'replace needs -Find <text> (or -Items <json>)' }
+            $request['find'] = $Find
+        }
+        # an omitted -Replace means "delete the match"; -Replace "" is the same thing
+        if ($PSBoundParameters.ContainsKey('Replace')) { $request['replace'] = $Replace }
+        if ($Scope) { $request['scope'] = $Scope }
+        if ($Slides) { $request['slides'] = $Slides }
+        if ($Regex) { $request['regex'] = $true }
+        if ($Case) { $request['case'] = $true }
+        if ($DryRun) { $request['dryRun'] = $true }
+        if ($PSBoundParameters.ContainsKey('Max')) { $request['max'] = $Max }
+    }
     'slide' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'slide needs -Doc' }
         $request['action'] = if ($Action) { $Action.ToLowerInvariant() } else { 'add' }
@@ -223,6 +277,113 @@ switch ($Command) {
         if ($T -ge 0) { $request['t'] = $T }
         if ($W -gt 0) { $request['w'] = $W }
         if ($H -gt 0) { $request['h'] = $H }
+    }
+    'split' {
+        # 拆成分册：每个 chunk 存成一个独立文稿，源稿不动
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'split needs -Doc' }
+        if (-not $Chunks) { Write-Error-Json 'BAD_ARGS' 'split needs -Chunks "1-20,21-45,46-80"' }
+        if (-not $Out) { Write-Error-Json 'BAD_ARGS' 'split needs -Out <folder>' }
+        $request['chunks'] = $Chunks
+        $request['out'] = Resolve-FullPath $Out
+        if ($Prefix) { $request['prefix'] = $Prefix }
+        if ($DryRun) { $request['dryRun'] = $true }
+    }
+    'merge' {
+        # 合并多稿：把 -Sources 的页依次插到目标稿（-After 之后，默认追加到末尾）
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'merge needs -Doc <target deck>' }
+        if ($Items) {
+            # a JSON file may hold either {"sources":[...]} or {"items":[{...}]}
+            $rawItems = [System.IO.File]::ReadAllText((Resolve-FullPath $Items), [System.Text.Encoding]::UTF8)
+            $parsedItems = $rawItems | ConvertFrom-Json
+            if ($parsedItems.PSObject.Properties.Name -contains 'sources') {
+                $request['sourcesList'] = @($parsedItems.sources)
+            }
+            else {
+                $request['items'] = Read-Items-Json $Items
+            }
+        }
+        elseif ($Sources) { $request['sources'] = $Sources }
+        else { Write-Error-Json 'BAD_ARGS' 'merge needs -Sources "a.pptx,b.pptx" (or -Items <json: {"sources":[...]}>)' }
+        if ($After -ge 0) { $request['after'] = $After }
+        if ($DryRun) { $request['dryRun'] = $true }
+    }
+    'picture' {
+        # list / replace every picture on the deck (unit logo, refreshed renderings)
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'picture needs -Doc' }
+        $request['action'] = if ($Action) { $Action.ToLowerInvariant() } else { 'list' }
+        if ($New) { $request['new'] = Resolve-FullPath $New }
+        if ($Match) { $request['match'] = $Match }
+        if ($Ids) { $request['ids'] = $Ids }
+        if ($Slides) { $request['slides'] = $Slides }
+        if ($DryRun) { $request['dryRun'] = $true }
+        # the helper already defaults to "keep the old geometry, reset the crop";
+        # these two switches are the opt-outs, not the defaults
+        if ($FitInside) { $request['keepSize'] = $false }
+        if ($KeepCrop) { $request['resetCrop'] = $false }
+    }
+    'comment' {
+        # review remarks anchored to a shape; WPS keeps the text, not our Left/Top
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'comment needs -Doc' }
+        $request['action'] = if ($Action) { $Action.ToLowerInvariant() } else { 'add' }
+        if ($Items) { $request['items'] = Read-Items-Json $Items }
+        else {
+            if ($Slide -gt 0) { $request['slide'] = $Slide }
+            if ($Shape) { $request['shape'] = $Shape }
+            if ($TextFile) { $request['textFile'] = (Resolve-FullPath $TextFile) }
+            elseif ($Text) { $request['text'] = $Text }
+        }
+        if ($Author) { $request['author'] = $Author }
+        if ($Index -gt 0) { $request['index'] = $Index }
+        if ($All) { $request['all'] = $true }
+        if ($Clear) { $request['clear'] = $true }
+    }
+    'export' {
+        # PDF / PNG / JPG / markdown hand-over
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'export needs -Doc' }
+        if (-not $Out) { Write-Error-Json 'BAD_ARGS' 'export needs -Out <path or folder>' }
+        $request['format'] = if ($Format) { $Format.ToLowerInvariant() } else { 'pdf' }
+        $request['out'] = Resolve-FullPath $Out
+        if ($Slides) { $request['slides'] = $Slides }
+        if ($Width) { $request['width'] = [int]$Width }
+        if ($Quality -ne 88) { $request['quality'] = $Quality }
+    }
+    'master' {
+        # list / batch footer+page numbers / switch layout / rebase onto a template
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'master needs -Doc' }
+        $request['action'] = if ($Action) { $Action.ToLowerInvariant() } else { 'list' }
+        if ($Slides) { $request['slides'] = $Slides }
+        if ($Text) { $request['text'] = $Text }
+        if ($TextFile) { $request['text'] = [System.IO.File]::ReadAllText((Resolve-FullPath $TextFile), [System.Text.Encoding]::UTF8).TrimEnd() }
+        if ($PageNum) { $request['pageNum'] = $true }
+        if ($Date) { $request['date'] = $true }
+        if ($SkipCover) { $request['skipCover'] = $true }
+        if ($Clear) { $request['clear'] = $true }
+        if ($Layout -gt 0) { $request['layout'] = $Layout }
+        if ($Path) { $request['path'] = Resolve-FullPath $Path }
+        if ($Out) { $request['out'] = Resolve-FullPath $Out }
+        if ($KeepTemplatePages) { $request['keepTemplatePages'] = $true }
+        if ($DryRun) { $request['dryRun'] = $true }
+    }
+    'chart' {
+        # native editable chart; the data goes through the chart's embedded workbook
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'chart needs -Doc' }
+        $request['action'] = if ($Action) { $Action.ToLowerInvariant() } else { 'add' }
+        if ($request['action'] -eq 'add') {
+            if ($Slide -lt 1) { Write-Error-Json 'BAD_ARGS' 'chart needs -Slide <n>' }
+            if (-not $Data) { Write-Error-Json 'BAD_ARGS' 'chart needs -Data <json: {"categories":[..],"series":[{"name":..,"values":[..]}]}>' }
+            $request['slide'] = $Slide
+            $request['data'] = Resolve-FullPath $Data
+            $request['type'] = if ($Type) { $Type.ToLowerInvariant() } else { 'column' }
+            if ($Title) { $request['title'] = $Title }
+            if ($XTitle) { $request['xtitle'] = $XTitle }
+            if ($YTitle) { $request['ytitle'] = $YTitle }
+            if ($Legend) { $request['legend'] = $true }
+            if ($L -ge 0) { $request['l'] = $L }
+            if ($T -ge 0) { $request['t'] = $T }
+            if ($W -gt 0) { $request['w'] = $W }
+            if ($H -gt 0) { $request['h'] = $H }
+        }
+        if ($Slides) { $request['slides'] = $Slides }
     }
     'table' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'table needs -Doc' }
@@ -299,6 +460,20 @@ switch ($Command) {
         if ($From -gt 1) { $request['from'] = $From }
         if ($To -gt 0) { $request['to'] = $To }
         if ($MinFont -ne 12) { $request['minFont'] = $MinFont }
+    }
+    'check' {
+        # read-only delivery gate: severity-graded findings, configurable rule library
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'check needs -Doc' }
+        if ($Profile) { $request['profile'] = $Profile }
+        if ($Rules) { $request['rules'] = $Rules }
+        if ($MinSeverity) { $request['minSeverity'] = $MinSeverity }
+        if ($Config) { $request['config'] = Resolve-FullPath $Config }
+        if ($Out) { $request['out'] = Resolve-FullPath $Out }
+    }
+    'outline' {
+        # titles + bullets + notes -> markdown/json (feeds the "write me a script" flow)
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'outline needs -Doc' }
+        if ($Out) { $request['out'] = Resolve-FullPath $Out }
     }
     'align' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'align needs -Doc' }
@@ -378,4 +553,7 @@ $text = [System.IO.File]::ReadAllText($responsePath, [System.Text.Encoding]::UTF
 Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
 [Console]::Out.Write($text)
 if ($text -match '"ok"\s*:\s*false') { exit 2 }
+# -ExitCode turns `check` into a gate: a non-zero blocker count fails the call, so a
+# script (or CI) can refuse to ship the deck without parsing the JSON.
+if ($ExitCode -and $text -match '"blocker"\s*:\s*[1-9]') { exit 3 }
 exit 0

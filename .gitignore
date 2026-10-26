@@ -1,6 +1,15 @@
 tests/work/
+tests/ppt/out/
+tests/ppt/out-check/
+tests/ppt/out.stale-*/
+__pycache__/
 *.tmp/
 .tmp/
 sandbox-*/
 *.exe
 guide.html
+tests/ppt/local.config.json
+tests/ppt/out-chapters/
+tests/ppt/out-deliver/
+tests/ppt/out-master/
+tests/ppt/out-chart/
