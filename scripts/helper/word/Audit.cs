@@ -123,47 +123,62 @@ internal static partial class Program
         }
 
         // Captions: a table wants "表" above it, a picture wants "图" below it.
+        // The judge is the caption PARSER (label must open the paragraph), not a loose "the paragraph
+        // contains 表N" regex: a body sentence like "如表3.3-2所示" used to count as a caption (field
+        // report 2026-10-26), and a caption typed into the table's first row used to be reported twice
+        // (caption-missing AND table-caption-in-row, for the same table).
         try
         {
             int tables = (int)doc.Tables.Count;
             for (int t = 1; t <= tables; t++)
             {
                 dynamic tb = doc.Tables.Item(t);
-                int at = (int)doc.Range(0, (int)tb.Range.Start).Paragraphs.Count;
-                bool ok = false;
-                for (int k = Math.Max(1, at - 3); k <= at && k <= total; k++)
-                {
-                    string above = CleanPara(Convert.ToString(TryGet(() => (object)doc.Paragraphs.Item(k).Range.Text, ""), CultureInfo.InvariantCulture));
-                    if (above.Contains("\u8868 ") || above.Contains("\u8868\u3000") || Regex.IsMatch(above, "\u8868\\s*[0-9\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]")) { ok = true; break; }
-                }
-                c.Para = at;
-                if (!ok) c.Add("caption-missing", "表格 " + t + "（第 " + at + " 段之前）", "表格前缺少「表 N」题注");
-
-                // The caption typed INTO the first (usually merged) row - extremely common in
-                // Chinese reports, and it makes the table look framed around its own title.
+                int startPara = TableStartPara(doc, tb, total);
+                bool captionInRow = false;
                 try
                 {
                     string firstCell = CleanPara(Convert.ToString(TryGet(() => (object)tb.Cell(1, 1).Range.Text, ""), CultureInfo.InvariantCulture)).Trim();
-                    if (IsCaptionText(firstCell))
+                    captionInRow = IsCaptionText(firstCell);
+                    if (captionInRow)
                         c.Add("table-caption-in-row", "表格 " + t + " 第 1 行：" + Head(firstCell, 40),
                               "题名做进了表格第 1 行；用 table -Action caption -Table " + t + " 提到框外（会自动删该行并可顺带加粗边框）");
                 }
                 catch (Exception) { }
+
+                if (captionInRow) continue;   // the caption exists, it only sits in the wrong place
+
+                bool ok = false;
+                for (int k = startPara - 1; k >= 1 && k >= startPara - 3; k--)
+                {
+                    string above = CleanPara(Convert.ToString(TryGet(() => (object)doc.Paragraphs.Item(k).Range.Text, ""), CultureInfo.InvariantCulture));
+                    if (above.Trim().Length == 0) continue;      // blank line between caption and table
+                    ok = ParseCaption(above) != null;            // first real paragraph decides
+                    break;
+                }
+                c.Para = startPara;
+                if (!ok) c.Add("caption-missing", "表格 " + t + "（起始段 " + startPara + "）", "表格前缺少「表 N」题注，表内第 1 行也没有；补题注后可用 word captions 一次核对全篇编号");
             }
 
             int shapes = (int)doc.InlineShapes.Count;
             for (int s = 1; s <= shapes; s++)
             {
                 dynamic sh = doc.InlineShapes.Item(s);
-                int at = (int)doc.Range(0, (int)sh.Range.Start).Paragraphs.Count;
+                int at = ParaAtOffset(doc, (int)sh.Range.Start, total);
                 bool ok = false;
-                for (int k = at; k <= Math.Min(total, at + 3); k++)
+                // A figure caption may sit 1-3 paragraphs below its picture (measured on a real report:
+                // picture / empty paragraph / a stray "/" paragraph / 图2.1-1 xxx). Walk forward a few
+                // paragraphs but stop at the next heading, which means the figure's area has ended.
+                for (int k = at; k <= Math.Min(total, at + 4); k++)
                 {
-                    string below = CleanPara(Convert.ToString(TryGet(() => (object)doc.Paragraphs.Item(k).Range.Text, ""), CultureInfo.InvariantCulture));
-                    if (below.Contains("\u56fe ") || below.Contains("\u56fe\u3000") || Regex.IsMatch(below, "\u56fe\\s*[0-9\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]")) { ok = true; break; }
+                    string below = ParaTextAt(doc, k);
+                    string style = Convert.ToString(TryGet(() => (object)doc.Paragraphs.Item(k).Style.NameLocal, ""), CultureInfo.InvariantCulture);
+                    if (below.Trim().Length == 0) continue;
+                    CaptionInfo ci = ParseCaption(below);
+                    if (ci != null && (ci.Label == "\u56fe" || ci.Label == "\u9644\u56fe")) { ok = true; break; }
+                    if (HeadingLevel(style) > 0) break;
                 }
                 c.Para = at;
-                if (!ok) c.Add("caption-missing", "图片 " + s + "（第 " + at + " 段）", "图片下方缺少「图 N」题注");
+                if (!ok) c.Add("caption-missing", "图片 " + s + "（第 " + at + " 段之后）", "图片下方缺少「图 N」题注");
             }
         }
         catch (Exception) { }
@@ -194,7 +209,7 @@ internal static partial class Program
         r["byRule"] = byRule;
         r["truncated"] = c.Truncated;
         r["saved"] = false;
-        r["note"] = "These are the mechanical checks only. Read the flagged paragraphs, decide, then write comments with `comment -Items` on this same open document; do not hand the file to an offline skill while WPS has it open.";
+        r["note"] = "These are the mechanical checks only. Read the flagged paragraphs, decide, then write comments with `comment -Items` on this same open document; do not hand the file to an offline skill while WPS has it open. \u9898\u6ce8\u7f16\u53f7\u672c\u8eab\u7684\u95ee\u9898\uff08\u91cd\u53f7/\u8df3\u53f7/\u683c\u5f0f\u6df7\u7528/\u60ac\u7a7a\u5f15\u7528\uff09\u4e0d\u5728\u8fd9\u91cc\u67e5\uff1a\u8dd1 word captions \u4e00\u6761\u547d\u4ee4\u5c31\u51fa\u6e05\u5355\u3002";
         return r;
     }
 

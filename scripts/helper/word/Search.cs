@@ -33,18 +33,8 @@ internal static partial class Program
 
         int total = (int)TryGet(() => (object)(int)doc.Paragraphs.Count, 0);
 
-        // Table spans so hits can be flagged inTable (same trick as read).
-        List<int[]> spans = new List<int[]>();
-        int tables = (int)TryGet(() => (object)(int)doc.Tables.Count, 0);
-        for (int t = 1; t <= tables; t++)
-        {
-            try
-            {
-                dynamic tb = doc.Tables.Item(t);
-                spans.Add(new int[] { (int)tb.Range.Start, (int)tb.Range.End });
-            }
-            catch (Exception) { spans.Add(new int[] { -1, -1 }); }
-        }
+        // Table spans so hits can be flagged inTable (same trick and same half-open rule as read).
+        List<int[]> spans = TableSpans(doc);
 
         List<object> hits = new List<object>();
         int totalHits = 0;
@@ -64,11 +54,10 @@ internal static partial class Program
             int at = IndexOf(text, needle, 0, cmp);
             if (at < 0) continue;
 
-            int start = -1, end = -1;
-            try { start = (int)p.Range.Start; end = (int)p.Range.End; } catch (Exception) { }
-            bool inTable = false;
-            foreach (int[] span in spans)
-                if (span[0] >= 0 && start >= span[0] && start <= span[1]) { inTable = true; break; }
+            int start = -1;
+            try { start = (int)p.Range.Start; } catch (Exception) { }
+            int tableNo = TableAt(spans, start);
+            bool inTable = tableNo > 0;
 
             int inThis = 0;
             while (at >= 0)
@@ -83,7 +72,7 @@ internal static partial class Program
                         Dictionary<string, object> one = new Dictionary<string, object>();
                         one["para"] = k;
                         one["style"] = style;
-                        if (inTable) one["inTable"] = true;
+                        if (inTable) { one["inTable"] = true; one["table"] = tableNo; }
                         one["at"] = at;
                         one["context"] = ContextOf(text, at, needle.Length);
                         hits.Add(one);
@@ -199,7 +188,7 @@ internal static partial class Program
                         try
                         {
                             dynamic tb = doc.Tables.Item(t);
-                            if (s >= (int)tb.Range.Start && s <= (int)tb.Range.End)
+                            if (s >= (int)tb.Range.Start && s < (int)tb.Range.End)
                             {
                                 inTable = true;
                                 tableIndex = t;
@@ -237,7 +226,7 @@ internal static partial class Program
                     try
                     {
                         dynamic tb = doc.Tables.Item(t);
-                        if (s >= (int)tb.Range.Start && s <= (int)tb.Range.End)
+                        if (s >= (int)tb.Range.Start && s < (int)tb.Range.End)
                         {
                             inTable = true;
                             tableIndex = t;

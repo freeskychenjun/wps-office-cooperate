@@ -141,7 +141,7 @@ internal static partial class Program
         {
             int start = (int)TryGet(() => (object)(int)doc.Tables.Item(t).Range.Start, -2);
             int end = (int)TryGet(() => (object)(int)doc.Tables.Item(t).Range.End, -3);
-            if (want >= start && want <= end) return t;
+            if (want >= start && want < end) return t;
         }
         return 0;
     }

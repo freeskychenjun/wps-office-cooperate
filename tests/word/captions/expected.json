@@ -1,0 +1,246 @@
+{
+  "doc": "captions-fixture.docx",
+  "tables": 20,
+  "bigTables": 8,
+  "bigTableSize": [
+    35,
+    13
+  ],
+  "captions": [
+    {
+      "table": 1,
+      "label": "表",
+      "number": "2.1.1",
+      "title": "峡江站天然径流成果表",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 2,
+      "label": "表",
+      "number": "2.1.2",
+      "title": "峡江站天然径流月分配表",
+      "pos": "in-table",
+      "gap": "　",
+      "style": null
+    },
+    {
+      "table": 3,
+      "label": "表",
+      "number": "2.2.1",
+      "title": "峡江站逐日平均流量表（一）",
+      "pos": "above",
+      "gap": "",
+      "style": null
+    },
+    {
+      "table": 4,
+      "label": "表",
+      "number": "2.2.2",
+      "title": "峡江站逐日平均流量表（二）",
+      "pos": "in-table",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 5,
+      "label": "表",
+      "number": "2.2.3",
+      "title": "峡江站逐日平均流量表（三）",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 6,
+      "label": "表",
+      "number": "2.4.1",
+      "title": "坝址水位流量关系",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 7,
+      "label": "表",
+      "number": "2.4.3",
+      "title": "坝前水位流量关系",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 8,
+      "label": "表",
+      "number": "3.1-1",
+      "title": "设计洪水成果表",
+      "pos": "in-table",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 9,
+      "label": "表",
+      "number": "3.1-2",
+      "title": "分期洪水成果表",
+      "pos": "in-table",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 10,
+      "label": "表",
+      "number": "3.2-1",
+      "title": "库容曲线",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 11,
+      "label": "表",
+      "number": "3.2-2",
+      "title": "泄流能力曲线",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 12,
+      "label": "表",
+      "number": "3.3-1",
+      "title": "调度规则表",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 13,
+      "label": "表",
+      "number": "3.3-2",
+      "title": "水库运行调度规则",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 14,
+      "label": "表",
+      "number": "3.3-3",
+      "title": "Q泄i-1与△Q关系",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 15,
+      "label": "表",
+      "number": "3.3-3",
+      "title": "泄流能力复核表",
+      "pos": "in-table",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 16,
+      "label": "表",
+      "number": "3.3-4",
+      "title": "水库特征水位表",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 17,
+      "label": "表",
+      "number": "4.1-1",
+      "title": "工程量汇总表",
+      "pos": "in-table",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 18,
+      "label": "表",
+      "number": "4.1-2",
+      "title": "投资估算表",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    },
+    {
+      "table": 20,
+      "label": "表",
+      "number": "4.2-1",
+      "title": "结论对照表",
+      "pos": "above",
+      "gap": "  ",
+      "style": null
+    }
+  ],
+  "defects": {
+    "duplicates": [
+      {
+        "number": "3.3-3",
+        "tables": [
+          14,
+          15
+        ]
+      }
+    ],
+    "sequenceGaps": [
+      {
+        "chapter": "2",
+        "after": "2.4.1",
+        "before": "2.4.3",
+        "missing": [
+          "2.4.2"
+        ]
+      }
+    ],
+    "formatMixed": {
+      "dot": [
+        "2.1.1",
+        "2.1.2",
+        "2.2.1",
+        "2.2.2",
+        "2.2.3",
+        "2.4.1",
+        "2.4.3"
+      ],
+      "hyphen": [
+        "3.1-1",
+        "3.1-2",
+        "3.2-1",
+        "3.2-2",
+        "3.3-1",
+        "3.3-2",
+        "3.3-3",
+        "3.3-3",
+        "3.3-4",
+        "4.1-1",
+        "4.1-2",
+        "4.2-1"
+      ]
+    },
+    "missingCaptionTables": [
+      19
+    ],
+    "spaceMixed": true,
+    "danglingReferences": [
+      "2.9.9"
+    ],
+    "resolvedReferences": [
+      "2.1.1",
+      "3.1-1",
+      "3.3-2",
+      "4.1-2"
+    ],
+    "proseAfterTable": {
+      "afterTable": 13,
+      "text": "为满足表3.3-2的控制要求"
+    }
+  },
+  "notes": "题注位置交替：above 为表格上方紧邻的独立段落（居中、无缩进、题注后无空段），in-table 为表格第 1 行合并单元格。表号与标题之间的空白逐表不同（两个半角空格 / 一个全角空格 / 无空格），用于验证空格不一场景。第 2 章用点分表号 2.1.1，第 3、4 章用短横表号 3.1-1；表 14 与表 15 重号 3.3-3；2.4 组缺 2.4.2；正文含悬空引用 2.9.9 与 4 条正常引用；表 13 之后不留空段直接接正文；表 19 无题注，上方正文含「如表中数据所示」，表内第 1 行为普通表头。"
+}

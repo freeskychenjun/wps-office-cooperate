@@ -44,6 +44,7 @@ internal static partial class Program
         int selStart = -1, selEnd = -1;
         try { selStart = (int)app.Selection.Start; selEnd = (int)app.Selection.End; } catch (Exception) { }
         try { doc.Repaginate(); } catch (Exception) { }
+        int paraTotal = (int)TryGet(() => (object)(int)doc.Paragraphs.Count, 0);
 
         List<object> rows = new List<object>();
         int multipage = 0, multipageMissing = 0, captionRows = 0, noThick = 0;
@@ -53,6 +54,7 @@ internal static partial class Program
             {
                 Tr("scan table " + n);
                 dynamic table = doc.Tables.Item(n);
+                int startPara = TableStartPara(doc, table, paraTotal);
                 int tRows = (int)TryGet(() => (object)(int)table.Rows.Count, 0);
                 int cols = (int)TryGet(() => (object)(int)table.Columns.Count, 0);
                 int[] span = PageSpanOf(doc, table);
@@ -74,6 +76,7 @@ internal static partial class Program
 
                 Dictionary<string, object> one = new Dictionary<string, object>();
                 one["table"] = n;
+                one["para"] = startPara;
                 one["rows"] = tRows;
                 one["columns"] = cols;
                 one["pageFrom"] = span[0];
@@ -105,7 +108,7 @@ internal static partial class Program
         r["action"] = "scan";
         r["summary"] = summary;
         r["tables"] = rows;
-        r["note"] = "read-only. headerRowsGuess=2 means row 1 has fewer cells than columns (a merged two-level header) - check that row 2 is really a header before repeating it.";
+        r["note"] = "read-only. para = \u8868\u8d77\u59cb\u6bb5\u53f7\uff08\u8be5\u8868\u7b2c\u4e00\u683c\u6240\u5728\u6bb5\uff0c\u53ef\u76f4\u63a5 read -From para-3 -Count 6 \u770b\u9898\u6ce8\uff0c\u6216\u5582\u7ed9 table -Action caption -Table n\uff09\u3002headerRowsGuess=2 means row 1 has fewer cells than columns (a merged two-level header) - check that row 2 is really a header before repeating it. \u9898\u6ce8\u7f16\u53f7\u6709\u6ca1\u6709\u91cd\u53f7/\u8df3\u53f7/\u683c\u5f0f\u6df7\u7528\uff0c\u7528 word captions \u4e00\u6b21\u770b\u5b8c\u3002";
         return r;
     }
 
@@ -476,16 +479,12 @@ internal static partial class Program
         return counts;
     }
 
-    /// <summary>"表1 xxx" / "表 1 xxx" / "附表2 ..." typed into a cell.</summary>
+    /// <summary>"表1 xxx" / "表 1 xxx" / "附表2 ..." typed into a cell. One parser everywhere:
+    /// the same CaptionRx that `word captions` and `audit` use, so the three can never disagree.</summary>
     private static bool IsCaptionText(string text)
     {
-        if (text == null) return false;
-        string s = text.TrimStart(' ', '\u3000', '\t');
-        if (s.Length < 2) return false;
-        if (s[0] != '\u8868') return false;            // 表
-        int i = 1;
-        while (i < s.Length && (s[i] == ' ' || s[i] == '\u3000' || s[i] == '\t')) i++;
-        return i < s.Length && char.IsDigit(s[i]);
+        CaptionInfo ci = ParseCaption(text);
+        return ci != null && (ci.Label == "\u8868" || ci.Label == "\u9644\u8868");
     }
 
     private static int PairWidth(Dictionary<string, object> readback, string key)

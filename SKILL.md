@@ -5,6 +5,15 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.8（2026-10-26）**：按一份真实报告的使用复盘（10521 段 / 32 张表 / 75 页）补齐"表格编号检查"这条链路——复盘结论是**读侧缺能力**：检查用了 6 分钟（22 次 `read` 全扫 4.5 min），改写只花 2 秒。
+- 新增 **`word captions`**（只读，一条命令出清单 + 判定）：把每张表与它的题注配对，一次给出**重号 / 同节跳号 / 表号格式混用（点分 `2.4.1` vs 短横 `3.3-1`）/ 题注位置混用（做进表内第 1 行 vs 表外上方）/ 表号与题名之间空格不一 / 缺题注 / 正文悬空引用（`见表3.3-2` 但无此表）**，每条 issue 带段号与改法。实测该报告 **6.4 s** 出结论，当场查出「`表3.3-3` 用了两次」（段 10307、10430，正是要找的问题）；也核对出「32 张表 32 条题注、17 张题名在表内、15 张在表外」，与人工复盘逐个吻合。
+- `table -Action scan` 每行新增 **`para`**（表起始段号）：没有它就只能盲试段号，有了它才能定点读题注、直接喂 `table -Action caption -Table n`。
+- **修 `search` 的静默错段（高危）**：命中段号原来靠"候选段文本里含这个词"裁决，长表格附近会挑到错邻段，且错段≠0 所以**不会**触发慢路径兜底（实测漏 4 条题注、同一段被重复报 3 次）。现在改用**字符区间校验**（`Range.Start ≤ offset < Range.End`，段区间半开且铺满全文，只可能有一个候选通过），通不过才退回慢扫；结果带 `verified:true`，同段多命中**各有自己的 `at`**，每段 3 条的上限改成显式 `cappedParas`。实测同一文档的段落号与 `read` 逐段扫描**完全一致**。
+- **修 `read`/`search` 的 `inTable` 边界**：`Table.Range.End` 是**排他端**，旧判据 `<=` 会把"紧接表格之后的那段正文"标成表内（实测段 10297，为此白跑 2 次 `render`）。现在 `start < end`，且表内段额外带 `table: n`。
+- `read` 新增 **`-SkipTableCells` / `-Only <正则>`**：这版文档 10521 段里 **10276 段是表格单元格**，`-Count` 改成"返回多少段"后，一次调用就能把 245 段正文全拿回来（111 s；老办法 22 次调用约 3.5 min）。单段仍要一次 COM 往返，所以这条是"省调用次数与重复开销"，不是数量级提速——数量级在 `captions`。
+- `audit` 题注判据改为与 `captions` **共用同一个题注解析器**（标签必须在段首）：正文里"如表3.3-2所示"不再被当成题注；题名做在表内时只报 `table-caption-in-row`，不再同时报 `caption-missing`；图片题注允许在图片后 1–4 段（实测有的图名隔着一个空段和一个"/"残段）。
+- 回归：新增语料 `tests/word/captions/`（20 表 / 19 题注 / 4479 段，8 张 35×13 大表，埋重号+跳号+格式混用+悬空引用+表后紧跟正文+缺题注）与 `check_captions.py` 30 条断言全过；旧语料 `report-300` 全链回归（search 13 命中 / revise 10 条 / comment / render / undo / snapshot / diff / handoff / close）全过。
+
 **版本 v1.7（2026-10-25）**：PPT 新增 **`ppt font`** —— 全稿统一字体（`font -Doc -Font 宋体`），逐页扫**组合内部与表格单元格**，只写字体名、不动字号/颜色/加粗/版式。起因：用户要"所有页面改成宋体"，而已有 `format` 一次只能改一个形状且**进不到组合里**（该稿第 2 页就是 5 个组合）。实测 15 页 / 45 形状 / 5 组合 / 1 表格，0 失败；并记下"换字体 → 字身变宽 → 多折行"的连带风险（第 10 页末条曾被挤出页面，需 `format -Size` 收一档）。
 
 **版本 v1.6（2026-10-25）**：`word unit` 增加**上下文守卫 + "可疑碎片"报告 + 脚本段识别**。起因是真报告里有 3 页（实测第 256–258 页）是**公文模板/脚本语法说明**（`[for] … [/for]`、`[File]`、`k~a = 1`、`m1 = 1`／`n2 = 1` 成串赋值），其中的 `km2/m2/m3` 是**变量名**；无守卫的 v1.4 会把它们改成 `km²/m²/m³`（已在真实文档上复现）。现在：
@@ -69,7 +78,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `doctor` | — | 自检：哪个套件可用/版本/是否在跑/开着的文档/渲染是否可用/各类进程数 |
 | `status` | — | 在跑的实例与文档清单（name / path / saved / readOnly / active / paragraphs） |
 | `open` | `-Doc <路径> [-Show] [-ReadOnly]` | 已开则复用，未开则打开；返回 readOnly、段落数、页数；发现可能开在另一实例时给 `multiInstanceWarning` |
-| `read` | `-Doc <路径> [-From 1] [-Count 60]` | 段落（编号/样式/自动编号/文本/inTable）+ 表格清单 + 页数/修订数/批注数 |
+| `read` | `-Doc <路径> [-From 1] [-Count 60]`；大文档加 `[-SkipTableCells] [-Only <正则>]` | 段落（编号/样式/自动编号/文本/inTable/**表号**）+ 表格清单 + 页数/修订数/批注数。**凡是带 `-SkipTableCells`/`-Only`，`-Count` 就变成"返回多少段"**（不是"走多少个段落号"），`-Count 0` = 一直扫到底；返回里 `scanned`/`skippedTableCells`/`filter` 说明跳过了什么。实测 10521 段 / 10276 个单元格的报告：`-SkipTableCells -Count 0` **一次调用**拿回全部 245 段正文（111 s），而按老办法是 22 次调用（每次 ~9.5 s）——省的是调用次数和每次的表格清单开销，单段仍要一次 COM 往返，所以别指望成倍提速；真正该用的是 `captions` |
 | `search` | `-Doc <路径> -Text <词\|词2\|词3> [-Style 样式名] [-Max 50] [-Case]` | **全文找词**（WPS 原生 Find，大文档秒级；多词用 `\|` 分隔一次查完，返回每词计数）——定位用这个，别一页页 `read` |
 | `selection` | `-Doc <路径>` | **读用户当前选中/光标**：返回选中文本与覆盖的段落号（`fromPara/toPara`）；在表格里时再给 `table`（表号，直通 `table -Table n`/`cell -Table n`）与 `row`/`col`；覆盖**图片**时给 `images`（图号，直通 `picture -Image n`）——只读不改 |
 | `revise` | `-Doc <路径> -Items <json文件>` | **修订模式**批量改写（见下），返回改动与修订计数 |
@@ -79,14 +88,15 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `format` | `-Doc <路径> [-Para N \| -From N -To M \| -Style 样式名 \| -Match <正则>]` + 任意格式项 | 对**整篇/一段/一段区间/某样式的所有段/文本匹配正则的所有段**套字符与段落格式（`-Match` 例：`"^\s*(图\|附图)\s*\d"` 一次选中全部图名；返回命中数与前 5 个样例） |
 | `style` | `-Doc <路径> -Style <样式名> [-NoNumbering]` + 任意格式项 | 改**样式本身**（正文、标题 1…），所有用它的段落一起变 |
 | `page` | `-Doc <路径>`（**不带任何选项=查询各节设置**）`[-Paper A4] [-Orientation portrait\|landscape] [-Top/-Bottom/-Left/-Right 厘米] [-HeaderText] [-FooterText] [-PageNumber center\|right\|left\|none] [-PageNumberStart N\|none] [-All]` | 纸张/方向/页边距/页眉页脚/页码（逐节应用）；查询模式报每节纸张/方向/边距/页眉页脚 **+ `pageNumbers`（起始号/是否节内重启/该节首段的实际显示页码——页码断号一眼看出）**；`-PageNumberStart none` 试图清掉「本节重新编号」（WPS 常做不到，会**明说失败**并给 XML 路线） |
-| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`** | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法） |
+| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`（每行带 `para` = 表起始段号）**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`** | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法）。`scan` 的 `para` 可直接 `read -From <para-3> -Count 6` 看题注，或喂给 `-Action caption -Table n` |
+| `captions` | `-Doc <路径> [-Label 表\|图] [-Max 200]` | **题注清单 + 编号体检**（只读，一条命令替掉"全篇扫段落配对"）：每张表 → 题注段号 `para` / 位置 `pos`（`above` 表上方、`in-table` 做在第 1 行、`below` 在表下方）/ 表号 `number` / 格式 `format`（`dot` 2.4.1、`hyphen` 3.3-1、`plain` 表1）/ 空白 `gap` / `title`；`summary` 汇总重号、同节跳号（`missing` 列出缺的号）、格式混用、空格不一、题注位置混用、缺题注、正文引用与表号的对应（`references` 里 `resolved`）+ 悬空引用；`issues` 每条给 `rule`+`para`+`sample`+`suggest`，直接可照着改。实测 10521 段 / 32 表 **6.4 s**；编号问题**不要**用 `audit` 或全篇 `read` 去查 |
 | `caption` | `-Para N -Label 表\|图 -Title "..." [-Above] [-Align center]` | 生成**域**式题注「表 1 xxx」（自动编号，增删后重排） |
 | `picture` | 插图：`-Path <图片> -Para N [-Width "12cm"] [-Caption] [-Align]`；调整：`-Image n [-Width/-Height] [-CropLeft/-CropRight/-CropTop/-CropBottom 百分比]` | 插入图片（可带图题）/ 调尺寸与裁剪 |
 | `toc` | `-Doc <路径> [-Para N] [-Title 目录] [-Levels 3]` | 插入并刷新目录（域），可从文首或指定段之前 |
 | `reference` | 列表：`-Action list -Items <json 数组> [-AtPara N] [-Heading 参考文献]`；引用：`-Action cite -Para N -Numbers "1,2,5"\|"3-6"` | 生成参考文献列表 / 在段末插入上标引用 |
 | `view` | `-Doc <路径> -Para N` 或 `-Page N` | 把 WPS 窗口滚到那一段/那一页（唯一能做的"跟随"，不动文档内容） |
 | `unit` / `units` | `-Doc <路径> [-Apply] [-Units "m3,km2,s2"] [-Normalize] [-Track]` | **单位上标批量修**：把掉下来的 `m3/s`、`km2`、`万m3` 里的指数改成 Unicode 上标（`m³/s`、`km²`）。不带 `-Apply` = 只体检，带 `-Apply` = 修并报逐单位处数与跳过项。**只修"挂在数值上"的单位**（前字符＝数字/万/亿/汉字/左括号，或"数字 空格 单位"）；**已正确的两种形态自动跳过**（Unicode ²/³ 与 run 级上标）；**英文/数字贴连跳过**（`item3`、`m23`、`km20`）。三类只报不改：`fragments`（孤立 token／后跟 `=`，多半是模板变量名）、`looseFragments`（`n2`/`n3` 缺基名）、`suspects`（`km3` 这类疑似笔误）。300 页/13k 段实测 ~20 s |
-| `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段、**题名做进表格第 1 行**（`table-caption-in-row`，直接给出该用哪条 `table -Action caption`）；返回段落号 + 建议，供你判断后落批注 |
+| `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段、**题名做进表格第 1 行**（`table-caption-in-row`，直接给出该用哪条 `table -Action caption`）；返回段落号 + 建议，供你判断后落批注。题注判据与 `captions` 共用同一个解析器（**标签必须在段首**，"如表3.3-2所示"这类正文引用不算题注），题名在表内时只报一条、不再同时报 `caption-missing`；**编号本身的问题（重号/跳号/格式混用/悬空引用）不在这里查，用 `captions`** |
 | `fields` | `-Doc <路径>` | **刷新全部域**：页码、目录、题注、引用（改完正文、交付前跑一次） |
 | `cell` | `-Doc <路径> (-Table n -Row r -Col c \| -Para N) -Text "..."` + 任意格式项 | 改一个表格单元格的文字（可带字体字号对齐） |
 | `insert` | `-Doc <路径> [-Para N] [-Where after\|before\|end] -Items <json> [-Track]` | **批量插入段落**（默认干净写入、不进修订；`-Track` 才走修订），可带样式与格式。**锚点是表格前一段时自动改用"段末标记之前插入 CR"的写法**，不会掉进表格第一格 |
@@ -120,7 +130,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - **整批是原子的**：动手前先把每一条都核一遍（段落存在、`expect` 对得上、`find` 找得到），有一条不过就**一条都不改**并报 `ANCHOR_MISSING`；万一执行中途出错，已产生的修订会被逐条 `Reject` 回滚，错误信息里会写"rolled back N revision(s)"。
 - 每条结果带 `textAfter`（该段改完后的开头 90 字）——**立刻比对它**，能第一时间发现"替换后变成「进行了了」"这类找错位置的问题，不必再 `read`。
 - 返回 `applied`、`revisionsBefore`、`revisionsAfter`、`revisionsAdded`。
-- **段落编号的坑**：表格里每个单元格算一段，且每行末尾**再多算一段**（3×4 表占 15 个段落号），所以表格附近的段落号不能按"行×列"推算；`read` 会给表内段落打 `inTable: true`。找段号优先用 `search`。
+- **段落编号的坑**：表格里每个单元格算一段，且每行末尾**再多算一段**（3×4 表占 15 个段落号），所以表格附近的段落号不能按"行×列"推算；`read` 会给表内段落打 `inTable: true` 与 `table: n`。找段号优先用 `search`（v1.8 起段号经字符区间校验）；**表格与题注的段号**直接用 `captions`/`table -Action scan` 的 `para`，别盲试。
 
 ## Word 格式项（`format` / `style` / `table` / `caption` / `cell` 通用）
 
@@ -152,19 +162,23 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 7. **表格/题注/图片**：`table`（三线表+表头跨页）/ `caption`（SEQ 域，表上图下）/ `picture`（插后必 render）。
 8. **目录/引用**：`toc`（依赖标题样式）/ `reference list+cite` / 交付前 `fields` 刷全部域。
 9. **协作接力（核心用法）**：每轮 `snapshot` → 干活 → 人裁决 → `diff`+`revisions` 读结果 → `handoff` 交接单。跨机器接力用 `snapshot -Out` 把快照随文档带走。写命令结果里的 `changedOutside` = 文档被人动过，先 `diff` 再继续。
-10. **批量整理表格（中文报告高频）**：`table -Action scan` 先出体检表（哪张表题名在框内、哪张跨页没表头、边框粗细）→ 按结果选做：
+10. **表格编号/题注体检（先查再改）**：`captions -Doc X` 一条命令出清单 + 判定，**不要**用 `audit`/全篇 `read` 去凑（实测差 40 倍）。
+    - 先看 `summary`：`duplicates`（重号）、`sequenceGaps`（同节跳号，`missing` 给缺的号）、`formats`（点分/短横混用）、`spaces`（表号与题名之间空格不一）、`positions`（表内/表外混用）、`uncaptioned`（缺题注）、`unresolvedReferences`（悬空引用）。
+    - 再看 `issues[].suggest` 照改：改号用 `revise`（题注段号就在 `issues[].para`）；表格改动本身用 `table -Action caption` / `-Action rows`；改完 `fields` 刷域式题注。
+    - `tables[].para` 是每张表的起始段号，可以直接 `read -From <para-3> -Count 6` 看题注上下文。
+11. **批量整理表格（中文报告高频）**：`table -Action scan` 先出体检表（哪张表题名在框内、哪张跨页没表头、边框粗细）→ 按结果选做：
     - 题名在框内：`table -Action caption -Table n -Borders thick`（提题名 → 删该行 → 加边框，顺序已在命令内部保证）
     - 跨页缺表头：`table -Action header-repeat`（自动迭代到稳定；**先**处理题名，否则重复出去的是题名行）
     - 全文档边框加粗：`table -Borders thick`（**不带 -Table 即全表**，一次 COM 遍历 + 一个撤销记录；85 张表约十几秒，别逐张调）
     - 细节见 [reference/workflows.md](reference/workflows.md) 的「批量整理表格」一节
-11. **单位上标批量修（几百页报告的常见活）**：`unit -Doc X` 先看体量 → `unit -Doc X -Apply` 一键修（已正确的跳过）→ `render` 抽 1–2 页确认 → `save`。
+12. **单位上标批量修（几百页报告的常见活）**：`unit -Doc X` 先看体量 → `unit -Doc X -Apply` 一键修（已正确的跳过）→ `render` 抽 1–2 页确认 → `save`。
     - 判据：`unit` 的 `plainDigitHits` − `unicodeOk` 不等于坏例数，**坏例数以 `-Apply` 返回的 `fixed` 为准**（只有 Find 能看到 run 格式，文本层分不出"真掉"和"格式上标"）。
     - `skippedSamples` 里若出现疑似真单位，用 `-Units` 补上重跑；若是英文词（`item3`、`com2`）则不用管。
     - **`scriptPages` 先看**：命中脚本页（公文模板/脚本说明）时命令已整段跳过，若它恰好是你要修的那几页，只能人工处理（那里的 `m2`/`km2` 是变量名）。
     - **`fragments` / `looseFragments` / `suspects` 三样都必须看一遍**：`fragments` 多半是**模板/脚本示例里的变量名**（`km2 = 1`、`<m1，m2，m3>`），`looseFragments` 是缺基名的形态（`n2`、`n3`，常是 `m2`/`m3` 打错），`suspects` 是疑似笔误（面积表里的 `km3` 多半该是 `km2`）。**这三类一律只报不改**——自动改会把变量名/笔误变成"看起来是对的"上标，比不改更糟。报给作者确认后再用 `revise`/`cell` 处理。
     - 若 `fixed` 明显少于预期（例如只剩个位数），先看 `skipped.assignment/isolated`：说明命中多半在模板示例或表格标题里，符合预期。
     - 全文见 [reference/workflows.md](reference/workflows.md) 的「单位上标批量修」一节。
-10. **反悔**：自己刚写完且无 `changedOutside` 时 `undo -Count N`（排版批=1 步）。
+13. **反悔**：自己刚写完且无 `changedOutside` 时 `undo -Count N`（排版批=1 步）。
 
 ## Word 故障排查
 
@@ -182,6 +196,10 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `wps.exe` 变多 | 中途异常没 `close`，或别处 `New-Object` 开了新实例。先 `status` 看实例数，只结束无窗口的 `/Automation` 实例，用户窗口留着，然后汇报数字。 |
 | Ctrl+Z 撤不干净批量改动 | 三个前提：①改动必须走本 skill 的命令（自带 UndoRecord 分组，实测 WPS 支持；**绕过 skill 手写 COM 循环 = 每段一条撤销记录**）；②**save 会清空撤销栈**，要反悔必须在保存前；③格式套成与原值相同的段不产生撤销记录（再撤也不会变）。 |
 | `undo` 撤不动 | 撤销栈已被 save 清空或已见底；文本类改动优先走修订（`revise`），随时可拒绝，不依赖撤销栈。 |
+| `search` 给的段号看着对、改下去错位 | v1.8 起段号按**字符区间**校验（结果带 `verified:true`），同一段多个命中各有自己的 `at`；若 `atFallbacks` 偏大，说明修订遮挡了文本层偏移（已按段内递推纠正）。仍怀疑时：`read -From <para-1> -Count 3` 核对该段原文，并用 `revise` 的 `expect` 兜底。**别**再据一次 `search` 就断言"缺题注"——用 `captions` 复核。 |
+| 题注重号/跳号查不出来 | `audit` 只查"缺题注/题名在框内"，不查编号体系；`search 表` 只能给命中，不能配对。跑 `captions`：重号、同节跳号、格式混用、悬空引用一次全出。 |
+| `captions` 漏了某条题注 | 解析器要求**标签在段首**（`表` / `附表` / `图` / `附图` + 数字）。若题注写在表格第 2 行、前面加了"续表"、或题注是插入的域而不是文字，会被漏掉：`read -From <tables[].para-3> -Count 6` 看清楚后手工处理。 |
+| `inTable` 与所见不符 | 已修（`Table.Range.End` 是排他端，判据改 `start < end`）；回归用例在 `tests/word/captions/check_captions.py` 的 B1 两条断言。若仍见到紧随表格的正文段带 `inTable:true`，先 `undo` 再报告。 |
 | `table` 报 `0x800A1767` / 行操作炸 | WPS 的 `Row` 对象残缺（`Rows.Item(n).Delete/.HeadingFormat/.Range/.Cells` 都不可靠）。**不要自己写 `Rows.Item(n)` 循环**——用 `table -Action rows/header-repeat/caption`，内部走"选中整行 → `Selection.Rows`"的写法 |
 | `insert -Where after` 的段落进了表格 | 已修：锚点后紧跟表格时，helper 改在段末标记之前插 CR。若仍见到 `inTable:true` 而锚点不在表格里，先 `undo` 再报告 |
 

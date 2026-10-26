@@ -20,6 +20,10 @@
 | 别用 PowerShell 5.1 写 COM | PS 5.1 晚绑定下 `Documents` 返回裸 `__ComObject`（`does not contain a method named 'Open'`）、`RPC server is unavailable`、`Range.Information` 调不到；同一动作 python 一次通过 | COM 逻辑放 C# helper（`csc.exe` 编译），PS 只做参数转发——本 skill 的形态；**不要**在 `.ps1` 里直接 `New-Object -ComObject` | [研] §2.3 ③、[设] §1 |
 | 源码含中文会炸 | PS 5.1 按 ANSI 解析含中文的 `.ps1`，中文变乱码并报看似无关的语法错 | `.ps1`/`.cs` 一律纯 ASCII，中文只出现在 JSON 字符串里（`write` 工具产出无 BOM UTF-8，尤要注意） | [设] §4-6、记忆《pwsh 工具实为 PS5.1 与无 BOM 坑》 |
 | 批注锚点让同段字符位置错 1 | 批注旁做 `replace` 会多删/少删一个字（实测"对无实测"→"对无实测测"） | helper 已改为读回校验+±3 自动纠正，纠正不了就拒绝；必要时先删批注再改 | 2026-10-23 白塔河第 74 段 |
+| `Table.Range.End` 是**排他端** | 判"这段在不在表内"用 `start <= Range.End` 时，**紧接表格之后的那段正文**（`Range.Start` 恰好等于表末）会被算成表内：实测 10521 段报告把段 10297 的"为满足表3.3-2的控制要求…"标成 `inTable:true`，白跑 2 次 `render` 才排除 | 一律 `Range.Start <= start && start < Range.End`（段区间半开且铺满全文，正好只有一个段能命中）；v1.8 起 `read`/`search`/`audit` 都按此判据 | 2026-10-26 新干枢纽报告复盘（§4 缺陷 B） |
+| `Find` 的字符偏移 → 段落号**必须按区间校验** | 候选段只用"该段文本包含这个词"裁决，在长表格区域会选到错邻段；错段号≠0，所以连"漂移→退回慢扫"的兜底都不会触发（实测漏 4 条真实题注、同一段被重复报 3 次，据此还写出过错误结论） | 候选段用 `Range.Start <= offset < Range.End` 裁决（候选不变，只换判据）；校验不过才退回逐段慢扫；结果标 `verified:true`，同段多命中用 `foundStart - paraStart` 各自算 `at`（`Range.Text` 遮删修订时会漂，故再按段内递推纠正） | 2026-10-26 复盘（§3 缺陷 A） |
+| 表格单元格与行末标记都算段落 | 10521 段的报告里 9000+ 段是单元格；按段号全扫 = 22 次 `read`、4.5 分钟，而真正含题注的段不到 40 个 | 先 `captions` 出清单（与段数几乎无关），再按 `para` 定点读；非要全扫就用 `read -SkipTableCells -Count 0`（一次调用） | 2026-10-26 复盘（§5 缺口 C） |
+| 题注判据：标签必须在**段首** | 用"段内含 `表 N`"判题注时，正文句"如表3.3-2所示"也会被算成题注；题名做进表格第 1 行的表又会同时被报"缺题注"和"题名在表内" | 用同一个题注解析器（`^\s*(表\|附表\|图\|附图)\s*数字`），`audit`/`table -Action caption`/`captions` 三处共用；表内题名只报 `table-caption-in-row`；图片题注允许在图片后 1–4 段（实测有图名隔着一个空段和一个"/"残段） | 2026-10-26 复盘（§6 缺陷 D + 现场数据） |
 
 ## 边界与未验证
 

@@ -1,4 +1,4 @@
-# 验收记录（v0.1 – v0.5）
+# 验收记录（v0.1 – v1.8）
 
 > 每个版本发布前在这里记一笔：跑了什么、用什么判据判定通过。回归时按本表逐条复跑。
 > 语料与脚本在开发目录 `tests/`（不随分发包发布）：`report-300.docx`（306 段合成报告）+ `make_corpus.py` / `make_edits.py` / `run_acceptance.ps1` / `validate.py`。
@@ -96,3 +96,56 @@
 - `close` 命令现在自己在关闭前后记账（关闭前取签名、关闭后按 `-Save` 实际值写 `saved`）——修掉 AfterWrite 在文档已关时无法记账导致的**陈旧"未保存"误报**（实测场景 A 曾误报）。
 - 实测：A=带 `-Save` 关闭→重开仅 `reopened`；B=加批注后无 `-Save` 关闭→`reopened`+`unsavedAtClose`，且批注确已丢失（comments=0），预警真实有效。
 - 调试副产品：验证 .NET exe 内字符串是 UTF-16 存储（ASCII 子串搜索判"是否编译进"会误判）；重编译竞态再复现一次（首跑旧逻辑、重跑即好）。
+## v1.8（2026-10-26）：表格编号检查（captions）+ search 段号校验 + inTable 边界
+
+起因：一份真实报告的复盘（75 页 / 10521 段 / 32 表 / 287 处未处理修订）：一个"检查表格编号有没有问题"的小任务，
+**读取 6 分钟、改写 2 秒**。根因不是文档大，而是**命令集缺"清单"能力**——检查被迫退化成 O(全文) 扫描（22 次
+`read`、4.5 min），而唯一看起来便宜的 `search` 又给了**静默错段**，据此写下过错误结论、被迫返工。复盘文档：
+`WPS表格编号检查-复盘与issue草案-20261026.md`（桌面）。本轮把复盘里的 A/B/C/D 四条全部落地。
+
+### 实测（同一份 10521 段报告，WPS 12.1.0.29161）
+
+| 动作 | 之前 | 之后 |
+|---|---|---|
+| 题注↔表格配对 + 编号体检 | 22 次 `read` 全扫，**4.5 min**，只得到配对 | **`captions` 一次调用 6.4 s**，另附重号/跳号/格式/空格/位置/悬空引用 |
+| `search -Text 表` | 8 s，113 命中但**漏 4 条真实题注**、同段重复报 3 次 | 6.9 s，113 命中/报出 105 条（其余为每段 3 条上限，列在 `cappedParas`），**4 条题注全部命中**、每命中各有自己的 `at` |
+| 表头信息 | `table -Action scan` 无段号，只能盲试段号 | `scan` 每行带 `para`，直接定点读题注（本报告 7.3 s / 32 表） |
+| 正文全扫 | 22 次调用约 3.5 min | `read -SkipTableCells -Count 0` **一次调用** 111 s，245 段正文（10276 段单元格被跳过） |
+| `audit` 题注判据 | 17 表报 `table-caption-in-row` + 9 图报 `caption-missing`（图名隔着空段/"/"残段） | 17 表 `table-caption-in-row`，**0 误报** `caption-missing` |
+
+`captions` 在本报告上的结论与人工复盘**逐项吻合**：32 表 / 32 题注；`positions` = 17 张题名做在表内第 1 行、
+15 张在表外上方；`duplicates` = `3.3-3` 在段 10307 与 10430（正是要找的重号）；`formats` = dot 27 / hyphen 5；
+`references` 43 处全部可解析。
+
+### 修复证据（对应复盘 §3/§4/§6）
+
+- **§3 search 静默错段（高）**：`ParaOfHit` 从"候选段文本含该词"改为**字符区间校验**（`Range.Start ≤ offset < Range.End`；
+  段区间半开且铺满全文，只有一个候选能通过），失败才 `return null` 退回逐段慢扫（错段≠0 时旧代码不会兜底）；
+  命中段内的 `at` 用 `foundStart - paraStart` 各自计算（`Range.Text` 遮掉删除修订时会漂，故再按段内递推纠正并计入 `atFallbacks`）；
+  每段 3 条上限显式报 `cappedParas`。
+- **§4 inTable 误判（中）**：`read`/`search`/`cell` 的表区间判据由 `<=` 改为 `<`（`Table.Range.End` 是排他端），
+  表内段额外带 `table: n`。
+- **§5 缺口 C（结构性）**：`table -Action scan` 加 `para`；新增 `captions`；`read` 加 `-SkipTableCells`/`-Only`。
+- **§6 缺陷 D（低）**：`audit` 用与 `captions` 共用的题注解析器（标签必须在段首，正文"如表3.3-2所示"不算题注），
+  表内题名只报 `table-caption-in-row`；图片题注允许在图片后 1–4 段并在遇标题样式时停止。
+
+### 回归语料与断言（`tests/word/captions/`，不随分发包）
+
+- `make_fixture.py` → `captions-fixture.docx`（20 表 / 19 题注 / 4479 段，其中正文级 180 段；8 张 35×13 大表；埋重号
+  `3.3-3`、跳号 `2.4.1→2.4.3`、点分/短横混用、空格混用、`表2.9.9` 悬空引用、表 19 无题注、表 13 后紧跟一段含
+  "表3.3-2" 的正文）。幂等（两次生成 SHA256 相同）。
+- `check_captions.py`：**30 条断言全过**（C1 清单/配对、C2 六类缺陷且不多报、B1 表后正文 `inTable` 为假、
+  C3 `-SkipTableCells`/`-Only` 与全扫结果一致、C4 `scan.para` 真属于该表、A1 每个命中 `at` 指向真实命中位置、
+  A2 题注全部命中、audit 只报 1 张"表内也无题注"的表与 6 张"题名在框内"的表）。
+- 旧语料 `report-300.docx` 全链回归：`search 断面` 13 命中（与 v0.5 基线一致，hits 段号 26/28/36/38/39/42/43/61/65/101/106/111/151）、
+  `revise` 10 条（revisionsAdded 18）、`comment` 1 条、`render` 1 页 96 KB、`undo` 1 步、`snapshot`→`diff` 8 段、
+  `handoff` 落盘、`close` 进程回落到基线——全过。
+
+### 已知边界
+
+- `audit` 仍是**逐段**扫描（本报告 89 s）：它要查所有段落（含单元格）的用字用单位。只要"编号体检"就跑 `captions`，
+  别用 `audit` 凑。
+- `read -SkipTableCells` 的提速来自"少调几次"，单段仍是一次 COM 往返（实测 10521 段 111 s）；要数量级就去用 `captions`。
+- `captions` 只认**文字题注**：域式（SEQ）题注、题注在第 2 行、题号前加了"续表"等形态会漏，返回里给 `tables[].para`
+  供人工核对。
+- 复盘 §7（流程失误：先猜后证、有锚点不用、范围默许放大）写进 SKILL.md 的工作流 10：**编号检查先 `captions`**。

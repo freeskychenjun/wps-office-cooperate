@@ -9,7 +9,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'undo', 'revise', 'comment', 'render', 'font',
-                 'format', 'style', 'page', 'table', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit', 'unit', 'units',
+                 'format', 'style', 'page', 'table', 'captions', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit', 'unit', 'units',
                  'save', 'close', 'quit', 'finish')]
     [string]$Command,
 
@@ -27,6 +27,8 @@ param(
     [string]$Name,
     [string]$Style,
     [string]$Match,
+    [string]$Only,
+    [switch]$SkipTableCells,
     [string]$Font,
     [string]$LatinFont,
     [string]$Size,
@@ -189,6 +191,13 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'read needs -Doc' }
         $request['from'] = $From
         $request['count'] = $Count   # 0 = every paragraph from -From on
+        if ($SkipTableCells) { $request['skipTableCells'] = $true }
+        if ($Only) { $request['only'] = $Only }
+    }
+    'captions' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'captions needs -Doc' }
+        if ($Label) { $request['label'] = $Label }
+        if ($Max -gt 0) { $request['max'] = $Max }
     }
     'search' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'search needs -Doc' }

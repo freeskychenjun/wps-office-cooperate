@@ -18,6 +18,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -414,6 +415,7 @@ internal static partial class Program
             case "style": return StyleDoc(a);
             case "page": return PageDoc(a);
             case "table": return TableDoc(a);
+            case "captions": return CaptionsDoc(a);
             case "caption": return CaptionDoc(a);
             case "picture": return PictureDoc(a);
             case "toc": return TocDoc(a);
@@ -433,7 +435,7 @@ internal static partial class Program
             case "close": return CloseDoc(a);
             case "quit": return QuitAll(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|font|format|style|page|table|caption|picture|toc|reference|view|fields|cell|insert|revisions|snapshot|diff|handoff|audit|save|close|quit");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|font|format|style|page|table|captions|caption|picture|toc|reference|view|fields|cell|insert|revisions|snapshot|diff|handoff|audit|save|close|quit");
         }
     }
 
@@ -859,53 +861,102 @@ internal static partial class Program
         return info;
     }
 
+    /// <summary>
+    /// Table spans in document order: {start, end, tableNumber}. <c>Table.Range.End</c> is EXCLUSIVE:
+    /// the paragraph that follows a table has Start == that End, so membership must be
+    /// <c>start &lt;= offset &amp;&amp; offset &lt; end</c>. The old <c>&lt;=</c> test reported the paragraph
+    /// right after a table as being inside it (field report 2026-10-26, a real 75-page report where the
+    /// prose paragraph 10297 got inTable:true and cost two renders to clear up).
+    /// </summary>
+    private static List<int[]> TableSpans(dynamic doc)
+    {
+        List<int[]> spans = new List<int[]>();
+        int tables = (int)TryGet(() => (object)(int)doc.Tables.Count, 0);
+        for (int t = 1; t <= tables; t++)
+        {
+            try
+            {
+                dynamic tb = doc.Tables.Item(t);
+                spans.Add(new int[] { (int)tb.Range.Start, (int)tb.Range.End, t });
+            }
+            catch (Exception) { spans.Add(new int[] { -1, -1, t }); }
+        }
+        return spans;
+    }
+
+    /// <summary>1-based table number for a character offset; 0 when the offset is not inside a table.</summary>
+    private static int TableAt(List<int[]> spans, int offset)
+    {
+        if (offset < 0) return 0;
+        foreach (int[] sp in spans)
+            if (sp[0] >= 0 && offset >= sp[0] && offset < sp[1]) return sp[2];
+        return 0;
+    }
+
+    /// <summary>One paragraph of a read: number, text, style, list string, and whether it sits in a table.</summary>
+    private static Dictionary<string, object> ReadOnePara(dynamic doc, int k, List<int[]> spans, out bool inTable, out int tableNo)
+    {
+        inTable = false;
+        tableNo = 0;
+        Dictionary<string, object> one = new Dictionary<string, object>();
+        dynamic p = null;
+        try { p = doc.Paragraphs.Item(k); } catch (Exception) { return null; }
+        one["i"] = k;
+        string text = CleanPara(Convert.ToString(TryGet(() => (object)p.Range.Text, ""), CultureInfo.InvariantCulture));
+        one["text"] = text;
+        one["style"] = Convert.ToString(TryGet(() => (object)p.Style.NameLocal, ""), CultureInfo.InvariantCulture);
+        string listString = Convert.ToString(TryGet(() => (object)p.Range.ListFormat.ListString, ""), CultureInfo.InvariantCulture);
+        if (listString != null && listString.Length > 0) one["list"] = listString;
+        int start = -1;
+        try { start = (int)p.Range.Start; } catch (Exception) { }
+        tableNo = TableAt(spans, start);
+        if (tableNo > 0) { inTable = true; one["inTable"] = true; one["table"] = tableNo; }
+        return one;
+    }
+
     private static object ReadDoc(Bag a)
     {
         dynamic doc = RequireDoc(a, true);
         int total = (int)doc.Paragraphs.Count;
         int from = Math.Max(1, a.Int("from", 1));
         int count = a.Int("count", 60);
-        if (count <= 0) count = total;
-        int to = Math.Min(total, from + count - 1);
-
-        // Table spans, so that a paragraph can be marked as sitting in a table (one round trip per table).
-        List<int[]> spans = new List<int[]>();
-        int tables = (int)doc.Tables.Count;
-        for (int t = 1; t <= tables; t++)
+        bool skipCells = a.Flag("skipTableCells", false);
+        string only = a.Str("only", null);
+        Regex onlyRe = null;
+        if (only != null && only.Trim().Length > 0)
         {
-            try
-            {
-                dynamic tb = doc.Tables.Item(t);
-                int start = (int)tb.Range.Start;
-                int end = (int)tb.Range.End;
-                spans.Add(new int[] { start, end });
-            }
-            catch (Exception) { spans.Add(new int[] { -1, -1 }); }
+            try { onlyRe = new Regex(only, RegexOptions.Compiled); }
+            catch (Exception e) { throw new Fail("BAD_ARGS", "\"only\" is not a usable regular expression: " + Clean(e.Message)); }
         }
+        // -SkipTableCells / -Only change what -Count means: it is then "how many paragraphs to RETURN"
+        // instead of "how many paragraph numbers to walk", so a 10k-paragraph report that is 90% table
+        // cells can be swept in one or two calls instead of 22 (~4.5 min; field report 2026-10-26).
+        bool filtered = skipCells || onlyRe != null;
+        if (from > total) from = total;
+        int want = count > 0 ? count : int.MaxValue;
+
+        List<int[]> spans = TableSpans(doc);
 
         List<object> items = new List<object>();
-        for (int k = from; k <= to; k++)
+        int skippedCells = 0, skippedOther = 0, scanned = 0, to = from - 1;
+        for (int k = from; k <= total; k++)
         {
-            dynamic p = null;
-            try { p = doc.Paragraphs.Item(k); } catch (Exception) { continue; }
-            Dictionary<string, object> one = new Dictionary<string, object>();
-            one["i"] = k;
-            string text = CleanPara(Convert.ToString(TryGet(() => (object)p.Range.Text, ""), CultureInfo.InvariantCulture));
-            one["text"] = text;
-            one["style"] = Convert.ToString(TryGet(() => (object)p.Style.NameLocal, ""), CultureInfo.InvariantCulture);
-            string listString = Convert.ToString(TryGet(() => (object)p.Range.ListFormat.ListString, ""), CultureInfo.InvariantCulture);
-            if (listString != null && listString.Length > 0) one["list"] = listString;
-            int start = -1, end = -1;
-            try { start = (int)p.Range.Start; end = (int)p.Range.End; } catch (Exception) { }
-            bool inTable = false;
-            foreach (int[] span in spans)
-                if (span[0] >= 0 && start >= span[0] && start <= span[1]) { inTable = true; break; }
-            if (inTable) one["inTable"] = true;
+            if (filtered && items.Count >= want) break;
+            if (!filtered && count > 0 && k > from + count - 1) break;
+            bool inTable;
+            int tableNo;
+            Dictionary<string, object> one = ReadOnePara(doc, k, spans, out inTable, out tableNo);
+            if (one == null) continue;
+            scanned++;
+            to = k;
+            if (skipCells && inTable) { skippedCells++; continue; }
+            if (onlyRe != null && !onlyRe.IsMatch(Convert.ToString(one["text"], CultureInfo.InvariantCulture))) { skippedOther++; continue; }
             items.Add(one);
         }
+        if (items.Count == 0 && to < from) to = from;
 
         List<object> tableList = new List<object>();
-        for (int t = 1; t <= tables; t++)
+        for (int t = 1; t <= spans.Count; t++)
         {
             Dictionary<string, object> one = new Dictionary<string, object>();
             one["table"] = t;
@@ -934,6 +985,14 @@ internal static partial class Program
         r["paragraphs"] = total;
         r["from"] = from;
         r["to"] = Math.Max(from, to);
+        r["returned"] = items.Count;
+        if (filtered)
+        {
+            r["scanned"] = scanned;
+            r["filter"] = (skipCells ? "skipTableCells" : "") + (skipCells && onlyRe != null ? "+" : "") + (onlyRe != null ? "only:" + only : "");
+            if (skipCells && skippedCells > 0) r["skippedTableCells"] = skippedCells;
+            if (onlyRe != null && skippedOther > 0) r["skippedByOnly"] = skippedOther;
+        }
         r["pages"] = TryGet(() => (object)(int)doc.ComputeStatistics(2), 0);
         r["revisions"] = TryGet(() => (object)(int)doc.Revisions.Count, 0);
         r["comments"] = TryGet(() => (object)(int)doc.Comments.Count, 0);
