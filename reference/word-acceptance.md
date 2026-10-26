@@ -111,7 +111,7 @@
 | `search -Text 表` | 8 s，113 命中但**漏 4 条真实题注**、同段重复报 3 次 | 6.9 s，113 命中/报出 105 条（其余为每段 3 条上限，列在 `cappedParas`），**4 条题注全部命中**、每命中各有自己的 `at` |
 | 表头信息 | `table -Action scan` 无段号，只能盲试段号 | `scan` 每行带 `para`，直接定点读题注（本报告 7.3 s / 32 表） |
 | 正文全扫 | 22 次调用约 3.5 min | `read -SkipTableCells -Count 0` **一次调用** 111 s，245 段正文（10276 段单元格被跳过） |
-| `audit` 题注判据 | 17 表报 `table-caption-in-row` + 9 图报 `caption-missing`（图名隔着空段/"/"残段） | 17 表 `table-caption-in-row`，**0 误报** `caption-missing` |
+| `audit` 题注判据 | 宽松正则：正文"如表3.3-2所示"也算题注；题名在表内的表同时报 `caption-missing` + `table-caption-in-row` | 17 表 `table-caption-in-row`、**0** `caption-missing`（首版收紧过头，会把 9 张图名误报为缺题注——真实排布是"图 / 空段 / 一个 / 残段 / 图2.1-1 xxx"，已改为向后看 1–4 段并遇标题停止） |
 
 `captions` 在本报告上的结论与人工复盘**逐项吻合**：32 表 / 32 题注；`positions` = 17 张题名做在表内第 1 行、
 15 张在表外上方；`duplicates` = `3.3-3` 在段 10307 与 10430（正是要找的重号）；`formats` = dot 27 / hyphen 5；
