@@ -13,3 +13,7 @@ tests/ppt/out-chapters/
 tests/ppt/out-deliver/
 tests/ppt/out-master/
 tests/ppt/out-chart/
+# local agent scratch / non-shipping work products
+.dsh/
+docs/video-assets/
+tmp_axp/
