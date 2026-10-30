@@ -1,4 +1,4 @@
-# 验收记录（v0.1 – v1.8）
+# 验收记录（v0.1 – v1.11）
 
 > 每个版本发布前在这里记一笔：跑了什么、用什么判据判定通过。回归时按本表逐条复跑。
 > 语料与脚本在开发目录 `tests/`（不随分发包发布）：`report-300.docx`（306 段合成报告）+ `make_corpus.py` / `make_edits.py` / `run_acceptance.ps1` / `validate.py`。
@@ -149,3 +149,147 @@
 - `captions` 只认**文字题注**：域式（SEQ）题注、题注在第 2 行、题号前加了"续表"等形态会漏，返回里给 `tables[].para`
   供人工核对。
 - 复盘 §7（流程失误：先猜后证、有锚点不用、范围默许放大）写进 SKILL.md 的工作流 10：**编号检查先 `captions`**。
+## v1.9 (2026-10-26): audit fast path
+
+`word audit` - the old loop cost 3 COM roundtrips per paragraph (Paragraphs.Item + Range.Text +
+Style.NameLocal); on a 4479-paragraph / 20-table fixture that is 27.8 s of pure marshalling for
+rules that only need the text. The fast path fetches Content.Text once, runs the text rules in
+memory, locates headings via style-name enumeration + Find-by-style, and resolves each finding's
+paragraph number by natively Finding its sample text (span-verified, the same mechanism as
+`search`) - immune to the row-end offset drift of Content.Text (measured: offset arithmetic
+mis-resolves on exactly the table-heavy documents; Find-based resolution is exact).
+
+A/B on the fixture (old build vs new fast vs new -Slow, findings compared item by item):
+
+| corpus | old | fast | slow (-Slow) | parity |
+|---|---|---|---|---|
+| report-300 (306 paras) | 11.2 s wall | 3.2 s / 1290 ms scan | 3.2 s / 1167 ms | 2/2 identical |
+| audit-fixture (321 paras, 9 planted rules) | 3.4 s | 3.5 s / 1411 ms | 3.2 s / 1249 ms | 11/11 identical |
+| captions-fixture (4479 paras / 20 tables) | 29.9 s | 4.4 s / 2177 ms | 29.9 s / 27752 ms | 24/24 identical |
+
+- 13x on the table-heavy corpus (scan-internal 27.8 s -> 2.2 s); small documents are on par
+  (style enumeration is a fixed cost) - never slower in wall clock by more than noise.
+- Gates: fast path only when Revisions.Count == 0; ANY refusal or unresolvable offset falls back
+  to the old loop wholesale (fastFail names the reason); `-Slow` forces the old loop for A/B.
+- empty-run findings resolve through an anchor paragraph and then VERIFY the four paragraphs are
+  really empty; heading-jump samples come from the Find hit range itself (cursor.Text), never
+  from indexing Content.Text with a Range offset (that produced an empty sample on the fixture).
+- Regression: check_captions.py 30/30 (includes the audit caption judge); fixture generator
+  checked in as tests/word/make_audit_fixture.py.
+
+## v1.10 (2026-10-27): the block model - read/snapshot/diff/format fast paths
+
+Measured fact first: on WPS, Content.Text split by '\r' gives block k-1 == paragraph k,
+TABLES INCLUDED (every cell paragraph is "text\r BEL", the BEL lands as the next block's leading
+char). BEL heuristics for in-table detection are NOT reliable (one table's first cell is clean,
+another's carries a leading BEL, and so does the first body paragraph after a table - probe
+2026-10-27); the authoritative source is Table.Range.Paragraphs.Count, O(tables) roundtrips.
+All fast paths go through FastBlocksVerified: revisions==0 AND block count == total(+1 empty
+tail) AND first/middle/last spot-checks equal - otherwise wholesale fallback (correctness
+first). -Slow forces the old loop everywhere; path/textsPath say which one ran.
+
+A/B on captions-fixture (4479 paras / 20 tables), fast vs slow vs parity:
+
+| command | old | fast | parity |
+|---|---|---|---|
+| read -SkipTableCells -Count 0 (180 body paras back) | 38.6 s | 8.4 s (incl. ~6 s open) | 180/180 items field-identical |
+| read -Only [0-9] (3951 paras back) | 53.3 s | 58.1 s | 3951/3951 identical (unselective filters gain nothing - details dominate) |
+| snapshot | 22.4 s | 3.2 s (7x) | texts 4479/4479 byte-identical, digest equal |
+| format -Style "Heading 1" | - | Find-by-style | 7/7 hits, applied + readBack equal |
+
+- format -Style and style -NoNumbering locate their paragraphs via Find-by-style now
+  (roundtrips O(hits) instead of O(paragraphs x 2)); refusal falls back, re-apply idempotent.
+- Two bugs found by the A/B itself and fixed: fast path returned table FIRST cells as body
+  (BEL heuristic) then over-skipped the paragraph after each table; ReadOneParaFast re-fetched
+  Paragraphs.Item per property (slower than the old loop on unselective -Only).
+- Regression: check_captions.py 30/30 (its read sweep runs on the new fast path).
+
+## v1.11 (2026-10-30): takeover hint (hint command, three apps)
+
+The user's question was "when the agent takes over a WPS document, can there be a friendly
+notice for the user?" - the attach step was invisible: the window scrolls, text turns into
+tracked revisions, and nothing says who is doing it or how to stop it.
+
+Design: three pieces of WINDOW STATE, never document content (nothing enters the file, nothing
+is saved, `saved` stays untouched):
+1. window caption - one COM property write; WPS 12 actually renders documents as TABS and
+   truncates the caption from the right (~22 half-width cells), so the marker is a PREFIX
+   (`[AI] report.docx`): a suffix on a real report name was pixel-identical to no tag;
+2. status bar line - Spreadsheets displays it (screenshot), Writer accepts the write but does
+   NOT render it (screenshot: still 页面/字数), so `hint` returns a statusBarNote saying so;
+3. tray balloon - the same agent-agnostic NotifyIcon mechanism `finish` already used.
+
+Measured on WPS 12.0 (probes 2026-10-30, this machine):
+
+| app | writable caption | status bar | notes |
+|---|---|---|---|
+| Writer | `doc.ActiveWindow.Caption` YES -> frame title `name [tag] - WPS Office` (verified via GetWindowText) | `Application.StatusBar` WRITE-ONLY (setting works, readback throws "write-only property") AND the WPS status bar does not render it (screenshot: still 页面/字数) - statusBarNote says so | `doc.Windows(1).Caption` kept as fallback when the doc is not the active one |
+| Spreadsheets | `wb.Windows(1).Caption` YES | `Application.StatusBar` read/write AND visibly displayed (screenshot shows the line); write `false` hands the bar back | `wb.ActiveWindow` returns null here - it is only populated when the book IS active, so Windows(1) is the primary path |
+| Presentation | NONE: `ActiveWindow.Caption` is read-only; `Application.Caption` is app-wide and printed as `<deck> - <caption>`, so a write replaces the localized product name and a safe restore would need persisted per-deck state | no StatusBar property | hint is the balloon only; response carries `captionSupported:false` + `limitation`, so no caller claims a tagged title |
+
+Behaviour: `open` tags the caption automatically (`-NoHint` opts out) and returns
+`hint:{tag,caption,captionSet}`; the default marker is `[AI]`, and a read-only document/tab is
+marked `[AI read-only]` instead (writes would fail READONLY anyway); `hint` refreshes the
+channels (`-Text` message, `-HintTag` marker, `-Bar` status-bar-only text, `-Quiet` silent
+refresh, `-Clear` undo); `finish` (with or without -Doc, falling back to the active document)
+and `close` restore caption/status bar (`hintCleared` in the response); `save -As` re-tags with
+the new file name; `status` exposes `caption` + `hinted` per document.
+
+Acceptance (real commands, scratch copies of tests/word/corpus/report-300.pristine.docx,
+tests/excel/work/test.xlsx, tests/ppt/out/master/deck.pptx):
+
+- Writer (`tests/word/check_hint.py`, 14 assertions): `open` -> captionSet true, caption is
+  `[AI] <name>`; `status` -> hinted true; `hint -Text ... -Quiet` -> statusBar true (with
+  statusBarNote), toast false, marker kept; `finish -Quiet` -> hintCleared.captionCleared true;
+  `status` -> hinted false; `hint -Clear` -> caption back to the bare file name; paragraph
+  count unchanged and no revisions (the hint really is view state); read-only open gets
+  `[AI read-only]`; `finish` without -Doc clears the ACTIVE document; `close` ok.
+- Spreadsheets (`tests/excel/check_hint.py`, 9 assertions): same sequence through
+  `wb.Windows(1).Caption`; status bar write accepted; finish/close restore.
+- Presentation (`tests/ppt/check_hint.py`, 6 assertions): `open` ok; `hint -Quiet` -> toast
+  false, captionSupported false, limitation present, name correct; slide count unchanged;
+  `close` ok.
+- Regression: `tests/word/captions/check_captions.py` 30/30 still pass (open/status touched,
+  nothing in the read/audit paths changed).
+- Visual: screenshot after tagging a long real-report name shows the tab as
+  `[AI] 上高县南港…` (marker always visible), and the Spreadsheets status bar shows the
+  progress sentence. Writer's status bar stays at 页面/字数 -> documented, not promised.
+
+
+## v1.12 (2026-10-30): resident tray indicator (`hint -Tray`)
+
+Why: v1.11's three signals each leave a gap - the tab marker has no step text, the balloon is
+transient, and Writer's status bar does not render. A resident tray icon carries "who is
+editing + what step" for the whole session without covering the document.
+
+Implementation: no new resident service. `hint -Tray` makes the short-lived helper write
+`%LOCALAPPDATA%\wps-office-cooperate\tray-<app>.json` and re-spawn ITSELF with
+`--tray <state>`; the daemon is the same binary in message-loop mode, the state file is the
+only IPC (tooltip/progress updates + stop flag), and the right-click restore action simply runs
+this skill's own `hint -Clear` through the wrapper path recorded in the state - so the daemon
+never needs COM. Shared source `scripts/helper/shared/Tray.cs` compiles into all three helpers.
+Menu: 结束协作：还原标题标记 / 仅关闭托盘图标; double-click = restore; TTL 4 h; the icon is a
+drawn orange "AI" badge (a floating window was rejected: it would cover the document, fight
+WPS for focus and need DPI/multi-monitor/cleanup handling).
+
+Measured pitfalls (2026-10-30):
+- spawn MUST use `UseShellExecute = true`: with `false` the daemon inherits the caller's stdio
+  handles and any caller reading until EOF (python subprocess.communicate, PowerShell
+  pipelines) blocks for the icon's whole life instead of returning after `hint` (reproduced as
+  a 10-minute hung test run).
+- Windows parks new tray icons in the "^" overflow and a process cannot promote itself; the
+  response carries `tray.note` telling the user to drag it onto the taskbar once.
+
+Acceptance (`tests/word/check_tray.py`, 14 assertions): spawn -> started + pid alive + state
+file; state carries doc/caption/text and a restore command pointing at `word.ps1 hint -Clear`;
+running that command really clears the caption AND the daemon exits; a second spawn works;
+`finish` returns `hintCleared.trayStopped` and the daemon exits within 8 s; `close` ok.
+`tests/excel/check_tray.py` (7) and `tests/ppt/check_tray.py` (7) pass as well - for
+PowerPoint the tray icon is the only persistent channel, and `captionSupported` stays false.
+
+The user closing the document is detected by the OS, not by guessing: the daemon polls
+Restart Manager (`RmGetList`) every ~4.8 s and retires the icon after two consecutive "no
+process holds this file" answers (~10 s). Measured 2026-10-30: icon stayed up while the doc
+was open, then disappeared 9.6 s (Word) / 8.6 s (Excel) / 7.4 s (PPT) after an external close.
+`save -As` repoints the state document path so the icon is not retired against the old name.
+Acceptance assertions grew to 16 (Word) / 7 (Excel) / 7 (PPT) with the external-close case.

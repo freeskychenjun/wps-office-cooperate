@@ -307,4 +307,54 @@ internal static partial class Program
         r["note"] = "para 就是要喂给 revise(-Para)/comment(-Para)/view(-Para) 的段落号；命中文本是「接受视图」（与 read/diff 同一口径）。-Text 可用 | 分隔多个词一次查完。段落号按字符偏移校验过（verified:true）；同一段命中超过 " + maxPerPara + " 处的，多出来的只计数（见 cappedParas），要全部定位就加大 -Max 或换更专的词。";
         return r;
     }
+
+    // ------------------------------------------------------------ shared block model (v1.10)
+
+    /// <summary>
+    /// Normalize one '\r'-split block of Content.Text into paragraph text. In WPS every table
+    /// cell paragraph contributes "text\r BEL" and therefore the NEXT block starts with a leading
+    /// BEL - strip both ends (CleanPara only trims the trailing one). Measured on the 20-table /
+    /// 352-row fixture (2026-10-26): block k (1-based) IS paragraph k, tables included.
+    /// </summary>
+    private static string BlockNorm(string raw)
+    {
+        if (raw == null) return "";
+        int s = 0, e = raw.Length;
+        while (s < e && (raw[s] == '\a' || raw[s] == '\u0007')) s++;
+        while (e > s && (raw[e - 1] == '\r' || raw[e - 1] == '\n' || raw[e - 1] == '\a' || raw[e - 1] == '\u0007')) e--;
+        return raw.Substring(s, e - s);
+    }
+
+    /// <summary>
+    /// Content.Text split into '\r' blocks, verified to be the WPS shape where block k-1 IS
+    /// paragraph k: (a) no unaccepted revisions (deleted text hides from Content.Text but still
+    /// occupies Range coordinates - the v0.7 lesson), (b) block count == total + 1 with an empty
+    /// trailing block (or exactly total), (c) spot-checks of the first / middle / last paragraph
+    /// texts agree with Paragraphs.Item(k).Range.Text. Any mismatch returns null and the caller
+    /// falls back to per-paragraph reads - correctness first.
+    /// </summary>
+    private static string[] FastBlocksVerified(dynamic doc, int total, bool forceSlow)
+    {
+        if (forceSlow || total <= 0) return null;
+        int revs = (int)TryGet(() => (object)(int)doc.Revisions.Count, 1);
+        if (revs != 0) return null;
+        string all = WholeText(doc);
+        if (all == null) return null;
+        string[] blocks = all.Split('\r');
+        if (blocks.Length == total + 1 && blocks[total].Length == 0)
+        {
+            string[] shrunk = new string[total];
+            Array.Copy(blocks, shrunk, total);
+            blocks = shrunk;
+        }
+        else if (blocks.Length != total) return null;
+        foreach (int k in new int[] { 1, Math.Max(1, total / 2), total })
+        {
+            string para;
+            try { para = CleanPara(Convert.ToString(doc.Paragraphs.Item(k).Range.Text, CultureInfo.InvariantCulture)); }
+            catch (Exception) { return null; }
+            if (para == null || BlockNorm(blocks[k - 1]) != para) return null;
+        }
+        return blocks;
+    }
 }

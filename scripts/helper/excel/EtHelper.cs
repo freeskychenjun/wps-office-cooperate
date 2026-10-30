@@ -289,6 +289,8 @@ internal static class Program
     private static int Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
+        // Detached tray daemon mode: same binary, message-loop instead of a COM request.
+        if (args != null && args.Length >= 2 && args[0] == "--tray") return TrayDaemon.Run(args[1]);
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
 
@@ -372,8 +374,9 @@ internal static class Program
             case "save": return SaveBook(a);
             case "close": return CloseBook(a);
             case "quit": return QuitAll(a);
+            case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|write|fill|rows|cols|sheet|comment|render|chart|autofit|format|snapshot|diff|restore|calc|save|close|quit|finish");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|write|fill|rows|cols|sheet|comment|render|chart|autofit|format|snapshot|diff|restore|calc|save|close|quit|finish|hint");
         }
     }
 
@@ -725,6 +728,13 @@ internal static class Program
             one["readOnly"] = IsReadOnly(wb);
             one["saved"] = TryGet(() => (object)wb.Saved, true);
             one["active"] = activeName.Length > 0 && (string)one["name"] == activeName;
+            try
+            {
+                string cap = CaptionOf(wb);
+                if (cap != null) one["caption"] = cap;
+                one["hinted"] = IsHinted(cap);
+            }
+            catch (Exception) { }
             list.Add(one);
         }
         return list;
@@ -762,6 +772,8 @@ internal static class Program
         }
         Dictionary<string, object> info = BookInfo(wb);
         info["how"] = how;
+        // Takeover hint: pure window state, applied on attach (see HintCmd).
+        if (!a.Flag("noHint", false)) info["hint"] = HintOnTakeover(wb, a);
         MarkerSet(full);
         if (otherInstancePossible)
         {
@@ -2086,6 +2098,26 @@ internal static class Program
         // identity moves to the new path (quirk: SaveAs renames the workbook)
         MarkerRemove(oldFull);
         MarkerSet(FullPathOf(asPath));
+        // Keep a takeover caption consistent with the new name instead of showing the old one.
+        try
+        {
+            string cap = CaptionOf(wb);
+            if (IsHinted(cap))
+            {
+                string keep = cap.StartsWith(HINT_READONLY, StringComparison.Ordinal) ? HINT_READONLY : HINT_TAG;
+                TrySetCaption(wb, HintCaption(NameOf(wb), keep));
+            }
+        }
+        catch (Exception) { }
+        // Repoint the tray icon at the new path (it retires itself when the file it watches is
+        // no longer open, so a stale path after save-as would make it quit early).
+        try
+        {
+            string cap2 = CaptionOf(wb);
+            if (IsHinted(cap2))
+                TrayDaemon.UpdateDoc("excel", Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture), cap2);
+        }
+        catch (Exception) { }
         return new Dictionary<string, object> { { "savedAs", asPath } };
     }
 
@@ -2095,6 +2127,7 @@ internal static class Program
         dynamic wb = FindOpen(full);
         if (wb == null) throw new Fail("NOT_OPEN", "The workbook is not open: " + full);
         bool save = a.Flag("save", false);
+        try { ClearHint(wb); } catch (Exception) { }
         wb.Close(save);
         // Marker is deliberately KEPT: once a workbook is closed, any later command must
         // fail with DOC_CLOSED instead of silently reopening it. Only an explicit open
@@ -2110,6 +2143,189 @@ internal static class Program
         {
             try { app.Quit(); } catch (Exception) { }
         }
+        r["processes"] = ProcessCount("et");
+        return r;
+    }
+
+    // ------------------------------------------------------------ hint
+    // Same takeover hint as the Writer side (see WpsHelper.cs): window caption + status bar
+    // + tray balloon, all pure view state - nothing is written into the workbook. Measured on
+    // WPS 12.0 (2026-10-30): Workbook.ActiveWindow.Caption is writable and lands in the frame
+    // title; Application.StatusBar is READ/WRITE here (unlike Writer), and setting it to
+    // False hands the bar back to WPS.
+
+    // WPS 12 shows open documents as WINDOW TABS which truncate a caption from the right
+    // (~22 half-width cells), so a suffix tag vanishes on long workbook names (measured
+    // 2026-10-30 on the Writer side; Spreadsheets uses the same frame/tab). The marker goes
+    // in FRONT: "[AI] book.xlsx".
+    private const string HINT_TAG = "\u3014AI\u3015";                    // [AI]
+    private const string HINT_READONLY = "\u3014AI \u53ea\u8bfb\u3015";   // [AI read-only]
+
+    private static bool IsHinted(string caption)
+    {
+        if (caption == null) return false;
+        return caption.StartsWith(HINT_TAG + " ", StringComparison.Ordinal)
+            || caption.StartsWith(HINT_READONLY + " ", StringComparison.Ordinal);
+    }
+
+    private static string HintTagFor(dynamic wb, Bag a)
+    {
+        string tag = HintTag(a);
+        // A read-only workbook refuses writes (READONLY); label the hint accordingly.
+        if (tag == HINT_TAG && IsReadOnly(wb)) return HINT_READONLY;
+        return tag;
+    }
+
+    private static string NameOf(dynamic wb)
+    {
+        return Convert.ToString(TryGet(() => (object)wb.Name, ""), CultureInfo.InvariantCulture);
+    }
+
+    private static string HintTag(Bag a)
+    {
+        string t = a.Str("tag", null);
+        if (t == null) return HINT_TAG;
+        return t.Trim();
+    }
+
+    /// <summary>Caption for a workbook: the marker in front, then the file name (or just the name when cleared).</summary>
+    private static string HintCaption(string name, string tag)
+    {
+        if (tag == null || tag.Length == 0) return name;
+        return tag + " " + name;
+    }
+
+    /// <summary>
+    /// Caption of the workbook's own window. Measured on WPS 12.0 (2026-10-30): Workbook.
+    /// ActiveWindow returns null here (it is only populated when the book IS the active one),
+    /// while Workbook.Windows(1).Caption reads and writes reliably - so that is the primary
+    /// path, with ActiveWindow only as a fallback.
+    /// </summary>
+    private static string CaptionOf(dynamic wb)
+    {
+        try { return Convert.ToString((object)wb.Windows.Item(1).Caption, CultureInfo.InvariantCulture); }
+        catch (Exception) { }
+        try { return Convert.ToString((object)wb.ActiveWindow.Caption, CultureInfo.InvariantCulture); }
+        catch (Exception) { return null; }
+    }
+
+    private static bool TrySetCaption(dynamic wb, string caption)
+    {
+        try { wb.Windows.Item(1).Caption = caption; return true; }
+        catch (Exception) { }
+        try { wb.ActiveWindow.Caption = caption; return true; }
+        catch (Exception) { return false; }
+    }
+
+    private static bool TrySetStatusBar(dynamic app, string text)
+    {
+        if (app == null) return false;
+        try
+        {
+            if (text == null || text.Length == 0) app.StatusBar = false;   // hand the bar back to WPS
+            else app.StatusBar = text;
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    private static bool ShowBalloon(string title, string text)
+    {
+        try
+        {
+            if (text == null) text = "";
+            if (text.Length > 240) text = text.Substring(0, 240);
+            using (NotifyIcon ni = new NotifyIcon())
+            {
+                ni.Icon = SystemIcons.Information;
+                ni.Visible = true;
+                ni.BalloonTipTitle = title;
+                ni.BalloonTipText = text;
+                ni.ShowBalloonTip(6000);
+                DateTime end = DateTime.Now.AddSeconds(4);
+                while (DateTime.Now < end) { Application.DoEvents(); Thread.Sleep(50); }
+                ni.Visible = false;
+            }
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    private static bool PlayAsterisk()
+    {
+        try { System.Media.SystemSounds.Asterisk.Play(); Thread.Sleep(300); return true; }
+        catch (Exception) { return false; }
+    }
+
+    private static Dictionary<string, object> HintOnTakeover(dynamic wb, Bag a)
+    {
+        string tag = HintTagFor(wb, a);
+        string name = NameOf(wb);
+        string caption = HintCaption(name, tag);
+        bool set = TrySetCaption(wb, caption);
+        Dictionary<string, object> h = new Dictionary<string, object>();
+        h["tag"] = tag;
+        h["caption"] = caption;
+        h["captionSet"] = set;
+        if (!set)
+            h["note"] = "The window caption could not be set (the workbook window is hidden)."
+                + " Run `hint -Doc ... -Toast` once the window is up to announce the takeover to the user.";
+        return h;
+    }
+
+    private static Dictionary<string, object> ClearHint(dynamic wb)
+    {
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["trayStopped"] = TrayDaemon.Stop("excel");
+        if (wb == null) return r;
+        r["captionCleared"] = TrySetCaption(wb, NameOf(wb));
+        r["statusBarCleared"] = TrySetStatusBar(App(false, false), "");
+        return r;
+    }
+
+    private static object HintCmd(Bag a)
+    {
+        dynamic wb = RequireBook(a, false);
+        dynamic app = App(false, false);
+        bool clear = a.Flag("clear", false);
+        string tag = HintTagFor(wb, a);
+        string name = NameOf(wb);
+        string text = a.Str("text", null);
+        if (text == null)
+            text = clear
+                ? "\u5df2\u7ed3\u675f\u534f\u4f5c\u300a" + name + "\u300b\uff1a\u7a97\u53e3\u6807\u9898\u4e0e\u72b6\u6001\u680f\u5df2\u8fd8\u539f\u3002"
+                : "\u5df2\u63a5\u7ba1\u300a" + name + "\u300b\uff1a\u6539\u52a8\u4f1a\u76f4\u63a5\u5199\u5165\u8868\u683c\uff0c\u6211\u4f1a\u5148\u5b58\u5feb\u7167\uff0c\u4f60\u968f\u65f6\u53ef\u4ee5\u53eb\u6211\u56de\u6eda\u3002";
+
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["name"] = name;
+        r["cleared"] = clear;
+
+        string caption = HintCaption(name, clear ? "" : tag);
+        bool captionSet = TrySetCaption(wb, caption);
+        r["caption"] = caption;
+        r["captionSet"] = captionSet;
+        if (!clear) r["tag"] = tag;
+
+        string bar = a.Str("bar", null);
+        if (bar == null) bar = clear ? "" : text;
+        bool barSet = TrySetStatusBar(app, bar);
+        r["statusBar"] = barSet;
+        r["statusBarText"] = bar;
+
+        bool quiet = a.Flag("quiet", false);
+        bool toast = !quiet && a.Flag("toast", !clear);
+        if (toast) toast = ShowBalloon("WPS \u8868\u683c AI \u52a9\u624b", text);  // WPS 表格 AI 助手
+        r["toast"] = toast;
+
+        bool sound = !quiet && a.Flag("sound", false);
+        if (sound) sound = PlayAsterisk();
+        r["sound"] = sound;
+
+        // resident tray icon (opt-in): tooltip = "marker · current step", right-click restores.
+        if (clear) r["trayStopped"] = TrayDaemon.Stop("excel");
+        else if (a.Flag("tray", false))
+            r["tray"] = TrayDaemon.Start("excel", Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture),
+                                         caption, text, a.Str("wrapper", null));
         r["processes"] = ProcessCount("et");
         return r;
     }
@@ -2158,36 +2374,15 @@ internal static class Program
         // opt-in; -Quiet mutes both for silent runs.
         bool quiet = a.Flag("quiet", false);
         bool toast = !quiet && a.Flag("toast", true);
-        if (toast)
-        {
-            try
-            {
-                string text = statusLine;
-                if (text.Length > 240) text = text.Substring(0, 240);
-                using (NotifyIcon ni = new NotifyIcon())
-                {
-                    ni.Icon = SystemIcons.Information;
-                    ni.Visible = true;
-                    ni.BalloonTipTitle = "WPS \u8868\u683c AI \u52a9\u624b";  // WPS 表格 AI 助手
-                    ni.BalloonTipText = text;
-                    ni.ShowBalloonTip(6000);
-                    DateTime end = DateTime.Now.AddSeconds(4);
-                    while (DateTime.Now < end) { Application.DoEvents(); Thread.Sleep(50); }
-                    ni.Visible = false;
-                }
-            }
-            catch (Exception) { toast = false; }
-        }
+        if (toast) toast = ShowBalloon("WPS \u8868\u683c AI \u52a9\u624b", statusLine);  // WPS 表格 AI 助手
         r["toast"] = toast;
 
         bool sound = !quiet && a.Flag("sound", true);
-        if (sound)
-        {
-            try { System.Media.SystemSounds.Asterisk.Play(); }
-            catch (Exception) { sound = false; }
-            Thread.Sleep(300); // let the sound start before the process exits
-        }
+        if (sound) sound = PlayAsterisk();
         r["sound"] = sound;
+
+        // Undo the takeover hint so the window is not left branded "AI working".
+        r["hintCleared"] = ClearHint(wb);
         return r;
     }
 

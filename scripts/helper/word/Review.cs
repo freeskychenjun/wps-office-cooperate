@@ -303,7 +303,8 @@ internal static partial class Program
         tag = SafeTag(tag);
         if (tag.Length == 0) throw new Fail("BAD_ARGS", "\"tag\" has no file-name characters left after cleanup");
 
-        List<string> texts = DocTexts(doc);
+        string textsPath;
+        List<string> texts = DocTexts(doc, a.Flag("slow", false), out textsPath);
         string digest = ShortHash(SHA256.Create(), string.Join("\n", texts.ToArray()), 16);
         int paragraphs = texts.Count;
         int page = (int)TryGet(() => (object)(int)doc.ComputeStatistics(2), 0);
@@ -342,6 +343,7 @@ internal static partial class Program
         r["page"] = page;
         r["revisions"] = revisions;
         r["digest"] = digest;
+        r["textsPath"] = textsPath;
         r["saved"] = false;
         r["note"] = portable
             ? "\u5feb\u7167\u5df2\u6309\u8981\u6c42\u5199\u5230\u6307\u5b9a\u8def\u5f84\uff08\u4fbf\u4e8e\u8de8\u673a\u5668/\u4ea4\u63a5\u65f6\u968f\u6587\u6863\u8d70\uff09\u3002diff \u65f6\u7528 -Since <\u8fd9\u4e2a\u8def\u5f84> \u624d\u80fd\u627e\u5230\u5b83\uff08\u5b83\u4e0d\u53c2\u4e0e last\uff09\u3002"
@@ -349,37 +351,23 @@ internal static partial class Program
         return r;
     }
 
-    /// <summary>Every paragraph's text, cleaned, in document order.</summary>
-    private static List<string> DocTexts(dynamic doc)
+    /// <summary>Every paragraph's text, cleaned, in document order. Fast path: one Content.Text
+    /// fetch, verified block-per-paragraph shape (works WITH tables on WPS - each cell paragraph
+    /// is "text\r BEL", block k IS paragraph k; measured 2026-10-26). Both snapshot and diff read
+    /// through here, so the two sides stay comparable.</summary>
+    private static List<string> DocTexts(dynamic doc, bool forceSlow, out string path)
     {
+        path = "slow";
         List<string> texts = new List<string>();
         int total = (int)TryGet(() => (object)(int)doc.Paragraphs.Count, 0);
         if (total <= 0) return texts;
 
-        // Fast path: one COM call instead of one per paragraph. The split must reproduce the
-        // paragraph count EXACTLY, and the document must carry NO unaccepted revisions (deleted
-        // text hides from Content.Text but still occupies Range coordinates). Table markers add
-        // stray \r\a, so most real reports fall through to the loop below (correct, slower).
-        // Both snapshot and diff read through here, so the two sides stay comparable.
-        int tables = (int)TryGet(() => (object)(int)doc.Tables.Count, 0);
-        int revs = (int)TryGet(() => (object)(int)doc.Revisions.Count, 1);
-        if (tables == 0 && revs == 0 && total > 200)
+        string[] blocks = FastBlocksVerified(doc, total, forceSlow);
+        if (blocks != null)
         {
-            string all = Convert.ToString(TryGet(() => (object)doc.Content.Text, null), CultureInfo.InvariantCulture);
-            if (all != null && all.Length > 0)
-            {
-                List<string> fast = new List<string>();
-                int from = 0;
-                for (int k = 0; k < all.Length; k++)
-                {
-                    if (all[k] != '\r') continue;
-                    fast.Add(CleanPara(all.Substring(from, k - from)));
-                    from = k + 1;
-                }
-                if (from < all.Length) fast.Add(CleanPara(all.Substring(from)));
-                if (fast.Count == total + 1 && fast[total].Length == 0) fast.RemoveAt(total);
-                if (fast.Count == total) return fast;
-            }
+            for (int k = 0; k < total; k++) texts.Add(BlockNorm(blocks[k]));
+            path = "fast";
+            return texts;
         }
 
         for (int k = 1; k <= total; k++)
@@ -504,7 +492,8 @@ internal static partial class Program
         List<object> raw = snap["texts"] as List<object>;
         if (raw != null)
             foreach (object o in raw) before.Add(Convert.ToString(o, CultureInfo.InvariantCulture) ?? "");
-        List<string> now = DocTexts(doc);
+        string textsPath;
+        List<string> now = DocTexts(doc, a.Flag("slow", false), out textsPath);
 
         List<object> changed = new List<object>();
         List<object> added = new List<object>();
@@ -532,6 +521,7 @@ internal static partial class Program
         r["added"] = added;
         r["removed"] = removed;
         if (degraded) r["degraded"] = true;
+        r["textsPath"] = textsPath;
         r["saved"] = false;
         r["note"] = "changed 里既可能是 Agent 改的，也可能是人改的：未处理的修订=待裁决（用 revisions 看），已变文本=已生效。"
             + (degraded ? " 段落数超过 " + before.Count + "x" + now.Count + " 上限，已退化为分段位置比对：插入/删除可能被报成改写。" : "");

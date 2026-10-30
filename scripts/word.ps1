@@ -10,7 +10,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'undo', 'revise', 'comment', 'render', 'font',
                  'format', 'style', 'page', 'table', 'captions', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit', 'unit', 'units',
-                 'save', 'close', 'quit', 'finish')]
+                 'save', 'close', 'quit', 'finish', 'hint')]
     [string]$Command,
 
     [string]$Doc,
@@ -56,11 +56,16 @@ param(
     [string]$Tag,
     [string]$Since,
     [string]$Note,
+    [string]$HintTag,
+    [string]$Bar,
+    [switch]$NoHint,
+    [switch]$Clear,
     [switch]$Toast,
     [switch]$Sound,
     [switch]$Quiet,
     [switch]$Delete,
     [int]$Max = 200,
+    [switch]$Slow,
     [string]$Paper,
     [string]$Orientation,
     [string]$Top,
@@ -109,6 +114,8 @@ param(
     [switch]$Show,
     [switch]$Save,
     [switch]$ReadOnly,
+    # resident tray indicator (opt-in)
+    [switch]$Tray,
     [int]$TimeoutSec = 180
 )
 
@@ -132,6 +139,9 @@ $sourceDir = Join-Path $scriptRoot 'helper\word'
 if (-not (Test-Path -LiteralPath $sourceDir)) { Write-Error-Json 'NO_HELPER' ("Helper folder not found: " + $sourceDir) }
 $sources = @(Get-ChildItem -LiteralPath $sourceDir -Filter *.cs | Sort-Object Name)
 if ($sources.Count -eq 0) { Write-Error-Json 'NO_HELPER' ('No .cs in ' + $sourceDir) }
+# Shared sources (the tray daemon / hint plumbing) compile into every helper.
+$sharedDir = Join-Path $scriptRoot 'helper\shared'
+if (Test-Path -LiteralPath $sharedDir) { $sources += @(Get-ChildItem -LiteralPath $sharedDir -Filter *.cs | Sort-Object Name) }
 
 # The cache key covers every source file, so editing any of them rebuilds.
 $hashInput = ($sources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
@@ -186,6 +196,7 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'open needs -Doc' }
         $request['show'] = [bool]$Show
         $request['readOnly'] = [bool]$ReadOnly
+        if ($NoHint) { $request['noHint'] = $true }
     }
     'read' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'read needs -Doc' }
@@ -193,6 +204,7 @@ switch ($Command) {
         $request['count'] = $Count   # 0 = every paragraph from -From on
         if ($SkipTableCells) { $request['skipTableCells'] = $true }
         if ($Only) { $request['only'] = $Only }
+        if ($Slow) { $request['slow'] = $true }
     }
     'captions' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'captions needs -Doc' }
@@ -424,10 +436,12 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'snapshot needs -Doc' }
         if ($Tag) { $request['tag'] = $Tag }
         if ($Out) { $request['out'] = Resolve-FullPath $Out }
+        if ($Slow) { $request['slow'] = $true }
     }
     'diff' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'diff needs -Doc' }
         if ($Since) { $request['since'] = $Since }
+        if ($Slow) { $request['slow'] = $true }
     }
     'handoff' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'handoff needs -Doc' }
@@ -438,6 +452,7 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'audit needs -Doc' }
         if ($Max -gt 0) { $request['max'] = $Max }
         if ($Action) { $request['rules'] = $Action }
+        if ($Slow) { $request['slow'] = $true }
     }
     'unit' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'unit needs -Doc' }
@@ -452,6 +467,18 @@ switch ($Command) {
         if ($Normalize) { $request['normalize'] = $true }
         if ($Units) { $request['units'] = $Units }
         if ($Track) { $request['track'] = $true }
+    }
+    'hint' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'hint needs -Doc' }
+        if ($HintTag) { $request['tag'] = $HintTag }
+        if ($Bar) { $request['bar'] = $Bar }
+        if ($Text) { $request['text'] = $Text }
+        if ($Clear) { $request['clear'] = $true }
+        if ($Toast) { $request['toast'] = $true }
+        if ($Sound) { $request['sound'] = $true }
+        if ($Quiet) { $request['quiet'] = $true }
+        # -Tray: keep a resident indicator icon; the daemon restores via this same script.
+        if ($Tray) { $request['tray'] = $true; $request['wrapper'] = $PSCommandPath }
     }
     'finish' {
         if ($Note) { $request['note'] = $Note }

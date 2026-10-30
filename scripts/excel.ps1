@@ -9,7 +9,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'write', 'fill', 'rows', 'cols', 'sheet', 'comment', 'render', 'chart', 'autofit', 'format',
-                 'snapshot', 'diff', 'restore', 'calc', 'save', 'close', 'quit', 'finish')]
+                 'snapshot', 'diff', 'restore', 'calc', 'save', 'close', 'quit', 'finish', 'hint')]
     [string]$Command,
 
     [string]$Doc,
@@ -66,6 +66,13 @@ param(
     [switch]$Show,
     [switch]$ReadOnly,
     [switch]$Save,
+    # takeover hint (see hint command)
+    [string]$HintTag,
+    [string]$Bar,
+    [switch]$NoHint,
+    [switch]$Clear,
+    # resident tray indicator (opt-in)
+    [switch]$Tray,
     [int]$TimeoutSec = 180
 )
 
@@ -89,6 +96,9 @@ $sourceDir = Join-Path $scriptRoot 'helper\excel'
 if (-not (Test-Path -LiteralPath $sourceDir)) { Write-Error-Json 'NO_HELPER' ("Helper folder not found: " + $sourceDir) }
 $sources = @(Get-ChildItem -LiteralPath $sourceDir -Filter *.cs | Sort-Object Name)
 if ($sources.Count -eq 0) { Write-Error-Json 'NO_HELPER' ('No .cs in ' + $sourceDir) }
+# Shared sources (the tray daemon / hint plumbing) compile into every helper.
+$sharedDir = Join-Path $scriptRoot 'helper\shared'
+if (Test-Path -LiteralPath $sharedDir) { $sources += @(Get-ChildItem -LiteralPath $sharedDir -Filter *.cs | Sort-Object Name) }
 
 # The cache key covers every source file, so editing any of them rebuilds.
 $hashInput = ($sources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
@@ -189,6 +199,7 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'open needs -Doc' }
         $request['show'] = [bool]$Show
         $request['readOnly'] = [bool]$ReadOnly
+        if ($NoHint) { $request['noHint'] = $true }
     }
     'read' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'read needs -Doc' }
@@ -279,6 +290,18 @@ switch ($Command) {
         if ($Since) { $request['since'] = $Since } else { $request['since'] = 'last' }
         if ($Cells) { $request['cells'] = $Cells }
         if ($KeepExtras) { $request['keepExtras'] = $true }
+    }
+    'hint' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'hint needs -Doc' }
+        if ($HintTag) { $request['tag'] = $HintTag }
+        if ($Bar) { $request['bar'] = $Bar }
+        if ($Text) { $request['text'] = $Text }
+        if ($Clear) { $request['clear'] = $true }
+        if ($Toast) { $request['toast'] = $true }
+        if ($Sound) { $request['sound'] = $true }
+        if ($Quiet) { $request['quiet'] = $true }
+        # -Tray: keep a resident indicator icon; the daemon restores via this same script.
+        if ($Tray) { $request['tray'] = $true; $request['wrapper'] = $PSCommandPath }
     }
     'finish' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'finish needs -Doc' }

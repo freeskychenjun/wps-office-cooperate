@@ -5,6 +5,22 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.12（2026-10-30）**：`hint -Tray` —— **常驻托盘图标**。v1.11 的三个信号各有短板：标签页标记常驻但**不带进度**、气泡**一过性**、Writer 状态栏**不渲染**，于是补一个托盘图标：橙色「AI」小圆标，**悬停 = 标记 + 当前步骤**（「〔AI〕 报告.docx · 正在核对第 3 节」），**右键 = 「结束协作：还原标题标记」/「仅关闭托盘图标」**；`finish` / `close` / `hint -Clear` 让它自动退出，忘了也会在 **4 小时**后自灭。实现上**不新增常驻服务**：`hint -Tray` 由短命 helper 写一个状态文件，再用**自己这个 exe 以 `--tray` 重开一份**（只跑消息循环、不发 COM 请求），状态文件就是唯一 IPC；菜单里的「还原」直接调用本 skill 的 `hint -Clear`，所以 daemon 不必懂 COM，三个 app 共用一份 `scripts/helper/shared/Tray.cs`。两个实测坑：① spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，任何读到 EOF 的调用方（python `subprocess.communicate`、PowerShell 管道）会被图标的 4 小时寿命**卡死**；② Windows 把新托盘图标默认收进「^」溢出区，进程无法自我提升，只能提示用户拖出来（`tray.note` 已写明）。**文档被用户关掉后图标会自己消失**（约 10 s：用 RestartManager 问系统"还有没有进程占着这个文件"，开着=1 / 关掉=0；实测 Word 9.6 s、Excel 8.6 s、PPT 7.4 s），`save -As` 会把图标重指到新路径，不会留下"AI 协作中"的假象。
+
+**版本 v1.11（2026-10-30）**：新增 **`hint`** —— 接管提示。agent 接管一份用户正开着的文档时，用户原本只会看到"窗口自己滚起来、文字突然变成修订"，不知道是谁在动、怎么停。现在 **`open` 自动给窗口标题/标签页打上「〔AI〕」标记**（`〔AI〕 报告.docx`；纯窗口状态，不写进文档、不落盘），`hint -Doc <路径> -Toast` 再补一个托盘气泡说明"已接管《X》：改动以修订/批注呈现，随时可接受或拒绝"，`hint -Text` 还能刷新状态栏（**表格侧实测可见**；Writer 侧 WPS 只接受写入、界面不渲染，截图仍是页面/字数）；收尾 **`finish` / `close` 自动还原**标题与状态栏。实测 WPS 12.0（2026-10-30）：Writer 的 `doc.ActiveWindow.Caption`、表格的 `wb.Windows(1).Caption` 都可写且直接落到真实窗口标题（`〔AI〕 <文件名> - WPS Office`）。注意 **WPS 12 把文档显示成标签页、从右截断**，所以标记放在名字**前面**：后缀在真实报告的长文件名上会被整段截掉（实测同一像素，等于没打），Writer 的 `Application.StatusBar` 只写不读且界面不渲染（截图实测）、表格的可读写且实测会显示；**PPT 没有可写的单文档标题**（`ActiveWindow.Caption` 只读，`Application.Caption` 是应用级、写进去会顶掉本地化的"WPS 演示"），所以 PPT 侧只给气泡并如实返回 `captionSupported:false` + `limitation`。
+
+**版本 v1.10（2026-10-27）**：把 v1.9 audit 快路径的模式推广到全部"读侧"命令——一次取全文、本地过滤、只在返回/命中处花往返。前提是一天实验证实的**块模型**：WPS 里 `Content.Text` 按 `\r` 切块后**第 k 块就是第 k 段**（表格也不例外：每格是"文本\r+BEL"，BEL 落在下一块开头；表格后首段也带前导 BEL，所以**不能用 BEL 启发式判表内**，表内段区间以 `Table.Range.Paragraphs.Count` 为权威，O(表数) 往返）。统一走 `FastBlocksVerified`：修订非零 / 块数≠段数+1 / 首中末三段抽查不符 → 整体回退旧逐段路径（`-Slow` 可强制），`path`/`textsPath` 字段说明走了哪条。
+- **`read -SkipTableCells / -Only` 快路径**：4479 段 / 20 表语料上 `-SkipTableCells -Count 0` **38.6 s → 8.4 s**（快跑还含 ~6 s 开文档；10521 段的真实报告旧路径 111 s，预期 → 10 s 级）；返回 180 段与旧路径**逐字段一致**（i/text/style/list/inTable/table）。注意 `-Only` 若命中大半文档（如 `[0-9]` 命中 3951/4479），逐段 style/list 明细占大头，快慢持平——快路径吃的是**选择性**过滤。
+- **`snapshot`/`diff` 快路径**：撤掉 v0.7 的 `tables == 0` 保守门禁（块模型证明带表文档同样成立），4479 段 **22.4 s → 3.2 s（7×）**，快慢两份快照 texts 4479 段**逐字节一致**、digest 相同。
+- **`format -Style` / `style -NoNumbering` 改 Find-by-style**：样式定位扫描在 WPS 进程内，往返从 O(段数×2) 降到 O(命中)（万段报告给 40 个标题改格式，从 2 万次往返降到几十次）；任何拒绝回退旧逐段循环（重复套格式幂等）。A/B：命中 7/7 一致、readBack 相同。
+- 回归：`check_captions.py` 30 断言全过（其 read 扫描项已在快路径上跑）；read/snapshot/format 的快慢 A/B 全部逐字段一致。
+
+**版本 v1.9（2026-10-26）**：`word audit` 提速——旧实现每段 3 次 COM 往返（Paragraphs.Item + Range.Text + Style.NameLocal），段数×3 就是全部成本；大文档上这纯粹是"取文本"的通道费，与规则无关。
+- **快路径**：`Content.Text` **一次取回全文**，8 条文本规则（单位/重复词/括号混用/连续空格/标点前空格/全角数字/段末空格/连续空段）全部本地跑；标题段落靠**枚举样式名 + 按样式 Find**（扫描在 WPS 进程内）拿真实 Range 坐标；每条发现的段号用**原生 Find 顺序定位样本文本**再按字符区间校验——与 `search` 同款机制，**免疫表格行末标记造成的 Content.Text 坐标漂移**（20 表语料实测：直接拿 Content 偏移换算段号必漂移，Find 定位零漂移）。
+- **正确性门禁**：只在 `Revisions.Count == 0` 时走快路径（`Content.Text` 会隐藏已删除修订文本，偏移必错，v0.7 的老教训）；任何一步拒绝或定位失败**整体回退旧逐段循环**，回退原因写进响应 `fastFail` 字段；`-Slow` 可强制旧路径做 A/B。空段发现的段号另有"锚段落 ± 校验四段全空"二重验证。
+- **实测（4479 段 / 20 表 / 24 条检出语料）**：墙钟 **29.9 s → 4.4 s**（扫描内部 27.8 s → 2.2 s，约 **13×**）；306/321 段小文档快慢持平（~1.3 s，样式枚举的固定开销）。**快/慢/旧三份输出逐条一致**（段号/规则/样本/顺序），9 条埋点规则全部命中（含 Heading 1→3 跳级、连续 4 空段）。响应新增 `path`（fast/slow）、`ms`、`fastFail`。
+- 回归：`check_captions.py` 30 断言全过（含 audit 题注判定）；新增埋点语料生成器 `tests/word/make_audit_fixture.py`（report-300 拷贝上埋 9 类已知问题）。
+
 **版本 v1.8（2026-10-26）**：按一份真实报告的使用复盘（10521 段 / 32 张表 / 75 页）补齐"表格编号检查"这条链路——复盘结论是**读侧缺能力**：检查用了 6 分钟（22 次 `read` 全扫 4.5 min），改写只花 2 秒。
 - 新增 **`word captions`**（只读，一条命令出清单 + 判定）：把每张表与它的题注配对，一次给出**重号 / 同节跳号 / 表号格式混用（点分 `2.4.1` vs 短横 `3.3-1`）/ 题注位置混用（做进表内第 1 行 vs 表外上方）/ 表号与题名之间空格不一 / 缺题注 / 正文悬空引用（`见表3.3-2` 但无此表）**，每条 issue 带段号与改法。实测该报告 **6.4 s** 出结论，当场查出「`表3.3-3` 用了两次」（段 10307、10430，正是要找的问题）；也核对出「32 张表 32 条题注、17 张题名在表内、15 张在表外」，与人工复盘逐个吻合。
 - `table -Action scan` 每行新增 **`para`**（表起始段号）：没有它就只能盲试段号，有了它才能定点读题注、直接喂 `table -Action caption -Table n`。
@@ -52,8 +68,10 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
    理由不是"体验"，是**会坏**：那些 skill/工具改的是磁盘文件，而这份文档正被 WPS 独占（实测写盘 `PermissionError`）；它们还产出副本，会让你眼前这份和副本分成两条线。
    唯一例外：用户明确要"**不动原件、出一份新稿**"或"**无人值守批量跑**"——那时先 `save` → `close` 交出去，回来再 `open` 产出的文件、`snapshot` 重建基线（Excel 用 `save -As` 另出一份，或在用户关掉文件后离线处理）。
 1. **先 `status`，再动手，并说出在哪儿动手。** 每次开工第一条命令是 `status`，把"几个实例在跑 / 开着哪些文档 / 哪份是 active / 有没有未保存修改"念给用户，并明确报出**即将修改的那份文档的完整路径**（Excel 再加工作表名）。不碰用户没指定的文件。
+   接着**让用户看得见接管**：`open` 已自动把标签/标题改成「〔AI〕 文件名」，再 `hint -Doc <路径> -Toast` 弹一句人话（"已接管《X》…"）——同一份文档一轮协作只需公告一次，后续进度用 `hint -Text "正在做…" -Quiet` 刷状态栏（表格可见；Writer 不渲染，别指望）。要边干边看进度就再加 `-Tray`（托盘图标，悬停看当前步骤、右键可结束并还原；新图标默认在「^」里，提醒用户拖出来）。`finish`/`close` 会自动还原，别留着标记过夜。
 2. **`readOnly` 就是不许改。** `open`/`read` 返回 `readOnly: true`（文件被别处占用或有只读属性）时，写命令会直接报 `READONLY`。**不要**用另存、改文件属性、杀占用进程等方式绕过去——先问用户。
 3. **不替用户关文档。** `close` 只关本次明确要关的那一份；用户开着的其它文档、用户自己的 WPS 窗口一律不动。关之前先 `status` 确认这份是本次打开的。
+   反过来，**用户在你看不见的时候关掉了文档**：Word 的下一条命令会**静默重开**并返回 `reopened:true`（若日志显示关闭前未保存，还会带 `unsavedAtClose:true` 警告，提醒可能丢了改动），Excel/PPT 则返回 `DOC_CLOSED`——必须**显式 `open`** 才能继续，别假装还在协作；托盘图标会在约 10 s 内自动消失。
 4. **结束必须 `close`，并汇报进程数。** 收尾命令 `close -Doc <路径>` 会返回 `processes`（Word 侧 wps.exe / Excel 侧 et.exe / PPT 侧 wpp.exe 计数）、`documentsLeft`。把这两个数报给用户；只清理自己起的无窗口 `/Automation` 实例，**绝不**按映像名批量杀进程。（注：WPS 退出后会自己预拉起 1–2 个隐藏进程，约 1 分钟自灭，别把它当成泄漏。）
 5. **交付前提醒"落盘可能是密文"。** 装了单位透明加密的机器上，WPS `save` 之后文件头变成 `17DA5FA01633CD9A`，直接发给同事打不开。保存后必须提这一句，并按 [reference/encryption.md](reference/encryption.md) 处理。
 6. **落盘前先想清楚反悔手段，别改完就存。**
@@ -64,6 +82,17 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
    - `snapshot`/`diff`/`handoff` 都走 COM 读活文档，不依赖 save，不构成提前落盘的理由。
 7. **先分清"只连接"和"要动手"，别把连接做成体检。** 用户只说"连上 / 接管 / 打开这份文档 / 先看看有什么"时，本轮做到 **`status` → `open` → 报一句摘要**（文件名 / 页数或段落数 / 纸张或尺寸 / `readOnly` / 有无未保存改动）**就停下等指令**：不 `read` 全稿、不 `render`、不 `audit`、不 `snapshot`、不 `close`（文档留给用户继续用，等他下一次给出任务时再按铁律 4 收尾）。这些动作只在用户给出具体任务时才做，且只做该任务需要的那一部分——大文档 `read` 一次吐上万字符、`audit` 一次吐上百条（人工老稿误报居多），对"只是连上"的用户是纯等待成本。
    反过来同样成立：用户给了"改"的任务，别在没改完、没 `render` 复核之前就宣布完成。
+
+### 接管提示（`hint`，v1.11）
+
+用户的原话是"agent 接管 wps 文档后可否有比较友好的提示"——所以**接管那一步必须看得见**，而且不能打扰：
+
+- **`open` 自动打标签**：窗口标签/标题变成 `〔AI〕 报告.docx`（Writer / 表格都有；WPS 12 的标签页从右截断，所以标记放前面，长文件名也不会被吃掉）。这是纯窗口状态：不进修订、不写文件、不改 `saved`，`-NoHint` 可关。
+- **`hint` 补一句人话**：默认弹 6 s 托盘气泡——"已接管《报告.docx》：我会把改动做成修订或批注，你随时可以接受或拒绝。"`-Text` 换说法，`-HintTag` 换标题里的标签文字，`-Bar` 单独控制状态栏那行（表格会显示，Writer 不渲染），`-Quiet` 静默（不弹气泡，适合刷新标题/状态栏）。
+- **还原**：`hint -Clear`、`finish`、`close` 都会把标题恢复成文件名、把状态栏交还 WPS；`status` 每份文档带 `caption` 与 `hinted`，随时可核对当前有没有挂着标记。
+- **PPT 只给气泡**（`captionSupported:false` + `limitation`）：WPS 演示没有可写的单文档标题，别对用户说"标题已标记"。
+- **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
+- **不做悬浮窗（用户明确决策，2026-10-30）**：不加置顶悬浮条/浮层——它会遮正文、抢焦点，而且要常驻 daemon 跟随 WPS 窗口（移动/最小化/切标签/异常退出都得收拾）。常驻信息由「标签页前缀标记 + 托盘图标」承担；**不要再向用户推荐，也不要把它做成"可选模式"偷偷加回来**。
 
 ---
 
@@ -77,15 +106,15 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 |---|---|---|
 | `doctor` | — | 自检：哪个套件可用/版本/是否在跑/开着的文档/渲染是否可用/各类进程数 |
 | `status` | — | 在跑的实例与文档清单（name / path / saved / readOnly / active / paragraphs） |
-| `open` | `-Doc <路径> [-Show] [-ReadOnly]` | 已开则复用，未开则打开；返回 readOnly、段落数、页数；发现可能开在另一实例时给 `multiInstanceWarning` |
-| `read` | `-Doc <路径> [-From 1] [-Count 60]`；大文档加 `[-SkipTableCells] [-Only <正则>]` | 段落（编号/样式/自动编号/文本/inTable/**表号**）+ 表格清单 + 页数/修订数/批注数。**凡是带 `-SkipTableCells`/`-Only`，`-Count` 就变成"返回多少段"**（不是"走多少个段落号"），`-Count 0` = 一直扫到底；返回里 `scanned`/`skippedTableCells`/`filter` 说明跳过了什么。实测 10521 段 / 10276 个单元格的报告：`-SkipTableCells -Count 0` **一次调用**拿回全部 245 段正文（111 s），而按老办法是 22 次调用（每次 ~9.5 s）——省的是调用次数和每次的表格清单开销，单段仍要一次 COM 往返，所以别指望成倍提速；真正该用的是 `captions` |
+| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回 readOnly、段落数、页数；发现可能开在另一实例时给 `multiInstanceWarning`。**v1.11 起自动给窗口标签打「〔AI〕」接管标记**（`hint.caption`/`hint.captionSet`，纯窗口状态；`-NoHint` 关掉） |
+| `read` | `-Doc <路径> [-From 1] [-Count 60]`；大文档加 `[-SkipTableCells] [-Only <正则>] [-Slow]` | 段落（编号/样式/自动编号/文本/inTable/**表号**）+ 表格清单 + 页数/修订数/批注数。**凡是带 `-SkipTableCells`/`-Only`，`-Count` 就变成"返回多少段"**（不是"走多少个段落号"），`-Count 0` = 一直扫到底；返回里 `scanned`/`skippedTableCells`/`filter` 说明跳过了什么。**v1.10 起过滤扫默认走快路径**（一次取全文+本地过滤，`path:fast`；4479 段/20 表实测 38.6 s → 8.4 s，与旧路径逐字段一致；有未处理修订或校验失败自动回退，`-Slow` 强制旧路径）。`-Only` 的收益取决于选择性：命中大半文档时快慢持平 |
 | `search` | `-Doc <路径> -Text <词\|词2\|词3> [-Style 样式名] [-Max 50] [-Case]` | **全文找词**（WPS 原生 Find，大文档秒级；多词用 `\|` 分隔一次查完，返回每词计数）——定位用这个，别一页页 `read` |
 | `selection` | `-Doc <路径>` | **读用户当前选中/光标**：返回选中文本与覆盖的段落号（`fromPara/toPara`）；在表格里时再给 `table`（表号，直通 `table -Table n`/`cell -Table n`）与 `row`/`col`；覆盖**图片**时给 `images`（图号，直通 `picture -Image n`）——只读不改 |
 | `revise` | `-Doc <路径> -Items <json文件>` | **修订模式**批量改写（见下），返回改动与修订计数 |
 | `comment` | 列表：`-Action list`；单条：`-Para N [-Anchor "文字"] (-TextFile <txt文件> \| -Text "短文本")`；**批量：`-Items <json>`**；删除：`-Delete -Index N \| -All` | 加批注（中文正文走文件，避开引号转义）；`list` 返回每条的编号/作者/锚文/内容——编号就是 `-Delete -Index` 用的 |
 | `render` | `-Doc <路径> -Page 1 [-To 4] -Out <目录> [-Width 1100]` | 页面 EMF → PNG（宽 320–2400），返回每页路径与尺寸 |
 | `font` | `-Doc <路径> -Name <字体名> [-Track]` | 把**正文、页眉、页脚、文本框**里的字体统一改成指定字体（中英文一起改，`-Name 仿宋`）；返回每个区段的结果与回读值。默认**不产生修订**，整批算一个撤销单元 |
-| `format` | `-Doc <路径> [-Para N \| -From N -To M \| -Style 样式名 \| -Match <正则>]` + 任意格式项 | 对**整篇/一段/一段区间/某样式的所有段/文本匹配正则的所有段**套字符与段落格式（`-Match` 例：`"^\s*(图\|附图)\s*\d"` 一次选中全部图名；返回命中数与前 5 个样例） |
+| `format` | `-Doc <路径> [-Para N \| -From N -To M \| -Style 样式名 \| -Match <正则>] [-Slow]` + 任意格式项 | 对**整篇/一段/一段区间/某样式的所有段/文本匹配正则的所有段**套字符与段落格式（`-Match` 例：`"^\s*(图\|附图)\s*\d"` 一次选中全部图名；返回命中数与前 5 个样例）。`-Style` 与 `-Match` 的定位扫描都在 WPS 进程内完成（v1.10 起 `-Style` 改 Find-by-style，往返 O(命中) 而非 O(段数)） |
 | `style` | `-Doc <路径> -Style <样式名> [-NoNumbering]` + 任意格式项 | 改**样式本身**（正文、标题 1…），所有用它的段落一起变 |
 | `page` | `-Doc <路径>`（**不带任何选项=查询各节设置**）`[-Paper A4] [-Orientation portrait\|landscape] [-Top/-Bottom/-Left/-Right 厘米] [-HeaderText] [-FooterText] [-PageNumber center\|right\|left\|none] [-PageNumberStart N\|none] [-All]` | 纸张/方向/页边距/页眉页脚/页码（逐节应用）；查询模式报每节纸张/方向/边距/页眉页脚 **+ `pageNumbers`（起始号/是否节内重启/该节首段的实际显示页码——页码断号一眼看出）**；`-PageNumberStart none` 试图清掉「本节重新编号」（WPS 常做不到，会**明说失败**并给 XML 路线） |
 | `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`（每行带 `para` = 表起始段号）**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`** | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法）。`scan` 的 `para` 可直接 `read -From <para-3> -Count 6` 看题注，或喂给 `-Action caption -Table n` |
@@ -96,19 +125,20 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `reference` | 列表：`-Action list -Items <json 数组> [-AtPara N] [-Heading 参考文献]`；引用：`-Action cite -Para N -Numbers "1,2,5"\|"3-6"` | 生成参考文献列表 / 在段末插入上标引用 |
 | `view` | `-Doc <路径> -Para N` 或 `-Page N` | 把 WPS 窗口滚到那一段/那一页（唯一能做的"跟随"，不动文档内容） |
 | `unit` / `units` | `-Doc <路径> [-Apply] [-Units "m3,km2,s2"] [-Normalize] [-Track]` | **单位上标批量修**：把掉下来的 `m3/s`、`km2`、`万m3` 里的指数改成 Unicode 上标（`m³/s`、`km²`）。不带 `-Apply` = 只体检，带 `-Apply` = 修并报逐单位处数与跳过项。**只修"挂在数值上"的单位**（前字符＝数字/万/亿/汉字/左括号，或"数字 空格 单位"）；**已正确的两种形态自动跳过**（Unicode ²/³ 与 run 级上标）；**英文/数字贴连跳过**（`item3`、`m23`、`km20`）。三类只报不改：`fragments`（孤立 token／后跟 `=`，多半是模板变量名）、`looseFragments`（`n2`/`n3` 缺基名）、`suspects`（`km3` 这类疑似笔误）。300 页/13k 段实测 ~20 s |
-| `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段、**题名做进表格第 1 行**（`table-caption-in-row`，直接给出该用哪条 `table -Action caption`）；返回段落号 + 建议，供你判断后落批注。题注判据与 `captions` 共用同一个解析器（**标签必须在段首**，"如表3.3-2所示"这类正文引用不算题注），题名在表内时只报一条、不再同时报 `caption-missing`；**编号本身的问题（重号/跳号/格式混用/悬空引用）不在这里查，用 `captions`** |
+| `audit` | `-Doc <路径> [-Max N] [-Action 规则名,逗号分隔] [-Slow]` | **机械检查**：单位未用上标、重复词、括号混用、连续空格、全角数字、段末空格、标题层级跳级、图表缺题注、连续空段、**题名做进表格第 1 行**（`table-caption-in-row`，直接给出该用哪条 `table -Action caption`）；返回段落号 + 建议，供你判断后落批注。**v1.9 起默认走快路径**（一次取全文+本地规则+Find 定位段号，几千段文档从几十秒降到几秒；有未处理修订或定位校验失败时自动整体回退旧逐段扫描，`path` 字段说明走了哪条；`-Slow` 强制旧路径）。题注判据与 `captions` 共用同一个解析器（**标签必须在段首**，"如表3.3-2所示"这类正文引用不算题注），题名在表内时只报一条、不再同时报 `caption-missing`；**编号本身的问题（重号/跳号/格式混用/悬空引用）不在这里查，用 `captions`** |
 | `fields` | `-Doc <路径>` | **刷新全部域**：页码、目录、题注、引用（改完正文、交付前跑一次） |
 | `cell` | `-Doc <路径> (-Table n -Row r -Col c \| -Para N) -Text "..."` + 任意格式项 | 改一个表格单元格的文字（可带字体字号对齐） |
 | `insert` | `-Doc <路径> [-Para N] [-Where after\|before\|end] -Items <json> [-Track]` | **批量插入段落**（默认干净写入、不进修订；`-Track` 才走修订），可带样式与格式。**锚点是表格前一段时自动改用"段末标记之前插入 CR"的写法**，不会掉进表格第一格 |
 | `revisions` | `-Doc <路径> [-Action list\|accept\|reject] [-Index N \| -All]` | 列出**未处理**的修订（类型/作者/所在段/文本），或按人要求接受/拒绝 |
-| `snapshot` | `-Doc <路径> [-Tag 名字] [-Out <路径>]` | 存一份段落文本快照（给 `diff` 用，默认存 %LOCALAPPDATA% 不污染文档目录；`-Out` 写到指定路径，跨机器/交接时随文档走） |
-| `diff` | `-Doc <路径> [-Since 快照路径\|last]` | 和快照比：哪些段被改了（before→after）、哪些增删了——**人改的和 Agent 改的都算** |
+| `snapshot` | `-Doc <路径> [-Tag 名字] [-Out <路径>] [-Slow]` | 存一份段落文本快照（给 `diff` 用，默认存 %LOCALAPPDATA% 不污染文档目录；`-Out` 写到指定路径，跨机器/交接时随文档走）。**v1.10 起带表文档也走快路径**（一次取全文；4479 段实测 22.4 s → 3.2 s，`textsPath` 字段说明走了哪条） |
+| `diff` | `-Doc <路径> [-Since 快照路径\|last] [-Slow]` | 和快照比：哪些段被改了（before→after）、哪些增删了——**人改的和 Agent 改的都算**（当前侧同样走快路径） |
 | `handoff` | `-Doc <路径> [-Note "本轮做了什么"] [-As 输出路径]` | 在文档旁生成 `.handoff.md` 交接单：状态/待办/操作记录/最新快照路径 |
 | `undo` | `-Doc <路径> [-Count N]`（默认 1，上限 20） | **Agent 自己的 Ctrl+Z**：撤回最近 N 步（排版批是一步）。注意 Undo 不分作者——只在自己刚写完且无 `changedOutside` 时用 |
 | `save` | `-Doc <路径> [-As <另存路径>]` | 保存 / 另存 |
 | `close` | `-Doc <路径> [-Save]` | 关闭；无其它文档时退出实例，并回报进程数 |
 | `quit` | — | 关掉该实例的**全部**文档并退出（不保存）。**慎用**：会波及用户在同一实例里开的文档，只在自己的独占实例上用 |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | **任务完成信号**（agent 无关，零依赖）：默认**托盘气泡 + 提示音**（原生 .NET），**不触碰文档任何内容**；`-Quiet` 静音。**任务收尾默认调用** |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**三者都是窗口状态，不写文档、不落盘**。`open` 已自动打标签；`-Text` 换气泡/状态栏里的话（如"正在核对第 3 节"）；`-Clear` 还原（`finish`/`close` 也会自动还原）。Writer 的 `Application.StatusBar` 只写不读、且 WPS 界面不渲染（实测状态栏仍是页面/字数），`statusBar:true` 只代表写入被接受；表格侧写入会真的显示。**`-Tray`**（v1.12）：常驻托盘图标，悬停=标记+当前步骤，右键可还原，`finish`/`close`/`-Clear` 自动移除 |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）控制等待；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
 
@@ -215,7 +245,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 |---|---|---|
 | `doctor` | — | 自检：ProgID 安装/在跑、进程数、渲染能力、打开的工作簿 |
 | `status` | — | 在跑的实例与工作簿清单（name / path / saved / readOnly / active），工作表概况 |
-| `open` | `-Doc <路径> [-Show] [-ReadOnly]` | 已开则复用，未开则打开；返回工作表清单与各自 usedRange |
+| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回工作表清单与各自 usedRange。**v1.11 起自动给窗口标签打「〔AI〕」接管标记**（`hint.caption`；用 `wb.Windows(1).Caption`，WPS 表格里 `wb.ActiveWindow` 常为 null） |
 | `read` | `-Doc` `[(-Sheet 名 \| -Range "Sheet1!A1:F40")] [-Profile]` | 不带选项=工作簿概览；带 Sheet=读该表 used range（值 + 公式）；`>60 行或 >15 列`自动改列概况（类型统计/min/median/max/高频值 + 头尾各 5 行样本），要局部全量用 `-Range` |
 | `write` | `-Doc -Items <json>`（或单格 `-Cell B3 -Value x / -Formula "=..."`） | **批量写**（见下）：原子批、`expect` 锚校验、中途失败回滚，每格返回 before→after；**批内自动挂起重算+屏幕刷新，批末一次重算**（大表写几千格不产生重算风暴） |
 | `fill` | `-Doc -Range D2:D5000 [-Sheet] -Formula "=B2*C2"` | **整列填公式**：首格写一次 + 原生 FillDown（2000 行约 2 秒，含进程启动）；比逐格 write 快几个量级，大表必用 |
@@ -236,6 +266,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `close` | `-Doc [-Save]` | 关闭；无其它工作簿时退出实例，回报进程数 |
 | `quit` | — | 关掉该实例**全部**工作簿并退出（不保存）。**慎用** |
 | `finish` | `[-Note "改了什么"] [-Cell A1] [-Toast] [-Sound] [-Quiet] [-Force]` | **任务完成信号**（agent 无关，零依赖）：默认**托盘气泡 + 提示音**（原生 .NET，任何机器都响），**不动工作簿任何内容**。`-Cell` 显式指定时才额外写一行状态（目标格非空拒绝，`-Force` 覆盖）；`-Quiet` 静音。**任务收尾默认调用** |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**不写单元格、不落盘**。`open` 自动打标签，`finish`/`close` 自动还原；表格的 `Application.StatusBar` 可读写且实测会显示这行字，`-Clear` 时写 `false` 把状态栏交还 WPS。`-Tray` 加常驻托盘图标（悬停看进度、右键还原） |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
 
@@ -320,7 +351,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 |---|---|---|
 | `doctor` | — | 自检：ProgID 安装/在跑、wpp 进程数、开着的演示文稿 |
 | `status` | — | 实例与文稿清单（name / path / saved / readOnly / slides / active） |
-| `open` | `-Doc <路径> [-Show] [-ReadOnly]` | 已开则复用；未开则打开；**路径不存在则新建空稿并保存到该路径**；返回 slides 与 slideSize |
+| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用；未开则打开；**路径不存在则新建空稿并保存到该路径**；返回 slides 与 slideSize。PPT 侧**没有**可写的单文档标题，`-NoHint` 仅为与另两个 app 参数对齐 |
 | `read` | `-Doc [-From 1] [-Count 30]` | 逐页：layout + 形状清单（编号/名称/类型/占位符/l/t/w/h/文字前 160 字）+ 备注；>30 页自动分页 |
 | `search` | `-Doc -Text <词> [-Max 50] [-Case]` | 跨页找文字：返回 页号/形状名/片段 |
 | `replace` | `-Doc -Find <词> [-Replace <新词>] [-Scope all\|slides\|groups\|tables\|notes\|footer\|master] [-Slides "1-5,8"] [-Regex] [-Case] [-Max 500] [-DryRun]`；**批量：`-Items <json>`** | **全稿查找替换**（Word 侧 `revise`、Excel 侧 `write` 的对等能力）：扫**正文 / 组合内部 / 表格单元格 / 备注页 / 页眉页脚**；**母版默认不动**，要改必须显式 `-Scope master`（一改波及全稿）。默认**忽略大小写**（`-Case` 区分）、`-Regex` 支持 `$1`；**每处写入前用 `Characters()` 回读校验**，不符进 `skipped` 绝不盲写；返回逐处 `before→after`+`context`，并自动存 `prereplace` 快照，`restore -Since prereplace` 一键盘回滚。`-Replace` 省略 = 删除匹配 |
@@ -356,6 +387,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `close` | `-Doc [-Save]` | 关闭；`-Save` 会先保存（有改动才存，返回 `saved:true`）；最后一份时退出实例，回报 wpp 进程数。**关闭后同一路径可以再 `open`** |
 | `quit` | — | 全部关闭并退出（不保存）。**慎用** |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | 完成信号（托盘气泡+提示音）；**不碰文稿任何内容**。任务收尾默认调用 |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11；v1.12 起 `-Tray` 是 PPT 侧**唯一常驻通道**）：**气泡/托盘图标**——WPS 演示不支持可写的单文档标题，返回 `captionSupported:false` + `limitation`；`-Quiet` 静默。**别对用户谎称"标题已标记"** |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，多半是 WPS 弹了对话框。
 

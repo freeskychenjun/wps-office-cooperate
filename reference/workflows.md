@@ -326,3 +326,21 @@ office.ps1 word unit -Doc $DOC -Apply -Units "s2"          # 追加真实使用�
 - 单位表**只放真实使用**的单位（metric 面积/体积系列：`km2/hm2/cm2/mm2/dm2/um2/nm2/m3/m2`）；`m/s2`（加速度）之类按需 `-Units` 追加，必须写全基名（如 `s2`）。
 - **疑似笔误只报不改**：`km3`、`km4`、`m4`、`hm3` 这类会被列进 `suspects` 并附上下文。经验：面积/库容报告里出现"立方公里"，多半是 `km2` 打错；自动加 ³ 会让笔误看起来像有意为之，比不改更糟。确认后手工改数字，或用 `-Units "km3"` 明确表示"这确实是立方单位"。
 - 表格、表格单元格、正文都在 `doc.Content` 内，都会被处理；**页眉/页脚/脚注不在范围内**（水利率报告里单位极少出现在页眉）。
+
+## 14. 接管提示（`hint`，v1.11）
+
+用户的原话是"当 agent 接管 wps 文档后，可否有比较友好的提示告诉用户？"——接管这一步原本是**不可见的**，所以固定成四步：
+
+1. **`status`** —— 说清在哪个实例、哪份文档上动手。
+2. **`open -Doc <路径>`** —— 自动把窗口标签改成 `〔AI〕 报告.docx`（纯窗口状态，不写文档；WPS 12 的标签页从右截断，标记必须放前面——后缀在长文件名上会被整段吃掉）；返回值里 `hint.caption` / `hint.captionSet` 就是取证。只读文档自动标成 `〔AI 只读〕`，因为写命令本来就会被 `READONLY` 拒绝。
+3. **`hint -Doc <路径> -Toast`** —— 弹 6 s 托盘气泡："已接管《报告.docx》：我会把改动做成修订或批注，你随时可以接受或拒绝。"（`-Sound` 加提示音、`-HintTag` 换标签文字）。长任务中途报进度用 `hint -Text "正在核对第 5 节的表格" -Quiet`：表格侧状态栏会显示这行字，**Writer 侧 WPS 不渲染状态栏**（实测截图仍是页面/字数），Word 报进度只能靠气泡（别用 -Quiet）与标签页标记。
+4. **要常驻进度就加 `-Tray`**（v1.12）—— `hint -Doc X -Text "正在核对第 3 节" -Quiet -Tray`：托盘出现橙色「AI」图标，悬停 `〔AI〕 报告.docx · 正在核对第 3 节`，右键「结束协作：还原标题标记」。`finish`/`close`/`-Clear` 会自动移除，忘关也会 4 小时自灭。
+   - 新图标默认在「^」溢出区（Windows 行为）：要告诉用户拖到任务栏一次；`hint` 返回里的 `tray.note` 就是这句话。
+   - 用户中途关掉文档：图标约 10 s 内自己消失（RestartManager 判定文件已不被占用，实测 Word 9.6 s / Excel 8.6 s / PPT 7.4 s）；`save -As` 会重指路径。
+   - PPT 侧尤其值得开——它没有可写标题、没有状态栏，托盘是唯一常驻信号。
+5. **收尾** —— `finish` / `close` 自动还原标题与状态栏并移除托盘图标；漏了就 `hint -Clear`。`status` 的 `caption` / `hinted` 可随时核对。
+
+- 三者全是**窗口状态**：不进修订、不写文件、不改变 `saved`；`tests/word/check_hint.py` 专门断言"段落数不变、无新增修订"。
+- **PPT 只给气泡**：WPS 演示没有可写的单文档标题（`ActiveWindow.Caption` 只读，`Application.Caption` 是应用级），响应带 `captionSupported:false` + `limitation`，别对用户谎称"标题已标记"。
+- 实测细节（哪个属性可写、Writer 的 `StatusBar` 只写不读且不渲染、表格侧 `ActiveWindow` 为 null）见 [word-quirks.md](word-quirks.md) 与 [excel-quirks.md](excel-quirks.md)。
+- 托盘实现的两个坑：① daemon 用 `--tray <state.json>` 重开自身，状态文件是唯一 IPC，菜单「还原」调本 skill 的 `hint -Clear`（daemon 不懂 COM）；② spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，`subprocess.communicate`/PowerShell 管道会被图标的 4 小时寿命卡死（2026-10-30 实测踩到）。

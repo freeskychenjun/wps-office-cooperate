@@ -141,16 +141,59 @@ internal static partial class Program
                 string want = a.Str("style", "");
                 int total = (int)doc.Paragraphs.Count;
                 int hits = 0;
-                for (int i = 1; i <= total; i++)
+                bool viaFind = false;
+                if (!a.Flag("slow", false))
                 {
-                    dynamic p = doc.Paragraphs.Item(i);
-                    string has = Convert.ToString(TryGet(() => (object)p.Style.NameLocal, ""), CultureInfo.InvariantCulture);
-                    if (!string.Equals(has, want, StringComparison.OrdinalIgnoreCase)) continue;
-                    List<string> gotChars = ApplyCharFormat(p.Range.Font, a);
-                    List<string> gotPara = ApplyParaFormat(p.Format, a);
-                    if (applied.Count == 0) { applied.AddRange(gotChars); applied.AddRange(gotPara); }
-                    hits++;
-                    if (hits >= 5000) break;
+                    // Find-by-style (v1.10): the scan runs inside WPS, so roundtrips scale with
+                    // HITS instead of paragraphs - a 10k-paragraph report no longer costs 20k
+                    // roundtrips just to touch its 40 headings. Any refusal falls back to the
+                    // old loop (re-applying the same formatting is idempotent).
+                    try
+                    {
+                        dynamic styleObj = FindStyle(doc, want);
+                        int contentEnd = (int)doc.Content.End;
+                        dynamic cursor = doc.Content;
+                        cursor.Find.ClearFormatting();
+                        cursor.Find.Style = styleObj;
+                        viaFind = true;
+                        int guard = 0;
+                        while (guard++ < 5000)
+                        {
+                            bool ok = (bool)cursor.Find.Execute("", false, false, false, false, false, true, 0, true, "", 0);
+                            if (!ok) break;
+                            int s = (int)cursor.Start, e = (int)cursor.End;
+                            if (e <= s) { viaFind = false; break; }
+                            dynamic p = cursor.Paragraphs.Item(1);
+                            List<string> gotChars = ApplyCharFormat(p.Range.Font, a);
+                            List<string> gotPara = ApplyParaFormat(p.Format, a);
+                            if (applied.Count == 0) { applied.AddRange(gotChars); applied.AddRange(gotPara); }
+                            hits++;
+                            if (e >= contentEnd) break;
+                            cursor = doc.Range(e, contentEnd);
+                            cursor.Find.ClearFormatting();
+                            cursor.Find.Style = styleObj;   // Find state is per-Range: re-arm
+                        }
+                    }
+                    catch (Exception) { viaFind = false; }
+                    if (!viaFind)
+                    {
+                        applied.Clear();
+                        hits = 0;
+                    }
+                }
+                if (!viaFind)
+                {
+                    for (int i = 1; i <= total; i++)
+                    {
+                        dynamic p = doc.Paragraphs.Item(i);
+                        string has = Convert.ToString(TryGet(() => (object)p.Style.NameLocal, ""), CultureInfo.InvariantCulture);
+                        if (!string.Equals(has, want, StringComparison.OrdinalIgnoreCase)) continue;
+                        List<string> gotChars = ApplyCharFormat(p.Range.Font, a);
+                        List<string> gotPara = ApplyParaFormat(p.Format, a);
+                        if (applied.Count == 0) { applied.AddRange(gotChars); applied.AddRange(gotPara); }
+                        hits++;
+                        if (hits >= 5000) break;
+                    }
                 }
                 if (hits == 0) throw new Fail("BAD_ARGS", "no paragraph uses the style \"" + want + "\"; check the name with read (it is the localised name, e.g. \u6807\u9898 1).");
                 target = "style " + want;
@@ -200,13 +243,46 @@ internal static partial class Program
         int stripped = 0;
         if (a.Has("numbering") && !a.Flag("numbering", true))
         {
-            int total = (int)doc.Paragraphs.Count;
-            for (int i = 1; i <= total; i++)
+            // Find-by-style first (v1.10): the style object is already in hand; any refusal falls
+            // back to the old per-paragraph loop (RemoveNumbers is idempotent per paragraph).
+            bool viaFind = false;
+            if (!a.Flag("slow", false))
             {
-                dynamic p = doc.Paragraphs.Item(i);
-                string has = Convert.ToString(TryGet(() => (object)p.Style.NameLocal, ""), CultureInfo.InvariantCulture);
-                if (!string.Equals(has, want, StringComparison.OrdinalIgnoreCase)) continue;
-                try { p.Range.ListFormat.RemoveNumbers(); stripped++; } catch (Exception) { }
+                try
+                {
+                    int contentEnd = (int)doc.Content.End;
+                    dynamic cursor = doc.Content;
+                    cursor.Find.ClearFormatting();
+                    cursor.Find.Style = style;
+                    viaFind = true;
+                    int guard = 0;
+                    while (guard++ < 5000)
+                    {
+                        bool ok = (bool)cursor.Find.Execute("", false, false, false, false, false, true, 0, true, "", 0);
+                        if (!ok) break;
+                        int s = (int)cursor.Start, e = (int)cursor.End;
+                        if (e <= s) { viaFind = false; break; }
+                        dynamic p = cursor.Paragraphs.Item(1);
+                        try { p.Range.ListFormat.RemoveNumbers(); stripped++; } catch (Exception) { }
+                        if (e >= contentEnd) break;
+                        cursor = doc.Range(e, contentEnd);
+                        cursor.Find.ClearFormatting();
+                        cursor.Find.Style = style;
+                    }
+                }
+                catch (Exception) { viaFind = false; }
+                if (!viaFind) stripped = 0;
+            }
+            if (!viaFind)
+            {
+                int total = (int)doc.Paragraphs.Count;
+                for (int i = 1; i <= total; i++)
+                {
+                    dynamic p = doc.Paragraphs.Item(i);
+                    string has = Convert.ToString(TryGet(() => (object)p.Style.NameLocal, ""), CultureInfo.InvariantCulture);
+                    if (!string.Equals(has, want, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { p.Range.ListFormat.RemoveNumbers(); stripped++; } catch (Exception) { }
+                }
             }
             applied.Add("numbering removed on " + stripped + " paragraph(s)");
         }

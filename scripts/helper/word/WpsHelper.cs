@@ -294,6 +294,8 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
+        // Detached tray daemon mode: same binary, message-loop instead of a COM request.
+        if (args != null && args.Length >= 2 && args[0] == "--tray") return TrayDaemon.Run(args[1]);
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
 
@@ -434,8 +436,9 @@ internal static partial class Program
             case "save": return SaveDoc(a);
             case "close": return CloseDoc(a);
             case "quit": return QuitAll(a);
+            case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|font|format|style|page|table|captions|caption|picture|toc|reference|view|fields|cell|insert|revisions|snapshot|diff|handoff|audit|save|close|quit");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|font|format|style|page|table|captions|caption|picture|toc|reference|view|fields|cell|insert|revisions|snapshot|diff|handoff|audit|save|close|quit|hint");
         }
     }
 
@@ -814,6 +817,14 @@ internal static partial class Program
             one["readOnly"] = IsReadOnly(d);
             one["saved"] = TryGet(() => (object)d.Saved, true);
             one["active"] = activeName.Length > 0 && Convert.ToString(TryGet(() => (object)d.Name, ""), CultureInfo.InvariantCulture) == activeName;
+            // Whether the takeover hint is currently on this document (caption carries our tag).
+            try
+            {
+                string cap = CaptionOf(d);
+                if (cap != null) one["caption"] = cap;
+                one["hinted"] = IsHinted(cap);
+            }
+            catch (Exception) { }
             one["paragraphs"] = TryGet(() => (object)(int)d.Paragraphs.Count, 0);
             list.Add(one);
         }
@@ -852,6 +863,10 @@ internal static partial class Program
         }
         Dictionary<string, object> info = DocInfo(doc);
         info["how"] = how;
+        // Takeover hint: the moment an agent attaches is otherwise invisible to the user.
+        // Setting the window caption here costs one COM property write and is pure view
+        // state - the document content and the saved file are untouched.
+        if (!a.Flag("noHint", false)) info["hint"] = HintOnTakeover(doc, a);
         if (otherInstancePossible)
         {
             info["multiInstanceWarning"] = "WPS \u8fd0\u884c\u4e2d\u6709 " + wpsBefore
@@ -937,12 +952,53 @@ internal static partial class Program
 
         List<int[]> spans = TableSpans(doc);
 
+        // Fast path (v1.10): with -SkipTableCells / -Only the old loop still walked EVERY
+        // paragraph at ~5 roundtrips each (10521 paras = 111 s, field report 2026-10-26). With the
+        // verified block model (block k-1 IS paragraph k; in-table = the block carries a cell
+        // mark) both filters run locally and only RETURNED paragraphs pay for style/list/start.
+        string[] blocks = null;
+        bool[] blockInTable = null;
+        string readPath = "slow";
+        if (filtered && total >= 200)
+        {
+            blocks = FastBlocksVerified(doc, total, a.Flag("slow", false));
+            if (blocks != null)
+            {
+                // Which paragraphs sit in tables: BEL heuristics on the blocks are NOT reliable
+                // (the first cell of one table is clean, of another carries a leading mark, and
+                // so does the first body paragraph after a table). The authoritative source is
+                // the table itself: O(tables) roundtrips for start paragraph + paragraph count.
+                blockInTable = new bool[total];
+                bool markOk = true;
+                for (int t = 0; t < spans.Count; t++)
+                {
+                    if (spans[t][0] < 0) { markOk = false; break; }
+                    int startPara = ParaAtOffset(doc, spans[t][0], total);
+                    int parasInTable = (int)TryGet(() => (object)(int)doc.Tables.Item(spans[t][2]).Range.Paragraphs.Count, -1);
+                    if (startPara < 1 || parasInTable < 1 || startPara + parasInTable - 1 > total) { markOk = false; break; }
+                    for (int k = startPara; k < startPara + parasInTable; k++) blockInTable[k - 1] = true;
+                }
+                if (markOk) readPath = "fast";
+                else { blocks = null; blockInTable = null; readPath = "slow"; }
+            }
+        }
+
         List<object> items = new List<object>();
         int skippedCells = 0, skippedOther = 0, scanned = 0, to = from - 1;
         for (int k = from; k <= total; k++)
         {
             if (filtered && items.Count >= want) break;
             if (!filtered && count > 0 && k > from + count - 1) break;
+            if (blocks != null)
+            {
+                scanned++;
+                to = k;
+                string fastText = BlockNorm(blocks[k - 1]);
+                if (skipCells && blockInTable[k - 1]) { skippedCells++; continue; }
+                if (onlyRe != null && !onlyRe.IsMatch(fastText)) { skippedOther++; continue; }
+                items.Add(ReadOneParaFast(doc, k, spans, fastText));
+                continue;
+            }
             bool inTable;
             int tableNo;
             Dictionary<string, object> one = ReadOnePara(doc, k, spans, out inTable, out tableNo);
@@ -996,9 +1052,31 @@ internal static partial class Program
         r["pages"] = TryGet(() => (object)(int)doc.ComputeStatistics(2), 0);
         r["revisions"] = TryGet(() => (object)(int)doc.Revisions.Count, 0);
         r["comments"] = TryGet(() => (object)(int)doc.Comments.Count, 0);
+        if (filtered) r["path"] = readPath;
         r["items"] = items;
         r["tables"] = tableList;
         return r;
+    }
+
+    /// <summary>
+    /// read fast path: the paragraph's text is already known from the verified block model, so
+    /// only style / list string / start offset are fetched - for RETURNED paragraphs only.
+    /// </summary>
+    private static Dictionary<string, object> ReadOneParaFast(dynamic doc, int k, List<int[]> spans, string text)
+    {
+        Dictionary<string, object> one = new Dictionary<string, object>();
+        one["i"] = k;
+        one["text"] = text;
+        dynamic p = null;
+        try { p = doc.Paragraphs.Item(k); } catch (Exception) { }
+        one["style"] = p == null ? "" : Convert.ToString(TryGet(() => (object)p.Style.NameLocal, ""), CultureInfo.InvariantCulture);
+        string listString = p == null ? "" : Convert.ToString(TryGet(() => (object)p.Range.ListFormat.ListString, ""), CultureInfo.InvariantCulture);
+        if (listString != null && listString.Length > 0) one["list"] = listString;
+        int start = -1;
+        if (p != null) { try { start = (int)p.Range.Start; } catch (Exception) { } }
+        int tableNo = TableAt(spans, start);
+        if (tableNo > 0) { one["inTable"] = true; one["table"] = tableNo; }
+        return one;
     }
 
     private static int IndexOf(string haystack, string needle, int start)
@@ -1535,6 +1613,27 @@ internal static partial class Program
             doc.SaveAs2(full, 16); // wdFormatXMLDocument
         }
         else doc.Save();
+        // A save-as renames the document; keep a takeover caption consistent instead of
+        // leaving the OLD file name on the title bar. Only touched when our tag is still there.
+        try
+        {
+            string cap = Convert.ToString(TryGet(() => (object)doc.ActiveWindow.Caption, ""), CultureInfo.InvariantCulture);
+            if (IsHinted(cap))
+            {
+                string keep = cap.StartsWith(HINT_READONLY, StringComparison.Ordinal) ? HINT_READONLY : HINT_TAG;
+                TrySetCaption(doc, HintCaption(NameOf(doc), keep));
+            }
+        }
+        catch (Exception) { }
+        // The tray icon watches the document path it was given; after save-as that path is stale,
+        // so repoint it (otherwise the icon would think the OLD file got closed and retire).
+        try
+        {
+            string cap2 = CaptionOf(doc);
+            if (IsHinted(cap2))
+                TrayDaemon.UpdateDoc("word", Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture), cap2);
+        }
+        catch (Exception) { }
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["name"] = Convert.ToString(TryGet(() => (object)doc.Name, ""), CultureInfo.InvariantCulture);
         r["path"] = Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture);
@@ -1554,6 +1653,9 @@ internal static partial class Program
         // "unsaved" record would cry wolf on the next reopen (unsavedAtClose false positive).
         Signature closing = null;
         try { closing = TakeSignature(full); } catch (Exception) { }
+        // Drop the takeover hint first: if the app instance keeps running for the user, the
+        // frame title must not stay branded "AI working" after we are gone.
+        try { ClearHint(doc); } catch (Exception) { }
         doc.Close(save ? 1 : 0); // wdSaveChanges : wdDoNotSaveChanges
         if (closing != null)
         {
@@ -1575,6 +1677,216 @@ internal static partial class Program
         return r;
     }
 
+    // ------------------------------------------------------------ hint
+    // An agent that has just attached to the user's document is otherwise INVISIBLE: the
+    // window starts scrolling, text turns into tracked revisions, and the user has no idea
+    // who is doing it or how to stop it. This is the friendly "I am here" signal, built out
+    // of three pieces of window STATE (never document content - nothing is written into the
+    // file and nothing is saved):
+    //   1. window caption - measured on WPS 12.0 (2026-10-30): doc.ActiveWindow.Caption is
+    //      writable and lands in the real frame title ("report.docx [AI ...] - WPS Office"),
+    //      so it is visible even when the user is not watching the notification area;
+    //   2. status bar - subtle, always at the bottom of the WPS window. WPS exposes
+    //      Application.StatusBar as write-only, so it can be set but never read back;
+    //   3. tray balloon - the same agent-agnostic NotifyIcon mechanism `finish` uses, and the
+    //      only one that carries a full sentence.
+    // `open` applies (1) automatically; `hint` refreshes all three; `finish`/`close` undo them.
+
+    // WPS 12 renders documents as WINDOW TABS (not a classic title). Measured 2026-10-30:
+    // the tab shows ActiveWindow.Caption and truncates it from the RIGHT (~22 half-width
+    // cells), so a suffix tag silently disappears on real report names ("上高县南港水库引调水
+    // 工程可行性研究报告.docx" + suffix = pixel-identical to no tag). A PREFIX marker is
+    // always visible, so the tag goes in front: "[AI] report.docx".
+    private const string HINT_TAG = "\u3014AI\u3015";                    // [AI] - prefix marker
+    private const string HINT_READONLY = "\u3014AI \u53ea\u8bfb\u3015";   // [AI read-only]
+
+    private static bool IsHinted(string caption)
+    {
+        if (caption == null) return false;
+        return caption.StartsWith(HINT_TAG + " ", StringComparison.Ordinal)
+            || caption.StartsWith(HINT_READONLY + " ", StringComparison.Ordinal);
+    }
+
+    private static string HintTagFor(dynamic doc, Bag a)
+    {
+        string tag = HintTag(a);
+        // A read-only document cannot be written to (writes fail READONLY); saying "AI working"
+        // on it would be misleading, so the default tag says read-only instead.
+        if (tag == HINT_TAG && IsReadOnly(doc)) return HINT_READONLY;
+        return tag;
+    }
+
+    private static string NameOf(dynamic doc)
+    {
+        return Convert.ToString(TryGet(() => (object)doc.Name, ""), CultureInfo.InvariantCulture);
+    }
+
+    private static string HintTag(Bag a)
+    {
+        string t = a.Str("tag", null);
+        if (t == null) return HINT_TAG;
+        return t.Trim();
+    }
+
+    /// <summary>Caption for a document: the marker in front, then the file name (or just the name when cleared).</summary>
+    private static string HintCaption(string name, string tag)
+    {
+        if (tag == null || tag.Length == 0) return name;
+        return tag + " " + name;
+    }
+
+    /// <summary>
+    /// Set the document window caption. ActiveWindow works when the document is the active
+    /// one (the normal case); Windows(1) is the fallback when the user has switched away.
+    /// Returns false when neither window object is reachable (document opened hidden).
+    /// </summary>
+    private static bool TrySetCaption(dynamic doc, string caption)
+    {
+        try { doc.ActiveWindow.Caption = caption; return true; }
+        catch (Exception) { }
+        try { doc.Windows.Item(1).Caption = caption; return true; }
+        catch (Exception) { return false; }
+    }
+
+    private static string CaptionOf(dynamic doc)
+    {
+        try { return Convert.ToString((object)doc.ActiveWindow.Caption, CultureInfo.InvariantCulture); }
+        catch (Exception) { }
+        try { return Convert.ToString((object)doc.Windows.Item(1).Caption, CultureInfo.InvariantCulture); }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>Set (or clear, with "") the WPS status bar. Write-only in WPS: no readback.</summary>
+    private static bool TrySetStatusBar(dynamic app, string text)
+    {
+        if (app == null) return false;
+        try
+        {
+            app.DisplayStatusBar = true;
+            app.StatusBar = text;
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    private static bool ShowBalloon(string title, string text)
+    {
+        try
+        {
+            if (text == null) text = "";
+            if (text.Length > 240) text = text.Substring(0, 240);
+            using (NotifyIcon ni = new NotifyIcon())
+            {
+                ni.Icon = SystemIcons.Information;
+                ni.Visible = true;
+                ni.BalloonTipTitle = title;
+                ni.BalloonTipText = text;
+                ni.ShowBalloonTip(6000);
+                DateTime end = DateTime.Now.AddSeconds(4);
+                while (DateTime.Now < end) { Application.DoEvents(); Thread.Sleep(50); }
+                ni.Visible = false;
+            }
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    private static bool PlayAsterisk()
+    {
+        try { System.Media.SystemSounds.Asterisk.Play(); Thread.Sleep(300); return true; }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>Takeover hint applied by `open`: the caption tag only - silent and instant.</summary>
+    private static Dictionary<string, object> HintOnTakeover(dynamic doc, Bag a)
+    {
+        string tag = HintTagFor(doc, a);
+        string name = NameOf(doc);
+        string caption = HintCaption(name, tag);
+        bool set = TrySetCaption(doc, caption);
+        Dictionary<string, object> h = new Dictionary<string, object>();
+        h["tag"] = tag;
+        h["caption"] = caption;
+        h["captionSet"] = set;
+        if (!set)
+            h["note"] = "The window caption could not be set (no visible frame for this document)."
+                + " Run `hint -Doc ... -Toast` once the window is up to announce the takeover to the user.";
+        return h;
+    }
+
+    private static object HintCmd(Bag a)
+    {
+        dynamic doc = RequireDoc(a, false);
+        dynamic app = App(false, false);
+        bool clear = a.Flag("clear", false);
+        string tag = HintTagFor(doc, a);
+        string name = NameOf(doc);
+        string text = a.Str("text", null);
+        if (text == null)
+            text = clear
+                ? "\u5df2\u7ed3\u675f\u534f\u4f5c\u300a" + name + "\u300b\uff1a\u7a97\u53e3\u6807\u9898\u4e0e\u72b6\u6001\u680f\u5df2\u8fd8\u539f\u3002"   // 已结束协作《...》：窗口标题与状态栏已还原。
+                : "\u5df2\u63a5\u7ba1\u300a" + name + "\u300b\uff1a\u6211\u4f1a\u628a\u6539\u52a8\u505a\u6210\u4fee\u8ba2\u6216\u6279\u6ce8\uff0c\u4f60\u968f\u65f6\u53ef\u4ee5\u63a5\u53d7\u6216\u62d2\u7edd\u3002"; // 已接管《...》：我会把改动做成修订或批注，你随时可以接受或拒绝。
+
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["name"] = name;
+        r["cleared"] = clear;
+
+        // 1) window caption (always on screen)
+        string caption = HintCaption(name, clear ? "" : tag);
+        bool captionSet = TrySetCaption(doc, caption);
+        r["caption"] = caption;
+        r["captionSet"] = captionSet;
+        if (!clear) r["tag"] = tag;
+
+        // 2) status bar - WPS accepts the write but the Writer status bar does NOT render it
+        //    (screenshot 2026-10-30: after setting it the bar still shows 页面/字数/拼写检查).
+        //    Kept because it is harmless and Word-compatible hosts do show it; the response
+        //    says so instead of pretending the progress line is visible.
+        string bar = a.Str("bar", null);
+        if (bar == null) bar = clear ? "" : text;
+        bool barSet = TrySetStatusBar(app, bar);
+        r["statusBar"] = barSet;
+        r["statusBarText"] = bar;
+        r["statusBarNote"] = barSet
+            ? "Writer accepts Application.StatusBar writes but its status bar does not display them (measured 2026-10-30); the visible signals are the window-tab marker and the balloon. Use the balloon text (default) to say what is happening."
+            : "WPS did not accept a status-bar write for this instance; the caption and the balloon still work.";
+
+        // 3) tray balloon (the friendly sentence)
+        bool quiet = a.Flag("quiet", false);
+        bool toast = !quiet && a.Flag("toast", !clear);
+        if (toast) toast = ShowBalloon("WPS \u6587\u5b57 AI \u52a9\u624b", text);  // WPS 文字 AI 助手
+        r["toast"] = toast;
+
+        bool sound = !quiet && a.Flag("sound", false);
+        if (sound) sound = PlayAsterisk();
+        r["sound"] = sound;
+
+        // 4) resident tray icon (opt-in): hovers as "marker · current step", right-click can
+        //    restore the caption and quit. Cleared automatically by finish/close/hint -Clear.
+        if (clear) r["trayStopped"] = TrayDaemon.Stop("word");
+        else if (a.Flag("tray", false))
+            r["tray"] = TrayDaemon.Start("word", Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture),
+                                         caption, text, a.Str("wrapper", null));
+        r["processes"] = ProcessCount("wps");
+        return r;
+    }
+
+    /// <summary>
+    /// Undo the hint on a document we are about to finish with or close: caption back to the
+    /// bare document name, status bar released, tray icon asked to exit. Never fails the calling
+    /// command - the hint is cosmetic, a close must still close.
+    /// </summary>
+    private static Dictionary<string, object> ClearHint(dynamic doc)
+    {
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["trayStopped"] = TrayDaemon.Stop("word");
+        if (doc == null) return r;
+        string name = NameOf(doc);
+        r["captionCleared"] = TrySetCaption(doc, name);
+        r["statusBarCleared"] = TrySetStatusBar(App(false, false), "");
+        return r;
+    }
+
     // ------------------------------------------------------------ finish
     // Agent-agnostic completion signal: tray balloon + system sound, pure .NET Framework
     // (no DSH, no plugins - must work for any agent on any machine). Never touches the
@@ -1591,39 +1903,28 @@ internal static partial class Program
 
         bool quiet = a.Flag("quiet", false);
         bool toast = !quiet && a.Flag("toast", true);
-        if (toast)
-        {
-            try
-            {
-                string text = statusText;
-                if (text.Length > 240) text = text.Substring(0, 240);
-                using (NotifyIcon ni = new NotifyIcon())
-                {
-                    ni.Icon = SystemIcons.Information;
-                    ni.Visible = true;
-                    ni.BalloonTipTitle = "WPS \u6587\u5b57 AI \u52a9\u624b";  // WPS 文字 AI 助手
-                    ni.BalloonTipText = text;
-                    ni.ShowBalloonTip(6000);
-                    DateTime end = DateTime.Now.AddSeconds(4);
-                    while (DateTime.Now < end) { Application.DoEvents(); Thread.Sleep(50); }
-                    ni.Visible = false;
-                }
-            }
-            catch (Exception) { toast = false; }
-        }
+        if (toast) toast = ShowBalloon("WPS \u6587\u5b57 AI \u52a9\u624b", statusText);  // WPS 文字 AI 助手
 
         bool sound = !quiet && a.Flag("sound", true);
-        if (sound)
+        if (sound) sound = PlayAsterisk();
+
+        // Undo the takeover hint (caption tag / status bar) so the window does not stay
+        // branded "AI working" after the round is over. `finish` is documented as usable
+        // without -Doc, so fall back to the active document in that case.
+        dynamic app = App(false, false);
+        dynamic doc = null;
+        if (docName != null)
         {
-            try { System.Media.SystemSounds.Asterisk.Play(); }
-            catch (Exception) { sound = false; }
-            Thread.Sleep(300);
+            try { doc = FindOpen(FullPathOf(docName)); } catch (Exception) { }
         }
+        if (doc == null && app != null) doc = ActiveDoc(app);
+        Dictionary<string, object> cleared = ClearHint(doc);
 
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["statusText"] = statusText;
         r["toast"] = toast;
         r["sound"] = sound;
+        if (doc != null) r["hintCleared"] = cleared;
         r["note"] = "notification only - the document was not touched";
         return r;
     }

@@ -305,6 +305,8 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
+        // Detached tray daemon mode: same binary, message-loop instead of a COM request.
+        if (args != null && args.Length >= 2 && args[0] == "--tray") return TrayDaemon.Run(args[1]);
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
 
@@ -402,8 +404,9 @@ internal static partial class Program
             case "save": return SavePres(a);
             case "close": return ClosePres(a);
             case "quit": return QuitAll(a);
+            case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|replace|selection|slide|split|merge|text|textbox|image|picture|comment|export|table|chart|shape|format|font|theme|master|audit|check|outline|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|replace|selection|slide|split|merge|text|textbox|image|picture|comment|export|table|chart|shape|format|font|theme|master|audit|check|outline|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish|hint");
         }
     }
 
@@ -2586,6 +2589,7 @@ internal static partial class Program
         }
         p.Close();
         MarkerRemove(full);   // otherwise a later `open -Doc` of the same path is refused as DOC_CLOSED
+        TrayDaemon.Stop("ppt");   // drop the resident hint icon of this app, if any
         dynamic app = App(false, false);
         int left = 0;
         try { left = (int)app.Presentations.Count; }
@@ -2599,6 +2603,81 @@ internal static partial class Program
             try { app.Quit(); }
             catch (Exception) { }
         }
+        r["processes"] = ProcessCount("wpp");
+        return r;
+    }
+
+    // ------------------------------------------------------------ hint
+    // Takeover hint for WPS Presentation. Unlike Writer and Spreadsheets there is no writable
+    // PER-DOCUMENT window caption here: ActiveWindow.Caption is read-only, and
+    // Application.Caption is APP-wide and is printed as "<deck> - <caption>" - writing it
+    // replaces the localized product name ("WPS 演示") with whatever we send, so a safe
+    // restore would need persisted per-deck state (measured 2026-10-30). The hint therefore
+    // stays a tray balloon - the same agent-agnostic mechanism finish uses - and the response
+    // says so explicitly so no caller assumes a title was tagged.
+
+    private static bool ShowBalloon(string title, string text)
+    {
+        try
+        {
+            if (text == null) text = "";
+            if (text.Length > 240) text = text.Substring(0, 240);
+            using (NotifyIcon ni = new NotifyIcon())
+            {
+                ni.Icon = SystemIcons.Information;
+                ni.Visible = true;
+                ni.BalloonTipTitle = title;
+                ni.BalloonTipText = text;
+                ni.ShowBalloonTip(6000);
+                DateTime end = DateTime.Now.AddSeconds(4);
+                while (DateTime.Now < end) { Application.DoEvents(); Thread.Sleep(50); }
+                ni.Visible = false;
+            }
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    private static bool PlayAsterisk()
+    {
+        try { System.Media.SystemSounds.Asterisk.Play(); Thread.Sleep(300); return true; }
+        catch (Exception) { return false; }
+    }
+
+    private static object HintCmd(Bag a)
+    {
+        dynamic p = RequirePres(a, false);
+        bool clear = a.Flag("clear", false);
+        string name = Convert.ToString(TryGet(() => (object)p.Name, ""), CultureInfo.InvariantCulture);
+        string text = a.Str("text", null);
+        if (text == null)
+            text = clear
+                ? "\u5df2\u7ed3\u675f\u534f\u4f5c\u300a" + name + "\u300b\u3002"   // 已结束协作《...》。
+                : "\u5df2\u63a5\u7ba1\u300a" + name + "\u300b\uff1a\u6539\u52a8\u4f1a\u76f4\u63a5\u5199\u5165\u6f14\u793a\u6587\u7a3f\uff0c\u6539\u4e86\u54ea\u51e0\u9875\u6211\u4f1a\u7528 diff \u544a\u8bc9\u4f60\u3002"; // 已接管《...》：改动会直接写入演示文稿…
+
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["name"] = name;
+        r["cleared"] = clear;
+        r["captionSupported"] = false;
+        r["limitation"] = "WPS Presentation exposes no writable per-document window caption"
+            + " (ActiveWindow.Caption is read-only, Application.Caption is app-wide and would replace the"
+            + " localized product name), so the takeover hint here is the tray balloon only.";
+
+        bool quiet = a.Flag("quiet", false);
+        bool toast = !quiet && a.Flag("toast", !clear);
+        if (toast) toast = ShowBalloon("WPS \u6f14\u793a AI \u52a9\u624b", text);  // WPS 演示 AI 助手
+        r["toast"] = toast;
+
+        bool sound = !quiet && a.Flag("sound", false);
+        if (sound) sound = PlayAsterisk();
+        r["sound"] = sound;
+
+        // resident tray icon (opt-in) - for Presentation this is the ONLY persistent visual
+        // channel: no writable caption, no status bar.
+        if (clear) r["trayStopped"] = TrayDaemon.Stop("ppt");
+        else if (a.Flag("tray", false))
+            r["tray"] = TrayDaemon.Start("ppt", Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture),
+                                         "\u3014AI\u3015 " + name, text, a.Str("wrapper", null));
         r["processes"] = ProcessCount("wpp");
         return r;
     }
@@ -2643,6 +2722,7 @@ internal static partial class Program
             Thread.Sleep(300);
         }
         r["sound"] = sound;
+        r["trayStopped"] = TrayDaemon.Stop("ppt");
         r["note"] = "finish touches nothing in the deck; save before finishing if the work should persist";
         return r;
     }

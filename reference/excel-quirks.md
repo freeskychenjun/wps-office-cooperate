@@ -21,6 +21,10 @@
 | `SetSourceData` 对单列数据方向猜错 | 单列 range 传给 `Chart.SetSourceData` 会把**每一行当一个系列**（135 行=135 条线）；v0.4 实战首例踩中 | 建图用**显式系列**：`SeriesCollection().NewSeries()` 后分别设 `Values`/`XValues`/`Name`；add 返回 `seriesCount` 供核对；两列数据（时间+值）让横轴成为真时间轴 |
 | 写入的日期字符串被自动转序列值 | `"2026-10-24 12:00"`、`"10-18 22:00"` 经 Value2 写入即变日期序列（read 回显 46319.5 之类） | 通常正合适（画图横轴可用）；显示需配 `-NumberFormat "yyyy-mm-dd hh:mm"`；要纯文本得前置 `'` 或事后把该格格式设为文本 |
 
+| `Workbook.ActiveWindow` 常为 null | 簿不是当前活动簿时 `wb.ActiveWindow` 返回空，读 `.Caption` 抛异常（v1.11 探针）；`wb.Windows(1).Caption` 读写都正常 | 窗口标题统一走 `wb.Windows(1).Caption`，`ActiveWindow` 只当兜底 | 2026-10-30 v1.11 探针 |
+| `Application.StatusBar` 在表格侧**可读写、且真的显示** | 赋值后能读回，且截图里状态栏出现 `AI 正在协作：…` 那行（Writer 侧只写不读也不渲染，别混）；写 `False` 交还 WPS | 接管提示 `hint` 用它显示"AI 正在做什么"；清空写 `false` | 2026-10-30 v1.11 探针 + 截图 |
+| 窗口标题可写，且只影响窗口 | `wb.Windows(1).Caption = "〔AI〕 <名>"`（WPS 12 标签页从右截断，标记放前面） 不改单元格、不进撤销栈、不改变 `saved` | `hint` 的接管标记；`close`/`finish` 写回 `wb.Name` 还原 | 2026-10-30 v1.11 探针 |
+
 ## 边界与未验证
 
 - 只在 **12.1.0.29161** 上验证过；其它 WPS 版本先 `doctor` + 小工作簿试。
