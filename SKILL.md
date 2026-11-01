@@ -123,7 +123,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 用户经常一次给好几件事：多章节、同一章好几个任务、或"第 3 章润色 + 全文单位上标"。规则是 **并行规划、合并写回**：
 
 1. **冻结**：`status` → `open` → `snapshot -Tag pre` → `read -Count 0 -SkipTableCells`，一次拿全稿段表（`i` / `text` / `style`）。
-2. **切分 + 并行规划**：`tasks.ps1 split -Read read.json -Ranges ranges.json -Out work` 得到章节片；每个任务派一个子代理，只喂切片 + 规则，**不调 skill 命令、不碰 COM**，产出 `task-*.json`（字段见 reference/multi-task.md）。
+2. **切分 + 并行规划**：`tasks.ps1 ranges -Read read.json -Out ranges.json -Styles "标题 1"` 自动切章（也可手写），再 `tasks.ps1 split -Read read.json -Ranges ranges.json -Out work` 得到章节片；每个任务派一个子代理，只喂切片 + 规则，**不调 skill 命令、不碰 COM**，产出 `task-*.json`（字段见 reference/multi-task.md）。
 3. **合并**：`tasks.ps1 merge -Read read.json -TaskFiles work -Out work`——按段合并、做 `expect` / 数字多重集 / 相似度 guard，输出 `merged.json`。**同一段的多任务必须合成一条 item**：一批 `revise` 里同段放两条，第 2 条会 `could not place the edit` 并整批回滚。
 4. **提交**：`tasks.ps1 plan -Merged merged.json -Ranges ranges.json -Out work -Doc <绝对路径> -BatchOps`，按 **表格结构 → 文本批 → 格式 → `unit` → 批注** 的顺序写；多章节**从后往前**；可用 `word.ps1 batch -Ops work\batch-ops.json` 一次进程启动跑完整批。
 

@@ -25,7 +25,7 @@
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('split', 'merge', 'plan', 'selftest', 'help')]
+    [ValidateSet('split', 'merge', 'plan', 'ranges', 'selftest', 'help')]
     [string]$Command,
 
     [string]$Read,
@@ -35,6 +35,9 @@ param(
     [string]$Doc,
     [string]$Out,
     [double]$MinSim = 0.55,
+    [string]$Styles,
+    [string]$Pattern,
+    [string]$SkipIfContains,
     [switch]$BatchOps,
     [switch]$IncludeTableParas
 )
@@ -416,6 +419,60 @@ function Invoke-Plan {
     }
 }
 
+# ---------------------------------------------------------------- ranges
+
+# Build ranges.json from the heading paragraphs of a read.json.
+#   -Styles "标题 1"        : comma list of style names, highest level first (chapter level = first)
+#   -Pattern "<regex>"      : fallback for documents without heading styles (matches the whole title)
+#   -SkipIfContains "..."   : comma list of substrings that mark a table-of-contents line (skip it)
+function Invoke-Ranges {
+    if (-not $Read) { throw 'ranges needs -Read <read.json>' }
+    if (-not $Out) { throw 'ranges needs -Out <ranges.json>' }
+    $readJson = Read-Json $Read
+    $items = @($readJson.result.items)
+    $styleList = @()
+    if ($Styles) { $styleList = @($Styles.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    if ($styleList.Count -eq 0 -and -not $Pattern) { throw 'ranges needs -Styles "标题 1" or -Pattern "<regex>"' }
+    $skip = @()
+    if ($SkipIfContains) { $skip = @($SkipIfContains.Split('|') | Where-Object { $_ }) }
+
+    $levelOf = @{}
+    for ($k = 0; $k -lt $styleList.Count; $k++) { $levelOf[$styleList[$k]] = $k + 1 }
+    $headings = New-Object System.Collections.ArrayList
+    foreach ($it in ($items | Sort-Object -Property @{ Expression = { [int]$_.i } })) {
+        $style = [string]$it.style
+        $text = ([string]$it.text).Trim()
+        if ($text.Length -eq 0) { continue }
+        $hit = $false
+        if ($styleList.Count -gt 0) { $hit = $styleList -contains $style }
+        if (-not $hit -and $Pattern) { $hit = ($text -match $Pattern) }
+        if (-not $hit) { continue }
+        $skipThis = $false
+        foreach ($s in $skip) { if ($text.Contains($s)) { $skipThis = $true } }
+        if ($skipThis) { continue }
+        $level = 99
+        if ($levelOf.ContainsKey($style)) { $level = $levelOf[$style] }
+        [void]$headings.Add([pscustomobject]@{ i = [int]$it.i; text = $text; level = $level; style = $style })
+    }
+    if ($headings.Count -eq 0) { throw 'no heading paragraph matched -Styles / -Pattern' }
+    $total = 0
+    try { $total = [int]$readJson.result.paragraphs } catch { $total = 0 }
+    if ($total -le 0) { $total = [int]($items | Measure-Object -Property @{ Expression = { [int]$_.i } } -Maximum).Maximum }
+
+    # chapters = first-level headings (level 1 when styles are given, otherwise every match)
+    $chapters = @($headings | Where-Object { $_.level -eq 1 })
+    if ($chapters.Count -eq 0) { $chapters = @($headings) }
+    $rangeOut = New-Object System.Collections.ArrayList
+    for ($k = 0; $k -lt $chapters.Count; $k++) {
+        $from = [int]$chapters[$k].i
+        $to = $total
+        if ($k -lt $chapters.Count - 1) { $to = [int]$chapters[$k + 1].i - 1 }
+        [void]$rangeOut.Add([ordered]@{ id = ('ch' + ($k + 1)); title = [string]$chapters[$k].text; from = $from; to = $to })
+    }
+    Write-Json $Out @($rangeOut)
+    Write-Output ('ranges: ' + $out.Count + ' chapter(s) -> ' + $Out)
+    foreach ($r in $rangeOut) { Write-Output ('  ' + $r.id + ' ' + $r.from + '..' + $r.to + '  ' + $r.title) }
+}
 # ---------------------------------------------------------------- selftest
 
 function Invoke-Selftest {
@@ -463,12 +520,14 @@ switch ($Command) {
     'split' { Invoke-Split }
     'merge' { Invoke-Merge }
     'plan' { Invoke-Plan }
+    'ranges' { Invoke-Ranges }
     'selftest' { Invoke-Selftest }
     default {
-        Write-Output 'usage: tasks.ps1 split|merge|plan|selftest [options]'
+        Write-Output 'usage: tasks.ps1 split|merge|plan|ranges|selftest [options]'
         Write-Output '  split    -Read read.json -Ranges ranges.json -Out dir'
         Write-Output '  merge    -Read read.json -TaskFiles dir|files -Out dir [-MinSim 0.55]'
-        Write-Output '  plan     -Merged merged.json -Ranges ranges.json -Out dir [-BatchOps]'
+        Write-Output '  plan     -Merged merged.json -Ranges ranges.json -Out dir [-BatchOps] [-Doc abs-path]
+  ranges   -Read read.json -Out ranges.json -Styles "<style1>,<style2>" [-Pattern <regex>] [-SkipIfContains <substr1|substr2>]'
         Write-Output '  selftest -Read read.json -Ranges ranges.json'
     }
 }

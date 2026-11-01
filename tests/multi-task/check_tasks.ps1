@@ -71,6 +71,19 @@ try {
     Check ($sum -eq $covered) ('split covers every in-range paragraph (' + $sum + '/' + $covered + ')')
     Check ((Test-Path -LiteralPath (Join-Path $splitDir 'chapter-ch3.json'))) 'chapter-ch3.json exists'
 
+    # ---- ranges (auto chapter detection from the heading style found in the data itself)
+    $h1 = [string](@($items | Where-Object { [int]$_.i -eq 18 })[0].style)
+    Check ($h1.Length -gt 0) ('chapter heading style in data: ' + $h1)
+    $autoRanges = Join-Path $work 'ranges-auto.json'
+    $null = & powershell -NoProfile -ExecutionPolicy Bypass -File $tasks ranges -Read $readPath -Out $autoRanges -Styles $h1 2>&1
+    $auto = @(ReadJsonFile $autoRanges)
+    Check ($auto.Count -eq 6) ('ranges auto-detected 6 chapters (got ' + $auto.Count + ')')
+    $match = $true
+    for ($k = 0; $k -lt [Math]::Min($auto.Count, $ranges.Count); $k++) {
+        if ([int]$auto[$k].from -ne [int]$ranges[$k].from -or [int]$auto[$k].to -ne [int]$ranges[$k].to) { $match = $false }
+    }
+    Check $match 'auto ranges match the hand-written ranges.json'
+
     # ---- synthetic planners: two tasks editing the SAME paragraphs (T2 has priority 10)
     $ch3 = ReadJsonFile (Join-Path $splitDir 'chapter-ch3.json')
     $picked = @($ch3.paras | Where-Object { $_.text.Length -gt 30 } | Select-Object -First 4)

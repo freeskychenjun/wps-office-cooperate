@@ -60,7 +60,19 @@
 
 ---
 
-## 3. 三条命令
+## 3. 四条命令
+
+### ranges —— 从标题样式自动切章（先跑这个）
+
+```powershell
+& <skill>\scripts\tasks.ps1 ranges -Read read.json -Out ranges.json -Styles "<一级标题样式>,<二级标题样式>"
+```
+
+- 样式名是 WPS 里的**中文名**（如 `标题 1`），从 `read` 返回的 `style` 字段原样取；不确定就先 `read -Count 0` 看几个标题段的 `style`。
+- 只按**第一个样式**切章（后面的样式只用于识别层级，不切）；每章 = 本章标题段 → 下一个章标题前一段。
+- 目录项用 `-SkipIfContains "……,.."` 过滤（逗号分隔多个子串）；文档没有标题样式时用 `-Pattern "<正则>"` 兜底。
+- 输出 `ranges.json`：`[{"id":"ch1","title":"1 工程概况","from":18,"to":66}, …]`，并打印每章标题方便核对。
+- 实测（306 段测试报告）：自动检出 6 章，与手工切分完全一致；目录中的"标题样式"条目会被样式判定自然排除。
 
 ### split —— 把一次 read 切成章节片（给子代理）
 
@@ -69,7 +81,8 @@
 ```
 
 - `read.json`：`word.ps1 read -Doc X -Count 0 -SkipTableCells` 的完整输出（含 `result.items`）。
-- `ranges.json`：`[{"id":"ch3","title":"工程地质","from":132,"to":180}, …]`
+- `ranges.json`：`tasks.ps1 ranges` 生成，或手写
+  `[{"id":"ch3","title":"工程地质","from":132,"to":180}, …]`
   - `from/to` 用 **WPS 段号**；章节从 `标题 1/标题 2` 段落取。
   - **排除目录项**：目录段落常是"正文"样式且命中数字正则，切分前先剔除。
 - 输出：`chapter-<id>.json`（`{id,title,from,to,count,paras:[{i,text,style}]}`）+ `index.json`（含 overlaps/problems 校验）。
