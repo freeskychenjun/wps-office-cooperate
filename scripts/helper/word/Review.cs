@@ -1,4 +1,4 @@
-// v0.4 collaboration: see what the human did (revisions), and what changed since a snapshot.
+﻿// v0.4 collaboration: see what the human did (revisions), and what changed since a snapshot.
 //
 //   revisions  list / accept / reject tracked changes
 //   snapshot   take a text snapshot of the document
@@ -304,7 +304,8 @@ internal static partial class Program
         if (tag.Length == 0) throw new Fail("BAD_ARGS", "\"tag\" has no file-name characters left after cleanup");
 
         string textsPath;
-        List<string> texts = DocTexts(doc, a.Flag("slow", false), out textsPath);
+        string textsWhy;
+        List<string> texts = DocTexts(doc, a.Flag("slow", false), out textsPath, out textsWhy);
         string digest = ShortHash(SHA256.Create(), string.Join("\n", texts.ToArray()), 16);
         int paragraphs = texts.Count;
         int page = (int)TryGet(() => (object)(int)doc.ComputeStatistics(2), 0);
@@ -344,6 +345,9 @@ internal static partial class Program
         r["revisions"] = revisions;
         r["digest"] = digest;
         r["textsPath"] = textsPath;
+        if (textsPath == "chunk" && _chunkStats != null) r["chunkStats"] = _chunkStats;
+        if (textsPath == "xml" && _xmlNote != null) r["xmlNote"] = _xmlNote;
+        if (textsPath != "xml" && textsPath != "fast" && textsWhy != null) r["fastFail"] = textsWhy;
         r["saved"] = false;
         r["note"] = portable
             ? "\u5feb\u7167\u5df2\u6309\u8981\u6c42\u5199\u5230\u6307\u5b9a\u8def\u5f84\uff08\u4fbf\u4e8e\u8de8\u673a\u5668/\u4ea4\u63a5\u65f6\u968f\u6587\u6863\u8d70\uff09\u3002diff \u65f6\u7528 -Since <\u8fd9\u4e2a\u8def\u5f84> \u624d\u80fd\u627e\u5230\u5b83\uff08\u5b83\u4e0d\u53c2\u4e0e last\uff09\u3002"
@@ -355,12 +359,29 @@ internal static partial class Program
     /// fetch, verified block-per-paragraph shape (works WITH tables on WPS - each cell paragraph
     /// is "text\r BEL", block k IS paragraph k; measured 2026-10-26). Both snapshot and diff read
     /// through here, so the two sides stay comparable.</summary>
-    private static List<string> DocTexts(dynamic doc, bool forceSlow, out string path)
+    private static List<string> DocTexts(dynamic doc, bool forceSlow, out string path, out string why)
     {
         path = "slow";
+        why = null;
         List<string> texts = new List<string>();
         int total = (int)TryGet(() => (object)(int)doc.Paragraphs.Count, 0);
         if (total <= 0) return texts;
+
+        // v1.13 primary fast path: one WordOpenXML call + local parse. Works with tracked revisions
+        // (the block model never could), and survives the WPS quirk where every table ROW is counted
+        // as an extra empty paragraph. Beware: the XML string alone is several MB, so this is only
+        // worth it for real documents.
+        if (!forceSlow && total >= 200)
+        {
+            string xmlWhy;
+            List<string> byXml = XmlDocTexts(doc, total, out xmlWhy);
+            if (byXml != null)
+            {
+                path = "xml";
+                return byXml;
+            }
+            why = "xml: " + xmlWhy;
+        }
 
         string[] blocks = FastBlocksVerified(doc, total, forceSlow);
         if (blocks != null)
@@ -370,6 +391,22 @@ internal static partial class Program
             return texts;
         }
 
+        // v1.13: the block model is unusable on some real documents (Content.Text misaligns table
+        // cells and hides deleted revisions), which used to drop straight to ~5 roundtrips per
+        // paragraph (45 s for a 7334-paragraph report). Chunked Range.Text reads use the same
+        // primitives as the slow loop, so they return the same strings at ~1/100 the roundtrips.
+        if (!forceSlow && total >= 200)
+        {
+            string chunkWhy;
+            List<string> byChunks = DocTextsByChunks(doc, total, out chunkWhy);
+            if (byChunks != null)
+            {
+                path = "chunk";
+                return byChunks;
+            }
+            why = (why == null ? "" : why + "; ") + "chunk: " + chunkWhy;
+        }
+
         for (int k = 1; k <= total; k++)
         {
             string t = "";
@@ -377,6 +414,7 @@ internal static partial class Program
             catch (Exception) { }
             texts.Add(t);
         }
+        if (why == null) why = _fastWhy;
         return texts;
     }
 
@@ -493,7 +531,8 @@ internal static partial class Program
         if (raw != null)
             foreach (object o in raw) before.Add(Convert.ToString(o, CultureInfo.InvariantCulture) ?? "");
         string textsPath;
-        List<string> now = DocTexts(doc, a.Flag("slow", false), out textsPath);
+        string textsWhy;
+        List<string> now = DocTexts(doc, a.Flag("slow", false), out textsPath, out textsWhy);
 
         List<object> changed = new List<object>();
         List<object> added = new List<object>();
@@ -522,6 +561,9 @@ internal static partial class Program
         r["removed"] = removed;
         if (degraded) r["degraded"] = true;
         r["textsPath"] = textsPath;
+        if (textsPath == "chunk" && _chunkStats != null) r["chunkStats"] = _chunkStats;
+        if (textsPath == "xml" && _xmlNote != null) r["xmlNote"] = _xmlNote;
+        if (textsPath != "xml" && textsPath != "fast" && textsWhy != null) r["fastFail"] = textsWhy;
         r["saved"] = false;
         r["note"] = "changed 里既可能是 Agent 改的，也可能是人改的：未处理的修订=待裁决（用 revisions 看），已变文本=已生效。"
             + (degraded ? " 段落数超过 " + before.Count + "x" + now.Count + " 上限，已退化为分段位置比对：插入/删除可能被报成改写。" : "");

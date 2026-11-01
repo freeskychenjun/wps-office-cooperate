@@ -1,4 +1,4 @@
-# wps-office-cooperate (word): thin wrapper around WpsHelper.exe.
+﻿# wps-office-cooperate (word): thin wrapper around WpsHelper.exe.
 # Pure ASCII source (Chinese only ever travels inside JSON files, never in this script).
 #
 #   word.ps1 <command> [-Doc <path>] [options]
@@ -10,7 +10,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'undo', 'revise', 'comment', 'render', 'font',
                  'format', 'style', 'page', 'table', 'captions', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit', 'unit', 'units',
-                 'save', 'close', 'quit', 'finish', 'hint')]
+                 'save', 'close', 'quit', 'finish', 'hint', 'textdiag')]
     [string]$Command,
 
     [string]$Doc,
@@ -441,6 +441,10 @@ switch ($Command) {
     'diff' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'diff needs -Doc' }
         if ($Since) { $request['since'] = $Since }
+        if ($Slow) { $request['slow'] = $true }
+    }
+    'textdiag' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'textdiag needs -Doc' }
         if ($Slow) { $request['slow'] = $true }
     }
     'handoff' {

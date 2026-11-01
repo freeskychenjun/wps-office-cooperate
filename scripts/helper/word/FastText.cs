@@ -1,4 +1,4 @@
-// v0.7 fast locate: fetch doc.Content.Text ONCE (one COM roundtrip, ~0.5 s on a 15k-paragraph
+﻿// v0.7 fast locate: fetch doc.Content.Text ONCE (one COM roundtrip, ~0.5 s on a 15k-paragraph
 // report) and match in memory; convert hit offsets to paragraph numbers with the
 // Range(0,offset).Paragraphs.Count trick (one roundtrip per HIT, not per paragraph).
 // The per-paragraph loop remains as the fallback for hosts where Content.Text misbehaves.
@@ -19,6 +19,9 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Diagnostics;
+using System.Xml;
+using System.Text;
 using System.Text.RegularExpressions;
 
 internal static partial class Program
@@ -328,33 +331,360 @@ internal static partial class Program
     /// <summary>
     /// Content.Text split into '\r' blocks, verified to be the WPS shape where block k-1 IS
     /// paragraph k: (a) no unaccepted revisions (deleted text hides from Content.Text but still
-    /// occupies Range coordinates - the v0.7 lesson), (b) block count == total + 1 with an empty
-    /// trailing block (or exactly total), (c) spot-checks of the first / middle / last paragraph
-    /// texts agree with Paragraphs.Item(k).Range.Text. Any mismatch returns null and the caller
-    /// falls back to per-paragraph reads - correctness first.
+    /// occupies Range coordinates - the v0.7 lesson), (b) the block count matches the paragraph
+    /// count once trailing cell marks / the trailing '\r' are accounted for, (c) spot-checks of the
+    /// first / last / middle and evenly spread interior paragraphs agree with Paragraphs.Item(k).
+    /// Any mismatch returns null and the callers fall back to per-paragraph reads - correctness first.
+    ///
+    /// v1.13: the fallback is no longer silent - <paramref name="why"/> says which check failed and
+    /// callers surface it as "fastFail". Field evidence (6 real WPS tasks, 2026-10-25..30) showed the
+    /// fast path silently falling back on a 7339-paragraph / 23-table report, putting snapshot / diff
+    /// / read back on the ~50 s per-paragraph loop with nothing visible to explain why.
     /// </summary>
     private static string[] FastBlocksVerified(dynamic doc, int total, bool forceSlow)
     {
-        if (forceSlow || total <= 0) return null;
+        string why;
+        return FastBlocksVerified(doc, total, forceSlow, out why);
+    }
+
+    /// <summary>Why the last FastBlocksVerified call fell back (null when it did not).</summary>
+    private static string _fastWhy;
+
+    private static string[] FastBlocksVerified(dynamic doc, int total, bool forceSlow, out string why)
+    {
+        why = null;
+        _fastWhy = null;
+        if (forceSlow) return Fallback("forced -Slow", out why);
+        if (total <= 0) return Fallback("no paragraphs", out why);
         int revs = (int)TryGet(() => (object)(int)doc.Revisions.Count, 1);
-        if (revs != 0) return null;
+        if (revs != 0) return Fallback("revisions=" + revs, out why);
         string all = WholeText(doc);
-        if (all == null) return null;
+        if (all == null) return Fallback("Content.Text refused", out why);
         string[] blocks = all.Split('\r');
-        if (blocks.Length == total + 1 && blocks[total].Length == 0)
-        {
-            string[] shrunk = new string[total];
-            Array.Copy(blocks, shrunk, total);
-            blocks = shrunk;
-        }
-        else if (blocks.Length != total) return null;
-        foreach (int k in new int[] { 1, Math.Max(1, total / 2), total })
+        int raw = blocks.Length;
+
+        int end = blocks.Length;
+        while (end > 1 && MarkOnly(blocks[end - 1])) end--;          // trailing cell marks
+        bool sentinel = end > 0 && blocks[end - 1].Length == 0;      // the usual trailing '\r'
+        int count = sentinel ? end - 1 : end;
+        if (count != total)
+            return Fallback("blocks=" + raw + " usable=" + count + " total=" + total, out why);
+
+        string[] shrunk = new string[total];
+        Array.Copy(blocks, shrunk, total);
+        foreach (int k in SpotParagraphs(total))
         {
             string para;
             try { para = CleanPara(Convert.ToString(doc.Paragraphs.Item(k).Range.Text, CultureInfo.InvariantCulture)); }
-            catch (Exception) { return null; }
-            if (para == null || BlockNorm(blocks[k - 1]) != para) return null;
+            catch (Exception) { return Fallback("spot p" + k + " refused", out why); }
+            string block = BlockNorm(shrunk[k - 1]);
+            if (para == null || block != para)
+                return Fallback("spot p" + k + " differs (block " + Describe(block) + " vs para " + Describe(para) + ")", out why);
         }
-        return blocks;
+        return shrunk;
+    }
+
+    private static string[] Fallback(string reason, out string why)
+    {
+        why = reason;
+        _fastWhy = reason;
+        return null;
+    }
+
+    /// <summary>True when a raw block holds only WPS cell/paragraph marks, no text at all.</summary>
+    private static bool MarkOnly(string raw)
+    {
+        if (raw == null || raw.Length == 0) return false;
+        foreach (char c in raw)
+            if (c != '\a' && c != '\u0007' && c != '\r' && c != '\n' && c != ' ' && c != '\u00a0' && c != '\t')
+                return false;
+        return true;
+    }
+
+    /// <summary>
+    /// Paragraph numbers whose text is cross-checked against the block model: the ends, the middle
+    /// and (v1.13) an evenly spread interior set - a single table in the middle of a report used to
+    /// pass the old 3-sample check while every paragraph after it was off by one.
+    /// </summary>
+    private static List<int> SpotParagraphs(int total)
+    {
+        List<int> ks = new List<int>();
+        int extra = total >= 1000 ? 12 : (total >= 200 ? 8 : 3);
+        for (int j = 0; j < extra; j++)
+        {
+            int k = (int)Math.Round(1.0 + (total - 1) * (double)j / Math.Max(1, extra - 1));
+            if (k < 1) k = 1;
+            if (k > total) k = total;
+            if (!ks.Contains(k)) ks.Add(k);
+        }
+        int mid = Math.Max(1, total / 2);
+        if (!ks.Contains(mid)) ks.Add(mid);
+        ks.Sort();
+        return ks;
+    }
+
+
+    // ------------------------------------------------------------ chunked range reads (v1.13)
+
+    /// <summary>
+    /// Paragraph texts via a few BIG Range.Text reads instead of one read per paragraph.
+    ///
+    /// Why this exists: Content.Text (the v1.7-v1.10 block model) is unusable on some real WPS
+    /// documents - measured on a 7334-paragraph / 23-table report: Content.Text produced 7328 blocks
+    /// whose text was misaligned from paragraph 2 onwards (table cells come back in a different
+    /// order), so snapshot/diff/read silently fell back to ~5 roundtrips per paragraph (snapshot
+    /// 45 s, diff 52 s, read 30 s per call). Content.Text also HIDES deleted revision text, so it
+    /// can never be trusted while track changes are on - which is exactly when live editing runs.
+    ///
+    /// This path only uses primitives the slow path already uses (Paragraphs.Item, Range.Start,
+    /// Range.End, Range.Text), so it returns the SAME strings the per-paragraph loop produces.
+    ///
+    /// Safety: a spanning Range.Text does NOT always split into one piece per paragraph (measured:
+    /// a paragraph holding only "/" and a paragraph holding only a page break each vanish from the
+    /// span text, so the piece count drops). Therefore every chunk is verified twice - the piece
+    /// count must equal the paragraph count, and three sampled paragraphs must match their pieces -
+    /// and a failing chunk is SPLIT IN HALF and retried, down to 4 paragraphs. Only the few
+    /// paragraphs WPS will not render in a span are then read one by one, so the result is exactly
+    /// the slow path's result at a fraction of the roundtrips.
+    /// </summary>
+    private static List<string> DocTextsByChunks(dynamic doc, int total, out string why)
+    {
+        why = null;
+        if (total < 2) return null;
+        List<string> texts = new List<string>(total);
+        ChunkStats st = new ChunkStats();
+        if (!ExtractRange(doc, 1, total, texts, st))
+        {
+            why = "chunk reads aborted after " + st.Calls + " calls";
+            return null;
+        }
+        if (texts.Count != total)
+        {
+            why = "chunk total " + texts.Count + " != " + total;
+            return null;
+        }
+        _chunkStats = st.Describe();
+        return texts;
+    }
+
+    /// <summary>Counters for the chunked extractor, surfaced as "chunkStats" in the response.</summary>
+    private class ChunkStats
+    {
+        public int Calls;
+        public int ChunkReads;
+        public int ChunkFails;
+        public int ParaReads;
+
+        public string Describe()
+        {
+            return "calls=" + Calls + " bigReads=" + ChunkReads + " split=" + ChunkFails + " singleReads=" + ParaReads;
+        }
+    }
+
+    private static string _chunkStats;
+
+    private static bool ExtractRange(dynamic doc, int from, int to, List<string> texts, ChunkStats st)
+    {
+        if (to < from) return true;
+        int count = to - from + 1;
+        if (count > 4)
+        {
+            string body = null;
+            try
+            {
+                int s0 = (int)doc.Paragraphs.Item(from).Range.Start;
+                int s1 = (int)doc.Paragraphs.Item(to).Range.End;
+                st.Calls += 2;
+                body = Convert.ToString(doc.Range(s0, s1).Text, CultureInfo.InvariantCulture);
+                st.Calls++;
+            }
+            catch (Exception) { body = null; }
+            if (body != null)
+            {
+                string[] pieces = body.Split('\r');
+                int n = pieces.Length;
+                if (n == count + 1 && pieces[n - 1].Length == 0) n = count;
+                if (n == count && VerifyChunk(doc, from, to, pieces, st))
+                {
+                    st.ChunkReads++;
+                    for (int i = 0; i < count; i++) texts.Add(BlockNorm(pieces[i]));
+                    return true;
+                }
+                st.ChunkFails++;
+            }
+            int mid = from + count / 2;
+            return ExtractRange(doc, from, mid - 1, texts, st) && ExtractRange(doc, mid, to, texts, st);
+        }
+        for (int k = from; k <= to; k++)
+        {
+            string t;
+            try { t = CleanPara(Convert.ToString(doc.Paragraphs.Item(k).Range.Text, CultureInfo.InvariantCulture)); st.Calls++; }
+            catch (Exception) { return false; }
+            texts.Add(t);
+        }
+        st.ParaReads += count;
+        return true;
+    }
+
+    /// <summary>
+    /// A chunk is only trusted when three sampled paragraphs (first / middle / last) match their
+    /// pieces, on top of the caller's piece-count check. Drift from a paragraph that a spanning
+    /// Range.Text swallows is caught by the count; this catches the rarer case of compensating
+    /// drops that keep the count intact.
+    /// </summary>
+    private static bool VerifyChunk(dynamic doc, int from, int to, string[] pieces, ChunkStats st)
+    {
+        int[] probes = new int[] { from, from + (to - from) / 2, to };
+        foreach (int k in probes)
+        {
+            int idx = k - from;
+            if (idx < 0 || idx >= pieces.Length) return false;
+            string para;
+            try { para = CleanPara(Convert.ToString(doc.Paragraphs.Item(k).Range.Text, CultureInfo.InvariantCulture)); st.Calls++; }
+            catch (Exception) { return false; }
+            if (BlockNorm(pieces[idx]) != para) return false;
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------ textdiag (v1.13)
+
+    /// <summary>
+    /// textdiag - why the fast read paths do or do not apply to THIS document, with the raw evidence.
+    /// Read-only, one WordOpenXML fetch. It exists because a silent fallback is indistinguishable
+    /// from a slow document: a 7339-paragraph report paid ~50 s per snapshot / diff with nothing
+    /// in the response to explain it (see the v1.13 entry in SKILL.md).
+    /// </summary>
+    private static object TextDiag(Bag a)
+    {
+        dynamic doc = RequireDoc(a, true);
+        int total = (int)TryGet(() => (object)(int)doc.Paragraphs.Count, 0);
+        int revs = (int)TryGet(() => (object)(int)doc.Revisions.Count, 1);
+        int tables = (int)TryGet(() => (object)(int)doc.Tables.Count, 0);
+        int sumRows = 0;
+        for (int t = 1; t <= tables; t++)
+            sumRows += (int)TryGet(() => (object)(int)doc.Tables.Item(t).Rows.Count, 0);
+
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["name"] = DocName(doc);
+        r["paragraphs"] = total;
+        r["revisions"] = revs;
+        r["tables"] = tables;
+        r["tableRows"] = sumRows;
+
+        // ---- (1) the v1.7-v1.10 block model: Content.Text split on '\r'
+        string all = WholeText(doc);
+        if (all == null)
+        {
+            r["contentChars"] = -1;
+            r["blocks"] = -1;
+            r["blockModel"] = "Content.Text refused";
+        }
+        else
+        {
+            string[] blocks = all.Split('\r');
+            r["contentChars"] = all.Length;
+            r["blocks"] = blocks.Length;
+            r["blockDelta"] = blocks.Length - total;
+            List<object> tail = new List<object>();
+            for (int i = Math.Max(0, blocks.Length - 2); i < blocks.Length; i++)
+                tail.Add(Describe(BlockNorm(blocks[i])));
+            r["blockTail"] = tail;
+            int blockMiss = 0;
+            List<object> blockSpots = new List<object>();
+            foreach (int k in SpotParagraphs(total))
+            {
+                string para = "";
+                try { para = CleanPara(Convert.ToString(doc.Paragraphs.Item(k).Range.Text, CultureInfo.InvariantCulture)); }
+                catch (Exception) { }
+                string block = k - 1 < blocks.Length ? BlockNorm(blocks[k - 1]) : "";
+                if (block != para) blockMiss++;
+                if (blockSpots.Count < 6)
+                    blockSpots.Add(new Dictionary<string, object> { { "para", k }, { "match", block == para }, { "block", Describe(block) }, { "paraText", Describe(para) } });
+            }
+            r["blockSpotMatches"] = (SpotParagraphs(total).Count - blockMiss) + "/" + SpotParagraphs(total).Count;
+            r["blockSpotSample"] = blockSpots;
+        }
+
+        // ---- (2) the v1.13 path: one WordOpenXML fetch, parsed locally
+        Stopwatch sw = Stopwatch.StartNew();
+        string xml = null;
+        try { xml = Convert.ToString(doc.Content.WordOpenXML, CultureInfo.InvariantCulture); }
+        catch (Exception e) { r["xmlError"] = Clean(e.Message); }
+        r["xmlFetchMs"] = sw.ElapsedMilliseconds;
+        r["xmlChars"] = xml == null ? -1 : xml.Length;
+        if (xml != null)
+        {
+            sw.Restart();
+            int wP = -1;
+            try
+            {
+                XmlDocument xd = new XmlDocument();
+                xd.XmlResolver = null;
+                xd.LoadXml(xml);
+                XmlNamespaceManager nm = new XmlNamespaceManager(xd.NameTable);
+                nm.AddNamespace("w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+                XmlNodeList ps = xd.SelectNodes("//w:body//w:p", nm);
+                wP = ps == null ? -1 : ps.Count;
+                r["xmlParagraphs"] = wP;
+                r["xmlPlusRows"] = wP + sumRows;
+                r["xmlPlusRowsMatches"] = (wP + sumRows) == total;
+                List<object> cmp = new List<object>();
+                int shown = 0;
+                for (int i = 0; i < ps.Count && shown < 8; i++)
+                {
+                    if (i + 1 > total) break;
+                    string pt = "";
+                    try { pt = CleanPara(Convert.ToString(doc.Paragraphs.Item(i + 1).Range.Text, CultureInfo.InvariantCulture)); }
+                    catch (Exception) { }
+                    if (pt.Length == 0) continue;
+                    string xt = CleanPara(XmlParaTextOf(ps[i], nm));
+                    cmp.Add(new Dictionary<string, object> { { "para", i + 1 }, { "match", xt == pt }, { "xml", Describe(xt) }, { "paraText", Describe(pt) } });
+                    shown++;
+                }
+                r["xmlSample"] = cmp;
+            }
+            catch (Exception e) { r["xmlParseError"] = Clean(e.Message); }
+            r["xmlParseMs"] = sw.ElapsedMilliseconds;
+        }
+
+        // ---- (3) verdicts from the real code paths
+        string why;
+        string[] fast = FastBlocksVerified(doc, total, a.Flag("slow", false), out why);
+        r["blockModelFastPath"] = fast != null;
+        r["blockModelFail"] = why;
+        if (xml != null)
+        {
+            Stopwatch sw2 = Stopwatch.StartNew();
+            string xmlWhy;
+            List<string> texts = XmlDocTexts(doc, total, out xmlWhy);
+            sw2.Stop();
+            r["xmlFastPath"] = texts != null;
+            r["xmlFail"] = xmlWhy;
+            r["xmlTextsMs"] = sw2.ElapsedMilliseconds;
+            if (texts != null) r["xmlNote"] = _xmlNote;
+        }
+        r["fastFail"] = why;
+        return r;
+    }
+
+    /// <summary>Paragraph text of one w:p node (accept view, same mapping the fast path uses).</summary>
+    private static string XmlParaTextOf(XmlNode p, XmlNamespaceManager nm)
+    {
+        StringBuilder sb = new StringBuilder();
+        XmlNodeList ts = p.SelectNodes(".//w:t", nm);
+        if (ts != null)
+            foreach (XmlNode t in ts)
+                sb.Append(t.InnerText);
+        return sb.ToString();
+    }
+
+    /// <summary>Short, log-safe rendering of a paragraph for fastFail / textdiag messages.</summary>
+    private static string Describe(string s)
+    {
+        if (s == null) return "null";
+        s = CleanPara(s);
+        if (s.Length > 24) s = s.Substring(0, 24) + "...";
+        return "[" + s.Length + "]'" + s + "'";
     }
 }

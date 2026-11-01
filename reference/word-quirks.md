@@ -1,4 +1,4 @@
-# WPS Writer ≠ Word：实测差异表
+﻿# WPS Writer ≠ Word：实测差异表
 
 本机实测环境：WPS Office **12.1.0.29161**（无微软 Office），COM 由 WPS 接管；`KWPS.Application` 能跑通整套 Word 对象模型，但"脾气"不同。下表每条都是这台机器上跑出来的，照着写能少走一圈。
 
@@ -6,6 +6,9 @@
 
 | 现象 | 实测表现 | 正确写法 | 出处 |
 |---|---|---|---|
+| **每个表格行被算作一个空段落** | `Document.Paragraphs.Count` = 正文 `w:p` 数 + 表行数：7334 段 / 23 表 / 555 行实测 `6779 + 555 = 7334`；逐个表看：4 个单元格后多一个空段号、8 行表多 8 个（2026-11-01 实测） | 用 `Paragraphs` 段号做映射时必须**给每个表行补一个空段**；`Content.Text` 按 `\r` 切块**不含**这些空段，所以 v1.7–v1.10 的块模型在带表文档上必然错位（实测 7334 段切出 7328 块，从第 2 段起整篇偏） | [隅 v1.13] |
+| `Content.Text` 隐藏未接受的删除 | 有修订时 `Content.Text` 给的是"接受视图"（删除的文本不出现），而 `Range.Text` 也同样是接受视图；两者一致，但**修订数≠0 时块模型一律回退**，等于实时协作时读侧只有慢路径 | v1.13 起改走 `doc.Content.WordOpenXML` 一次取全稿 + 本地解析（`w:delText` 不取即可对齐 `Range.Text`），7334 段实测 48 s → 6 s | [隅 v1.13] |
+| 内嵌图片在图内文本里是 `/` | 逐段 `Range.Text` 对一张内嵌图返回 `/`（不是 U+FFFC）；XML 里是 `w:drawing` | XML 侧把 `w:drawing`/`w:pict`/`w:object` 映射成 `/` 才能与 `Range.Text` 逐字一致；含 `w:sym`（Wingdings 勾选框）或一段多图的段落**单独回读**最稳 | [隅 v1.13] |
 | `Application.Name` 冒充 Word | `Name="Microsoft Word"`、`Version="12.0"`、`Build="12.1.0.29161"`、`Path=...\Kingsoft\WPS Office\12.1.0.29161\office6`（`status` 的 `app` 字段原样返回过，2026-10-23 复核） | 判断套件看 `Path`（含 `Kingsoft` 即 WPS）或 `Build`，**不要**看 `Name`/`Version`；`doctor`/`status` 返回的 `app` 字段已是真身 | [研] §2.2 |
 | 样式名只认中文本地化名或内建常量 | `Paragraph.Style="标题 1"` OK；`="Heading 1"` → PS `E_FAIL`、python `0x80020009` | 用 `Style.NameLocal` 读回的中文名（`标题`/`正文`/`标题 1`），或内建常量（`-2` = 标题 1）；不确定时先 `read` 看 `style` 字段 | [研] §2.2、§2.4 #1/#10 |
 | `Document.Range` 是**方法**不是属性 | `$doc.Range.Information(3)` → `[PSMethod] does not contain 'Information'` | C#：`doc.Range(a, b)`；PS：`$doc.Range(0, 0)`。任何"先拿 Range 再调方法"的写法都会踩 | [研] §2.4 #9 |

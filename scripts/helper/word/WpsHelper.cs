@@ -1,4 +1,4 @@
-// wps-word-cooperate helper: drive WPS Writer over COM to read / revise / comment / render a .docx.
+﻿// wps-word-cooperate helper: drive WPS Writer over COM to read / revise / comment / render a .docx.
 // Pure ASCII source (Chinese only ever travels inside JSON strings), C# 5 (compiled by the
 // in-box csc.exe of .NET Framework 4.x), no third-party dependency.
 //
@@ -433,6 +433,7 @@ internal static partial class Program
             case "audit": return AuditDoc(a);
             case "unit": return UnitsDoc(a);
             case "units": return UnitsDoc(a);
+            case "textdiag": return TextDiag(a);
             case "save": return SaveDoc(a);
             case "close": return CloseDoc(a);
             case "quit": return QuitAll(a);
@@ -959,10 +960,30 @@ internal static partial class Program
         string[] blocks = null;
         bool[] blockInTable = null;
         string readPath = "slow";
-        if (filtered && total >= 200)
+        string readWhy = null;
+        // v1.13: the block model is unusable on some real documents (Content.Text misaligns table
+        // cells), and on those the filtered sweep used to walk every paragraph at ~4 roundtrips
+        // each. One WordOpenXML fetch gives the same texts (verified char-for-char against the
+        // per-paragraph loop) in a single roundtrip, so it backs up the block model here.
+        List<string> xmlTexts = null;
+        // XML only pays off when the SCAN is large and the RETURN is small (-SkipTableCells /
+        // -Only); for a plain range read the per-paragraph style/list calls dominate either way,
+        // and the extra WordOpenXML fetch would make it slower (measured 1200 paragraphs:
+        // 19.3 s with XML vs 16.1 s without).
+        bool wantFast = filtered;
+        if (total >= 200 && wantFast)
         {
-            blocks = FastBlocksVerified(doc, total, a.Flag("slow", false));
-            if (blocks != null)
+            string why;
+            blocks = FastBlocksVerified(doc, total, a.Flag("slow", false), out why);
+            readWhy = why;
+            if (blocks == null && !a.Flag("slow", false))
+            {
+                string xmlWhy;
+                xmlTexts = XmlDocTexts(doc, total, out xmlWhy);
+                if (xmlTexts != null) { readPath = "xml"; readWhy = null; }
+                else readWhy = (why == null ? "" : why + "; ") + "xml: " + xmlWhy;
+            }
+            if (blocks != null && skipCells)
             {
                 // Which paragraphs sit in tables: BEL heuristics on the blocks are NOT reliable
                 // (the first cell of one table is clean, of another carries a leading mark, and
@@ -979,7 +1000,22 @@ internal static partial class Program
                     for (int k = startPara; k < startPara + parasInTable; k++) blockInTable[k - 1] = true;
                 }
                 if (markOk) readPath = "fast";
-                else { blocks = null; blockInTable = null; readPath = "slow"; }
+                else { blocks = null; blockInTable = null; readPath = "slow"; readWhy = "table-marks"; }
+            }
+            else if (blocks != null) readPath = "fast";
+            if (xmlTexts != null && skipCells)
+            {
+                blockInTable = new bool[total];
+                bool markOk2 = true;
+                for (int t = 0; t < spans.Count; t++)
+                {
+                    if (spans[t][0] < 0) { markOk2 = false; break; }
+                    int startPara2 = ParaAtOffset(doc, spans[t][0], total);
+                    int parasInTable2 = (int)TryGet(() => (object)(int)doc.Tables.Item(spans[t][2]).Range.Paragraphs.Count, -1);
+                    if (startPara2 < 1 || parasInTable2 < 1 || startPara2 + parasInTable2 - 1 > total) { markOk2 = false; break; }
+                    for (int k = startPara2; k < startPara2 + parasInTable2; k++) blockInTable[k - 1] = true;
+                }
+                if (!markOk2) { xmlTexts = null; blockInTable = null; readPath = "slow"; readWhy = "table-marks"; }
             }
         }
 
@@ -989,12 +1025,12 @@ internal static partial class Program
         {
             if (filtered && items.Count >= want) break;
             if (!filtered && count > 0 && k > from + count - 1) break;
-            if (blocks != null)
+            if (blocks != null || xmlTexts != null)
             {
                 scanned++;
                 to = k;
-                string fastText = BlockNorm(blocks[k - 1]);
-                if (skipCells && blockInTable[k - 1]) { skippedCells++; continue; }
+                string fastText = blocks != null ? BlockNorm(blocks[k - 1]) : xmlTexts[k - 1];
+                if (skipCells && blockInTable != null && blockInTable[k - 1]) { skippedCells++; continue; }
                 if (onlyRe != null && !onlyRe.IsMatch(fastText)) { skippedOther++; continue; }
                 items.Add(ReadOneParaFast(doc, k, spans, fastText));
                 continue;
@@ -1052,7 +1088,8 @@ internal static partial class Program
         r["pages"] = TryGet(() => (object)(int)doc.ComputeStatistics(2), 0);
         r["revisions"] = TryGet(() => (object)(int)doc.Revisions.Count, 0);
         r["comments"] = TryGet(() => (object)(int)doc.Comments.Count, 0);
-        if (filtered) r["path"] = readPath;
+        if (filtered || total >= 200) r["path"] = readPath;
+        if (readPath == "slow" && readWhy != null) r["fastFail"] = readWhy;
         r["items"] = items;
         r["tables"] = tableList;
         return r;
