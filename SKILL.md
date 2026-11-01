@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.20（2026-11-02）**：**多任务协作（并行规划、合并写回）**——一个会话里可以同时布置多章节 / 同章多任务 / 章节+全文任务。① 新增 **`scripts\tasks.ps1`**（split / merge / plan / selftest）：`split` 把一次 `read` 切成章节片（子代理零 COM 并行加工）；`merge` 按段合并多任务、做 `expect`/数字多重集/相似度 guard、把同段改动合成**一条** item（find 自动扩到段内唯一，`revise` 只换首个命中）；`plan` 按章节倒序输出 items + comments，`-BatchOps` 可直接喂 `batch` 一次跑完。② **三条实测纪律写进文档**：同一段不能放两条 item（第 2 条 `could not place the edit`，整批回滚）；写回必须**从后往前**（插段使后段号 +1，升序必 `ANCHOR_MISSING`）；`set_text` 丢 run 级格式（上标），优先 `replace`。③ **`unit` 的两个坑**：它对含未接受修订的段落有效（实测 `set_text` 插入的 `1234 m3/s` 能被修成 m³/s），但脚本页守卫会把含 `P=1%` 的真实段落误判为模板而跳过——跑完必须看 `skippedSamples`，误伤段改走 textOp。④ 细节与三套排法见 **reference/multi-task.md**。
+
 **版本 v1.19（2026-11-02）**：**按另一台机器的 PPT 性能实测报告优化调用开销与安全性**。① **`batch` 批量模式（三端）**：`woc.ps1 <app> batch -Ops ops.json` —— 一次进程启动、一条命令跑完一批 helper 请求，实测本机 5 条命令 1982 ms → **891 ms**（每条 op 35–204 ms）；报告方在 PPT 上测得「每条命令 ≈460 ms，其中 COM 只占 55 ms」，批量化正是把这 400 ms 的客户端税摊掉。② **源码哈希缓存**：`Get-FileHash` 扫 9 个 .cs 每条命令要 ~50 ms（实测 52 ms），改成按「文件数+大小+最新 mtime」缓存后省下这笔（报告实测 386→330 ms）。③ **JSON 转义加固（三端）**：旧解析器遇到非法转义（如未转义的 Windows 路径 `C:\Users\...`）会**静默丢掉反斜杠**拼成 `C:Users...`，PPT 侧 `open` 又会在不存在的路径**新建并保存**，于是凭空多出一份垃圾稿（报告方踩到）。现在非法转义直接 `BAD_ARGS`。④ **PPT `open` 的"新建"不再伪装成普通打开**：返回 `how:"created"` + `note`（路径不存在时会新建，这是特性；但路径写错要能看出来）。⑤ 报告方实测的**渲染/检查次数纪律**与 **PPT 页码占位符渲染成重复 "1"** 写进文档。
 
 **版本 v1.18（2026-11-02）**：**三端统一参数校验 + 批量排版 + 一个藏了很久的颜色 BUG**。① **参数消费校验做成三端共用**：`scripts\param-check.ps1` 里的 `Test-ParamConsumption` 被 `word.ps1` / `excel.ps1` / `ppt.ps1` 共用（v1.17 只在 Excel 侧内联）。判定顺序 = 别名表 → 该端的 `$formatFields` 映射 → 首字母小写约定；显式传默认值（`-From 1`、`-Index 0`）不误报；`WOC_NO_PARAMCHECK=1` 可关。**已知留白**：Word 的 `-Tables` 参数至今没有任何命令消费它（会告警，属真实缺口）。② **`format -Items <json>` 批量形态**：每块自带 range + 格式项，还能按块指定 `sheet`，一次调用排完整版（分号多区域只能共用一套选项，这个能每块不同）。③ **修掉 `-Color`/`-FillColor` 红蓝互换**（v0.1–v1.17 一直存在）：COM 的 `Font.Color`/`Interior.Color` 低 24 位是 **BGR**，旧 `ColorFrom` 给的是 RGB 掩码 ⇒ `-Color "#FF0000"` 渲染成蓝色。Word 侧一直是对的（`r + g*256 + b*65536`），只有 Excel 写反；已用红/蓝/绿三格对照图验证。④ 文档补：WPS 12 的窗口属于 **`wps.exe`**（`et.exe` 的 `MainWindowHandle = 0`），以及 125% 缩放下图表放右侧会被窗口裁掉的尺寸账。
@@ -113,6 +115,27 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - **PPT 只给气泡**（`captionSupported:false` + `limitation`）：WPS 演示没有可写的单文档标题，别对用户说"标题已标记"。
 - **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI接管中〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
 - **不做悬浮窗（用户明确决策，2026-10-30）**：不加置顶悬浮条/浮层——它会遮正文、抢焦点，而且要常驻 daemon 跟随 WPS 窗口（移动/最小化/切标签/异常退出都得收拾）。常驻信息由「标签页前缀标记 + 托盘图标」承担；**不要再向用户推荐，也不要把它做成"可选模式"偷偷加回来**。
+
+---
+
+## 多任务模式（一次布置多个任务，v1.20）
+
+用户经常一次给好几件事：多章节、同一章好几个任务、或"第 3 章润色 + 全文单位上标"。规则是 **并行规划、合并写回**：
+
+1. **冻结**：`status` → `open` → `snapshot -Tag pre` → `read -Count 0 -SkipTableCells`，一次拿全稿段表（`i` / `text` / `style`）。
+2. **切分 + 并行规划**：`tasks.ps1 split -Read read.json -Ranges ranges.json -Out work` 得到章节片；每个任务派一个子代理，只喂切片 + 规则，**不调 skill 命令、不碰 COM**，产出 `task-*.json`（字段见 reference/multi-task.md）。
+3. **合并**：`tasks.ps1 merge -Read read.json -TaskFiles work -Out work`——按段合并、做 `expect` / 数字多重集 / 相似度 guard，输出 `merged.json`。**同一段的多任务必须合成一条 item**：一批 `revise` 里同段放两条，第 2 条会 `could not place the edit` 并整批回滚。
+4. **提交**：`tasks.ps1 plan -Merged merged.json -Ranges ranges.json -Out work -Doc <绝对路径> -BatchOps`，按 **表格结构 → 文本批 → 格式 → `unit` → 批注** 的顺序写；多章节**从后往前**；可用 `word.ps1 batch -Ops work\batch-ops.json` 一次进程启动跑完整批。
+
+三条铁律：
+
+- **写回只有一个写者**（父代理）；子代理只做规划。因此不需要锁，也不会互相踩段号。
+- **同段一条 item**；优先 `replace`——`set_text` 会丢段内 run 级格式（单位上标）。
+- **段号会变的先跑**：表格结构 / 插删段放在文本批之前，跑完重读，再提交文本与批注。
+
+汇报：回执写清任务清单与顺序理由（例如"T2 在 T1 之后，避免上标被整段重写冲掉"）；完成后分**局部改动 / 全局改动**两栏 + `diff` 摘要 + 待裁决项；**不要 `save`**，等用户确认（铁律 6）。
+
+细节（任务卡字段、三种组合的排法、实测坑与验收清单）见 [reference/multi-task.md](reference/multi-task.md)。
 
 ---
 
@@ -674,6 +697,7 @@ ppt check -Doc 稿.pptx -Config 院标规则.json -Out check.md
 ## 参考
 
 - [reference/workflows.md](reference/workflows.md) —— Word 全部典型工作流分步教程 + 排版实测坑详解。
+- [reference/multi-task.md](reference/multi-task.md) —— 多任务协作（多章节 / 同章多任务 / 章节+全文）：任务卡字段、`tasks.ps1` 三条命令、提交顺序、合并规则、实测坑与验收清单。
 - [reference/word-quirks.md](reference/word-quirks.md) —— WPS Writer 与 Word 的实测差异表（冒充版本号、样式中文名、`Range` 是方法、关最后一个文档静默杀实例……）。
 - [reference/excel-quirks.md](reference/excel-quirks.md) —— WPS 表格 COM 的实测差异与坑（冒充 Excel、SaveAs 身份变化、块数组 0 基、渲染走剪贴板……）。
 - [reference/encryption.md](reference/encryption.md) —— 落盘即密文的现象、为什么 COM 路线不受影响、交付与解密链路。

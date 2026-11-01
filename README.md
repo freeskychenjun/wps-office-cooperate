@@ -32,6 +32,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\office.ps1 w
 
 `word.ps1` / `excel.ps1` / `ppt.ps1` 也可直接调用。输出一段 JSON：`{"ok":true,"result":{...}}` 或 `{"ok":false,"error":{"code":"...","message":"..."}}`。
 
+**多任务（v1.20）**：一个会话里可同时布置「多章节 / 同章多任务 / 章节 + 全文任务」——子代理并行规划（零 COM），`scripts/tasks.ps1` 按段合并后，父代理作为唯一写者按「表格 → 文本批 → 格式 → unit → 批注」顺序提交（多章节从后往前）。见 [reference/multi-task.md](reference/multi-task.md)。
+
 环境：Windows + WPS（没装微软 Office 也行）。首次调用用系统 `csc.exe` 编译 helper（约 1 秒，按源码哈希缓存）。
 
 ## 目录
@@ -41,9 +43,10 @@ SKILL.md               唯一权威说明（速查 + 铁律）
 scripts/office.ps1     app 分发入口（word|excel|ppt）
 scripts/word.ps1       Word 入口（原 wps.ps1）
 scripts/excel.ps1      Excel 入口（原 et.ps1）
+scripts/tasks.ps1      多任务协作辅助：split / merge / plan / selftest（并行规划、合并写回）
 scripts/helper/word/   Word helper C# 源码（编译缓存按哈希）
 scripts/helper/excel/  Excel helper C# 源码
-reference/             workflows / quirks / encryption / acceptance
+reference/             workflows / multi-task / quirks / encryption / acceptance
 publish.ps1            发布到部署目录（不带 tests/docs/tools）
 ```
 
