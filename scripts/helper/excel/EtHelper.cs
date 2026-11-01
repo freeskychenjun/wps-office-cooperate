@@ -135,7 +135,11 @@ internal sealed class Json
                 sb.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
                 i += 4;
             }
-            else sb.Append(e);
+            else if (e == '"' || e == '\\' || e == '/') sb.Append(e);
+            // Unknown escapes used to be appended verbatim (the backslash dropped), so an unescaped
+            // Windows path "C:\Users\A\Desktop\x.pptx" silently became "C:UsersADesktopx.pptx" and
+            // open created a brand-new file at that garbage path (reported 2026-11-02). Fail loud.
+            else throw new Fail("BAD_ARGS", "invalid JSON escape \\" + e + " in a string - a Windows path must escape its backslashes (C:\\\\dir\\\\file.pptx) or be produced by a JSON serializer");
         }
     }
 

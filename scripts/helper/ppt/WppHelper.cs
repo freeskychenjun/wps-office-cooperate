@@ -1,4 +1,4 @@
-﻿// wps-office-cooperate (ppt) helper: drive WPS Presentation (WPP) over COM to read /
+// wps-office-cooperate (ppt) helper: drive WPS Presentation (WPP) over COM to read /
 // edit / render a .pptx presentation live. Pure ASCII source (Chinese only ever
 // travels inside JSON strings), C# 5 (compiled by the in-box csc.exe of .NET
 // Framework 4.x), no third-party dependency.
@@ -142,7 +142,11 @@ internal sealed class Json
                 sb.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
                 i += 4;
             }
-            else sb.Append(e);
+            else if (e == '"' || e == '\\' || e == '/') sb.Append(e);
+            // Unknown escapes used to be appended verbatim (the backslash dropped), so an unescaped
+            // Windows path "C:\Users\A\Desktop\x.pptx" silently became "C:UsersADesktopx.pptx" and
+            // open created a brand-new file at that garbage path (reported 2026-11-02). Fail loud.
+            else throw new Fail("BAD_ARGS", "invalid JSON escape \\" + e + " in a string - a Windows path must escape its backslashes (C:\\\\dir\\\\file.pptx) or be produced by a JSON serializer");
         }
     }
 
@@ -967,6 +971,7 @@ internal static partial class Program
     {
         string full = FullPathOf(a.Need("doc"));
         bool existed = FindOpen(full) != null;
+        bool fileExisted = File.Exists(full);
         dynamic p = RequirePres(a, true, true);
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["name"] = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
@@ -977,7 +982,13 @@ internal static partial class Program
         double w = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideWidth, (object)960.0), CultureInfo.InvariantCulture);
         double h = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideHeight, (object)540.0), CultureInfo.InvariantCulture);
         r["slideSize"] = new Dictionary<string, object> { { "w", Math.Round(w, 1) }, { "h", Math.Round(h, 1) }, { "ratio", Math.Round(w / h, 3) } };
-        r["how"] = existed ? "reused" : "opened";
+        r["how"] = existed ? "reused" : (fileExisted ? "opened" : "created");
+        // Opening a path that does not exist creates a deck (that is how "make a new deck" works on
+        // this side), but a typo then leaves a junk file behind and the old response looked exactly
+        // like a normal open. Say it out loud (reported 2026-11-02: an unescaped Windows path created
+        // "C:\UsersAdministratorDesktop新建 PPTX 演示文稿.pptx").
+        if (!fileExisted && !existed)
+            r["note"] = "the path did not exist, so a NEW deck was created and saved there - check the path if you expected an existing file";
         return r;
     }
 

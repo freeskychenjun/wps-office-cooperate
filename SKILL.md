@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.19（2026-11-02）**：**按另一台机器的 PPT 性能实测报告优化调用开销与安全性**。① **`batch` 批量模式（三端）**：`woc.ps1 <app> batch -Ops ops.json` —— 一次进程启动、一条命令跑完一批 helper 请求，实测本机 5 条命令 1982 ms → **891 ms**（每条 op 35–204 ms）；报告方在 PPT 上测得「每条命令 ≈460 ms，其中 COM 只占 55 ms」，批量化正是把这 400 ms 的客户端税摊掉。② **源码哈希缓存**：`Get-FileHash` 扫 9 个 .cs 每条命令要 ~50 ms（实测 52 ms），改成按「文件数+大小+最新 mtime」缓存后省下这笔（报告实测 386→330 ms）。③ **JSON 转义加固（三端）**：旧解析器遇到非法转义（如未转义的 Windows 路径 `C:\Users\...`）会**静默丢掉反斜杠**拼成 `C:Users...`，PPT 侧 `open` 又会在不存在的路径**新建并保存**，于是凭空多出一份垃圾稿（报告方踩到）。现在非法转义直接 `BAD_ARGS`。④ **PPT `open` 的"新建"不再伪装成普通打开**：返回 `how:"created"` + `note`（路径不存在时会新建，这是特性；但路径写错要能看出来）。⑤ 报告方实测的**渲染/检查次数纪律**与 **PPT 页码占位符渲染成重复 "1"** 写进文档。
+
 **版本 v1.18（2026-11-02）**：**三端统一参数校验 + 批量排版 + 一个藏了很久的颜色 BUG**。① **参数消费校验做成三端共用**：`scripts\param-check.ps1` 里的 `Test-ParamConsumption` 被 `word.ps1` / `excel.ps1` / `ppt.ps1` 共用（v1.17 只在 Excel 侧内联）。判定顺序 = 别名表 → 该端的 `$formatFields` 映射 → 首字母小写约定；显式传默认值（`-From 1`、`-Index 0`）不误报；`WOC_NO_PARAMCHECK=1` 可关。**已知留白**：Word 的 `-Tables` 参数至今没有任何命令消费它（会告警，属真实缺口）。② **`format -Items <json>` 批量形态**：每块自带 range + 格式项，还能按块指定 `sheet`，一次调用排完整版（分号多区域只能共用一套选项，这个能每块不同）。③ **修掉 `-Color`/`-FillColor` 红蓝互换**（v0.1–v1.17 一直存在）：COM 的 `Font.Color`/`Interior.Color` 低 24 位是 **BGR**，旧 `ColorFrom` 给的是 RGB 掩码 ⇒ `-Color "#FF0000"` 渲染成蓝色。Word 侧一直是对的（`r + g*256 + b*65536`），只有 Excel 写反；已用红/蓝/绿三格对照图验证。④ 文档补：WPS 12 的窗口属于 **`wps.exe`**（`et.exe` 的 `MainWindowHandle = 0`），以及 125% 缩放下图表放右侧会被窗口裁掉的尺寸账。
 
 **版本 v1.17（2026-11-02）**：**按另一台机器的实战反馈（v1.15，18 min 里 12 min 花在缺陷上）修一轮**，重点消灭「静默丢弃」与「逃生需求」。① **`chart` 静默忽略 `-Sheet`**（P0，反馈方耗 ~6 min）：包装层没转发 `-Sheet`，图表永远落在 ActiveSheet，且 `list/delete` 同样绑 ActiveSheet ⇒ 落错表后无法自救。现已转发全部 action，并新增 **`chart -Action list -All`**（跨表扫描，带 `sheet/index/name/type/title/left/top/width/height` 几何信息）；活动表解析改走 **`wb.Windows(1).ActiveSheet`**（WPS 12 的 `wb.ActiveSheet` 会与窗口不一致、两条命令之间还会跳变）。② **`woc.cmd` 吞参数**（P0，反馈方耗 ~3 min）：cmd.exe 在 batch 之前就把 `=A15^1.5` 改成 `A151.5`、把前导 `=` 吃掉，`fill/write -Formula` 基本全废。新增 **`scripts\woc.ps1`**（PowerShell→PowerShell 不经过 cmd 解析，`= ^ & | > $` 原样到达），文档改推荐它；`woc.cmd` 保留但标注「公式/特殊字符别走它」。③ **参数消费校验**：包装层现在对「绑定了却没进 request」的参数在 stderr 打 `WARN ignored parameter ...`，同类静默丢弃以后一眼可见。④ **`chart` 能力补齐**：`-Width/-Height`（pt，默认 480×300）、**`-Action move -Index n [-Anchor X] [-Width/-Height]`**（以前建完只能删了重建）、**多系列**（第 1 列=x，第 2..N 列各一条系列，表头作系列名）、`-XTitle/-YTitle` 轴标题——「Q–H 族曲线」终于能一张图讲完。⑤ **`sheet -Action activate -Name X`**（以前只能裸 COM `GetActiveObject` 逃生）。⑥ **`format` 多区域**：`-Range "A4:E4;A13:E13;A27:E27"` 一条命令排完整版（反馈方 26 次串行 ≈ 20 s）。⑦ **修正 v1.16 的错误结论**：实测 `Range.CopyPicture(xlScreen)` **会**把与该区域相交的浮动图表画进去（A1:H52 有图、A1:H10 无图）；`-IncludeCharts` 的正确语义是**把视图扩到覆盖全部图表**（不再二次合成，否则重复画）。
@@ -312,6 +314,11 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 3. **中文一律走 JSON 文件**（`write -Items`、`comment -TextFile`），不要塞进命令行——`woc.cmd` 那条路还受 OEM 代码页影响。
 4. **参数被静默忽略会告警（三端通用，v1.18）**：`scripts\param-check.ps1` 被 Word/Excel/PPT 三个包装器共用，对「绑定了却没进 request」的参数在 stderr 打 `WARN ignored parameter -X for command "Y"`。看到就说明这条命令不吃该参数（v1.16 前是静默丢弃，`chart -Sheet` 就是这么丢的）。显式传默认值（`-From 1`、`-Index 0`）不会误报；`WOC_NO_PARAMCHECK=1` 可整轮关掉。
 5. **颜色通道（Excel 侧 v1.18 修）**：`-Color`/`-FillColor` 之前红蓝互换（COM 要 BGR，旧代码给 RGB），现在 `#FF0000` 就是红色。若历史脚本里颜色看起来"反了"，按新行为重跑即可。
+6. **多条命令用 `batch`，别一条一个工具调用（v1.19）**：`woc.ps1 <app> batch -Ops ops.json`，一次进程启动跑完整批。实测本机 5 条命令 1982 ms → 891 ms（每条 op 35–204 ms）；命令越多差距越大。
+   - `ops.json` 里是**helper 级请求**（不是命令行参数名），每条形如 `{"cmd":"...", <请求字段>}`，`doc` 可写相对路径（会转绝对）。
+   - 常用映射：写单元格 `{"cmd":"write","doc":X,"items":[{"sheet":"S","cell":"A1","value":1}]}`；格式 `{"cmd":"format","doc":X,"range":"A1:A2","bold":true}`；建图 `{"cmd":"chart","doc":X,"action":"add","range":"A1:B2","type":"line","anchor":"D2"}`；读 `{"cmd":"read","doc":X,"sheet":"S","range":"A1:A2"}`。
+   - 返回 `{"result":{"count":n,"totalMs":...,"ops":[{i,ms,ok,result|error}]}}`，逐条带耗时；某条失败不影响后续（但**不会回滚**已成功的那些，重要批次仍要 `snapshot`）。
+   - 适合"搭一页 PPT / 排一张表"这种 10–30 条小命令的场景；单条命令用普通 CLI 就行。
 
 ### skill 没覆盖时：合法逃生通道
 
@@ -423,6 +430,16 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 命令前缀：`office.ps1 ppt <命令>`（或直接 `ppt.ps1 <命令>`）。ProgID `KWPP.Application`；`open` 一个不存在的路径会**新建并立即保存**一份空稿到该路径（新稿身份靠这次落盘确立）。
 
 **关键限制（先读）**：PPT 无修订层、外部 COM 改动不进撤销栈（同 Excel）；**WPS 演示不接受公式**（不能建也不能贴）；`render` 走剪贴板（`Slide.Copy` → EMF → PNG，helper 自己写盘故是明文；`Slide.Export` 写的文件会被透明加密、读不回来，所以不用它）。
+
+## PPT 实测坑（2026-11-02，另一台机器 70 条命令的实测报告）
+
+| 坑 | 实测表现 | 做法 |
+|---|---|---|
+| **页码占位符渲染成重复 "1"** | `master -Action footer -PageNum` 在本机 WPS 12 上每页都显示 "1"（占位符文本不随页更新） | 别用页码占位符；页脚写纯文字，或干脆不放页码 |
+| **`open` 不存在的路径 = 新建** | 这是特性（新稿靠这次落盘确立身份），但路径写错会留下垃圾文件；旧返回与普通打开无法区分 | v1.19 起返回 `how:"created"` + `note`，看到 `created` 而你以为在打开已有文件 ⇒ 立刻检查路径 |
+| **未转义的 Windows 路径** | 手拼 JSON 时 `C:\Users\...` 里的 `\U`/`\A`/`\D` 被当非法转义，旧解析器**静默丢反斜杠** ⇒ `C:Users...`，再叠加"路径不存在就新建"就凭空多一份稿 | v1.19 起非法转义直接 `BAD_ARGS`；拼请求一律走 JSON 序列化器（`batch` 的 ops 文件也是） |
+| **渲染成本 ~355 ms/页** | 3 页 1471 ms；`check` 全规则 970 ms/次；`read` 3 页 632 ms | 设计阶段渲一次 `-Overview`（6 页/图），之后**只渲改动页**；`check` 过程别跑，收尾跑一遍 `-MinSeverity blocker`；`read` 一次读全稿并缓存形状名 |
+| **daemon 必须保温** | 一次性模式 746 ms vs 保温 422 ms；`close` 掉最后一份文档后 daemon 自己退，下一条命令重新付 ~0.5 s | 一轮任务里别频繁 `close` 又重开；批量命令用 `batch`（一次启动跑一批） |
 
 ## PPT 命令速查
 

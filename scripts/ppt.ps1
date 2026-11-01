@@ -9,7 +9,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'replace', 'selection', 'slide', 'split', 'merge', 'text', 'textbox', 'image', 'picture', 'comment', 'export', 'table', 'chart', 'shape',
-                 'format', 'font', 'theme', 'master', 'audit', 'check', 'outline', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish', 'hint', 'serve')]
+                 'format', 'font', 'theme', 'master', 'audit', 'check', 'outline', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'batch', 'finish', 'hint', 'serve')]
     [string]$Command,
 
     [string]$Doc,
@@ -17,6 +17,8 @@ param(
     [int]$To = 0,
     [int]$Count = 0,
     [string]$Items,
+    # batch mode: path to a JSON file with an "ops" array of request objects
+    [string]$Ops,
     [string]$Data,
     [int]$Slide = 0,
     [string]$Shape,
@@ -205,9 +207,21 @@ function Start-Daemon([string]$exePath2) {
 
 
 # The cache key covers every source file, so editing any of them rebuilds.
+# Hash of the helper sources -> compile cache dir + daemon pipe name. Get-FileHash over every
+# .cs file costs ~50 ms on each command (measured 2026-11-02), so the shared helper caches it
+# keyed on file count + sizes + newest mtime (any real edit changes one of them).
+$wocCommonPath = Join-Path $PSScriptRoot 'woc-common.ps1'
+if (Test-Path -LiteralPath $wocCommonPath) { . $wocCommonPath }
+if (Get-Command Get-CachedSourceHash -ErrorAction SilentlyContinue) {
+    $sha = Get-CachedSourceHash -App 'ppt' -Sources $helperSources
+} else {
+    
 $hashInput = ($helperSources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
+    
 $shaGen = [System.Security.Cryptography.SHA256]::Create()
+    
 $sha = ([System.BitConverter]::ToString($shaGen.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($hashInput))) -replace '-', '').ToLowerInvariant().Substring(0, 12)
+}
 $cacheDir = Join-Path $env:LOCALAPPDATA ('wps-office-cooperate\ppt-helper-' + $sha)
 $script:daemonPipe = Get-DaemonPipeName $sha
 $exePath = Join-Path $cacheDir 'WppHelper.exe'
@@ -231,6 +245,30 @@ if (-not (Test-Path -LiteralPath $exePath)) {
 }
 
 # ---------------------------------------------------------------- request
+
+# ---------------------------------------------------------------- batch (v1.19)
+# Run many requests over ONE pipe connection from a single process start. The CLI path pays a
+# PowerShell start + wrapper parse (~220 ms) per command, while a pipe round trip is 1-15 ms
+# (measured 2026-11-02), so "one page = 15 commands" becomes one tool call instead of fifteen.
+#   woc.ps1 ppt batch -Ops ops.json
+#   ops.json: {"ops":[{"cmd":"...","doc":"...","sheet":"..."}, ...]}
+if ($Command -eq 'batch') {
+    if (-not $Ops) { Write-Error-Json 'BAD_ARGS' 'batch needs -Ops <ops.json> (an object with an ops array)' }
+    $opsPath = Resolve-FullPath $Ops
+    if (-not (Test-Path -LiteralPath $opsPath)) { Write-Error-Json 'BAD_ARGS' ('ops file not found: ' + $opsPath) }
+    $rawOps = [System.IO.File]::ReadAllText($opsPath, [System.Text.Encoding]::UTF8)
+    try { $parsedOps = $rawOps | ConvertFrom-Json }
+    catch { Write-Error-Json 'BAD_ARGS' ('ops file is not valid JSON: ' + $_.Exception.Message) }
+    if ($parsedOps.PSObject.Properties.Name -contains 'ops') { $opList = @($parsedOps.ops) } else { $opList = @($parsedOps) }
+    if ($opList.Count -eq 0) { Write-Error-Json 'BAD_ARGS' 'batch ops is empty' }
+    if (-not (Get-Command Invoke-WocBatch -ErrorAction SilentlyContinue)) {
+        $wocCommonPath2 = Join-Path $PSScriptRoot 'woc-common.ps1'
+        if (Test-Path -LiteralPath $wocCommonPath2) { . $wocCommonPath2 }
+    }
+    $batchResult = Invoke-WocBatch -PipeName $script:daemonPipe -ExePath $exePath -Ops $opList
+    [Console]::Out.Write(($batchResult | ConvertTo-Json -Depth 12 -Compress))
+    exit 0
+}
 
 $request = @{}
 $request['cmd'] = $Command

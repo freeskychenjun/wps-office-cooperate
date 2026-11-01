@@ -26,6 +26,7 @@ $includes = @(
     'scripts\woc.cmd',
     'scripts\woc.ps1',
     'scripts\param-check.ps1',
+    'scripts\woc-common.ps1',
     'scripts\word.ps1',
     'scripts\excel.ps1',
     'scripts\ppt.ps1'
