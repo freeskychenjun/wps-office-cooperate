@@ -31,3 +31,13 @@
 - 未验证：图表操作（v0.1 未做 chart 命令）、数据透视表、多单元格数组公式、合并单元格上的写行为、用户正在编辑同一格时的并发写入（BUSY 场景只映射了拒绝码）。
 - `comment -Action delete` 只支持 `-All`（逐条删除留给下版）。
 - `Excel.Application` 附着回退未启用：本机两者同引擎无差别，但装了真微软 Excel 的机器上行为未定，所以创建实例只认 `KET.Application`。
+
+## v1.16 补充（2026-11-01 实测）
+
+| 现象 | 实测表现 | 正确写法 |
+|---|---|---|
+| `Range.CopyPicture` **不含浮动图表** | 5 张图的表 `render -Range A1:H40`，PNG 里一张图都没有（单元格区域正常） | 用 `render -IncludeCharts`：helper 逐张 `ChartObject.CopyPicture` 取位图，按 `Left/Top/Width/Height`（px/点由基准图宽度自校准）合成到单元格图之上 |
+| `ChartObject.CopyPicture(1,2)` 可用 | WPS 12 上直接取图表位图成功（`Chart.CopyPicture` 作兜底；`Chart.Export` 未采用——WPS 自己写盘的文件在本机会被透明加密成密文，读不回来） | 取图一律走剪贴板，落盘由 helper 用 System.Drawing 完成 |
+| 图表合成要避开"文件占用" | `Image.FromFile(scratch)` 还开着时往同一路径 `Save` 会报 GDI+ 一般性错误 | 单元格基准图先写临时文件，合成结果写最终路径，最后删临时文件 |
+| `Workbooks.Add()` + `SaveAs` 造新簿可行 | `new` 落盘后立即 `saved:true`，后续 write/chart/render 全部正常 | 新簿走 `new`；`open` 对不存在的路径报 `NOT_OPEN`（不会替你新建） |
+| `SaveAs` 到已存在且**正打开**的路径会失败 | 文件被 WPS 锁住，`File.Delete` 报"正由另一进程使用" | `new -Overwrite` 先 `FindOpen` 判占用，占用时报 `IN_USE`，让调用方先 `close` |

@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.16（2026-11-01）**：**Excel 侧补齐「能新建、能看见图表」两块短板**，起因是一次 53.7 min / 80 步的会话归因（详见文末「视觉核对纪律」）。① **`excel new -Doc <路径>`**：`Workbooks.Add` + `SaveAs`，直接造空白工作簿并打开（`EXISTS` / `IN_USE` 两个拒绝码），以前只能靠 `open`（对不存在的路径报 `NOT_OPEN`）或自己写 openpyxl 造文件再打开——那次光「建个空表并打开」就花了 22 步 / 10.2 min。② **`excel render -IncludeCharts`**：`Range.CopyPicture` 只渲染单元格、**浮动图表一张都不在图里**（实测），所以以前核对带图表的表只能整屏截图 + `SetForegroundWindow` + `mouse_event` 滚轮翻页（那次占 24 步 / 30%）。现在 helper 把每张 `ChartObject` 用 `CopyPicture` 取成位图，按**真实坐标**（`Left/Top/Width/Height`，px/点由基准图宽度自校准）合成到单元格图之上，返回 `chartsIncluded` 与每张图的 `left/top`；一次 `render -IncludeCharts` 就能看到「表 + 全部图表」的整版效果。实测同一份 5 图宽顶堰工作簿：一条命令出 1400×1863 整版图（`chartsIncluded:5`），而旧流程要 20+ 步。③ `chart` 的三条硬限制（单系列 / 数据须同表 / 尺寸写死 480×300pt）与 `format -Borders` 取值、`render` 不含图表三条限制已写进 SKILL.md 的「Excel 侧已知限制」表。④ 顺带修掉 v1.15 的 `-Borders grid` 画对角线 BUG（XlBordersIndex 5/6 是 xlDiagonalDown/Up）。⑤ 常驻/一次性 A/B 仍然逐字节一致（新增命令也测了）。
+
 **版本 v1.15（2026-11-01）**：**常驻 helper 扩到 Excel / PPT**，并找到并拔掉了「每条命令 2 秒」的真正元凶。① **三端统一**：`excel.ps1` / `ppt.ps1` 与 Word 用同一套 `PipeServer`（同一份 request/response JSON 契约），`serve -Action start|status|stop`、`open` 自动预热、`close` 完最后一份自动退出、`WOC_NO_DAEMON=1` 回退，全部一致；`tests/word/check_daemon.py` 扩展到三个 app：**40/40 通过**（每个命令都断言「常驻 vs 一次性」JSON 逐字节相同）。② **元凶不是 PowerShell**：本机实测 `powershell -Sta`(默认) **2.2–2.4 s**、`powershell -Mta` **0.13–0.17 s**、`cmd.exe /c exit` 0.03 s、纯 .NET exe 0.03 s，而**一个 4 KB 的 `[STAThread]` 探针 exe 也要 2.2 s** —— 2 秒是 **STA 公寓初始化**（本机安全过滤驱动），跟进程启动、跟 .NET、跟 PowerShell 都无关。⇒ 包装器**不做 COM**，改用 `-Mta` 跑；helper 保持 `[STAThread]`（WPS 自动化对象需要 STA），于是 helper 的 2 s 只在开 daemon 那一次付。③ 新入口 **`scripts\woc.cmd <word|excel|ppt> <命令> [参数]`**：内部就是 `powershell -Mta -NoProfile -File <app>.ps1`，等价于 `office.ps1` 但不再付 STA 税。实测（同一台机器）：Excel `read` 2.86→**0.50 s**、`snapshot` 3.06→**0.78 s**、`status` 2.66→**0.55 s**；PPT `read` 2.95→**0.72 s**、`snapshot` 2.70→**0.58 s**；真实 7334 段报告：`status` **0.50 s**、`snapshot` **1.34 s**、`diff` **1.32 s**、`captions` **2.20 s**、`search` **2.41 s**、`read -SkipTableCells` **3.46 s**、`audit` **4.04 s**（对比：Pi 会话里同族命令是 98 s / 103 s / 8.4 s / 30 s）。④ 试过并放弃：单独做个原生 CLI 客户端省掉 PowerShell —— **没用**，因为真正跑 COM 的 helper 必须 STA，`[STAThread]` 一标就是 2.2 s，换来换去只是把 2 s 从 PowerShell 挪到 exe（实测记录在 commit message 里）。
 
 **版本 v1.14（2026-11-01）**：**常驻 helper（命名管道）**——把「每条命令 6–8 s 地板价」砍掉一半。实测拆解（本机 2026-11-01）：一条热命令 ~5 s 里，**调用方自己的 PowerShell 启动 ~2.0 s**、**包装器源码哈希 + 起 exe + 附 COM 加找文档 ~2.3 s**、真正干活不到 1 s。现在 `Word` 侧常驻一个 `WpsHelper.exe --serve <pipe>`：COM application 与文档引用一直热着，客户端把**同一份 request JSON** 通过命名管道发过去、拿回**同一份 response JSON**（4 字节长度前缀 + UTF-8），一条命令只剩 PowerShell 启动 + 往返。实测（captions-fixture 4479 段）：`status` 5.0→2.6 s、`snapshot` 5.4→2.8 s、`diff` 5.2→2.8 s、`search` 6.4→3.7 s、`read -SkipTableCells` 6.8→4.2 s，**每条省 ~2.5 s（约 2×）**；`tests/word/check_daemon.py` 断言「常驻与一次性输出逐字节一致」15/15。细节：① 管道名由**编译产物哈希**派生，改了源码就是新管道，旧 daemon 自己闲置退出，不会跑错版本；② `open` 之后自动拉起（`open` 是每个会话的第一条命令，最合适的摊薄点），`close` 关掉最后一份文档 / `quit` / `serve -Action stop` 会让它自己退（不残留进程）；闲置 20 分钟自灭；③ 任何异常（管道不在、daemon 挂了、WOC_NO_DAEMON=1）都**静默回退**到原来的一次性路径，不影响可用性；④ 显式管理：`serve -Action start|status|stop`；⑤ COM 对象失效（WPS 被关掉）时丢弃缓存、下一条命令自动重连。**仍是单实例串行**：并发命令排队，不要用子代理并行刷（COM 总往返不变）。Excel/PPT 侧暂未接常驻（Word 是主要痛点）。剩下的地板价只有调用方 PowerShell 启动（~2 s），那是宿主工具本身的开销，skill 侧已经压到底。
@@ -262,6 +264,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `doctor` | — | 自检：ProgID 安装/在跑、进程数、渲染能力、打开的工作簿 |
 | `status` | — | 在跑的实例与工作簿清单（name / path / saved / readOnly / active），工作表概况 |
 | `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回工作表清单与各自 usedRange。**v1.11 起自动给窗口标签打「〔AI接管中〕」接管标记**（`hint.caption`；用 `wb.Windows(1).Caption`，WPS 表格里 `wb.ActiveWindow` 常为 null） |
+| `new` | `-Doc <路径> [-Show] [-Overwrite] [-NoHint]` | **新建空白工作簿并落盘**（v1.16）：`Workbooks.Add` + `SaveAs`（.xlsx/.xls/.csv/.xlsm 按扩展名选格式），已打开并打接管标记。文件已存在时拒绝（`EXISTS`），`-Overwrite` 才替换；**目标正开在 WPS 里则拒绝**（`IN_USE`，先 `close`）。`open` 对不存在的路径报 `NOT_OPEN`，要造新表用这条，**不要**再自己写 openpyxl |
 | `read` | `-Doc` `[(-Sheet 名 \| -Range "Sheet1!A1:F40")] [-Profile]` | 不带选项=工作簿概览；带 Sheet=读该表 used range（值 + 公式）；`>60 行或 >15 列`自动改列概况（类型统计/min/median/max/高频值 + 头尾各 5 行样本），要局部全量用 `-Range` |
 | `write` | `-Doc -Items <json>`（或单格 `-Cell B3 -Value x / -Formula "=..."`） | **批量写**（见下）：原子批、`expect` 锚校验、中途失败回滚，每格返回 before→after；**批内自动挂起重算+屏幕刷新，批末一次重算**（大表写几千格不产生重算风暴） |
 | `fill` | `-Doc -Range D2:D5000 [-Sheet] -Formula "=B2*C2"` | **整列填公式**：首格写一次 + 原生 FillDown（2000 行约 2 秒，含进程启动）；比逐格 write 快几个量级，大表必用 |
@@ -270,8 +273,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `search` | `-Doc -Text <词> [-Sheet 名] [-Max 50] [-Case]` | **找格**：跨表搜值和公式，返回命中格/值/公式（定位用这个，别整表 read） |
 | `selection` | `-Doc` | **读用户当前选中的区域**：sheet/range/行列数/值（≤400 格直接带值）——用户说"就改我选的这块"时用；选在别的窗口报 NOT_OPEN |
 | `rows` / `cols` | `-Doc [-Sheet] -Action insert\|delete -Index N [-Count M]` | 插入/删除 N 起的 M 行（列）——结构编辑；**先 snapshot**（可回滚），公式由表格自动调整 |
-| `render` | `-Doc [-Sheet] [-Range] -Out <目录> [-Width 1100]` | 区域 `CopyPicture` → PNG（表格没有分页概念，核对用区域图） |
-| `chart` | 加：`-Range 数据区 [-Type column\|bar\|line\|pie\|scatter\|area] [-Title] [-Anchor E2]`；`-Action list`；`-Action delete -Index n` | 在工作表上建原生图表（480x300pt，锚在指定格）；建后**必须 render 该区域目检**再保存 |
+| `render` | `-Doc [-Sheet] [-Range] -Out <目录> [-Width 1100]` **`[-IncludeCharts]`** | 区域 `CopyPicture` → PNG（表格没有分页概念，核对用区域图）。**v1.16 起 `-IncludeCharts`：把该表所有浮动图表按真实坐标合成进同一张图**（自动把视图扩到覆盖全部图表，返回 `chartsIncluded` 与每张图的 `left/top`）——**有图表的表就用这一条核对，不要再截桌面**；不带该开关时图里没有浮动图表（`CopyPicture` 本来就不含） |
+| `chart` | 加：`-Range 数据区 [-Type column\|bar\|line\|pie\|scatter\|area] [-Title] [-Anchor E2]`；`-Action list`；`-Action delete -Index n` | 在工作表上建原生图表（480x300pt，锚在指定格）；**只建 1 个系列**（第一列=x，最后一列=值，多系列要拆成多张图），数据**必须同表**；建后 `render -IncludeCharts` 目检再保存 |
 | `autofit` | `-Doc [-Sheet] [-Range]` | 列宽行高自适应 |
 | `format` | `-Doc -Range A1:D1 [-Sheet] + 格式项` | 字体/字号/加粗/颜色/填充/对齐/数字格式/列宽/行高/框线/换行 |
 | `snapshot` | `-Doc [-Sheet 名1,名2] [-Out <路径>]` | 存工作表的值+公式快照（默认全部表；大表用 `-Sheet` 限定范围，diff/restore 也只在该范围内比对/回滚，不碰未覆盖的表；默认存 %LOCALAPPDATA%，`-Out` 随文档带走） |
@@ -285,6 +288,26 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**不写单元格、不落盘**。`open` 自动打标签，`finish`/`close` 自动还原；表格的 `Application.StatusBar` 可读写且实测会显示这行字，`-Clear` 时写 `false` 把状态栏交还 WPS。`-Tray` 加常驻托盘图标（悬停看进度、右键还原） |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
+
+### Excel 侧已知限制（v1.16 实测，先读再动手）
+
+| 限制 | 实测表现 | 正确做法 |
+|---|---|---|
+| `chart` 只建**单系列** | `ChartCmd` 取「第一列=分类、**最后一列**=数值」，只 `NewSeries()` 一次；给 `-Range A1:C11` 也不会变成两条线 | 多系列对比**拆成多张单系列图**（对比两个 m 值 → 一张 2 根柱的柱状图，或两张曲线图）；别指望一个 range 出多条线 |
+| `chart` 数据**必须同表** | `dynamic data = ws.Range(dataRef)` 不走跨表解析，`"其他表!A1:B9"` 不可靠 | 辅助数据放在**同一工作表**（例如右侧 AG:AQ，字号 8 弱化并标注"勿删"） |
+| `chart` 尺寸**写死 480×300pt** | `ChartObjects().Add(left, top, 480, 300)`，没有尺寸参数 | 需要更大就接受默认，或改列宽/锚点来挪位置；不要试图用 `-Anchor` 调大小 |
+| `render` 不带 `-IncludeCharts` **不含浮动图表** | `Range.CopyPicture` 只渲染单元格，图表对象不在图里（v1.16 实测：5 张图一张都不出现） | 有图表的表一律 `render -IncludeCharts`；它按真实坐标把图表合成进同一张图 |
+| `format -Borders` 只认 `grid` / `thick` / `none` | 其他值会静默当 `grid`；**v1.16 起对角线（XlBordersIndex 5/6）恒被清空**，不会再把表格画成大 X（v1.15 及更早有此 BUG） | 表格框线用 `-Borders grid`（细）/`thick`（粗）/`none`（清） |
+| `render` 的宽度上限 | `-Width` 低于 100 不缩放；超大区域会自动把基准图压到 3000 px 再合成 | 想看全貌用 `-Width 1200~1600`，别一次要 4000 |
+
+### 视觉核对纪律（省步数，也是 v1.16 的由来）
+
+2026-11-01 一次「新建 Excel + 讲宽顶堰公式」的会话跑了 80 步 / 53.7 min，其中约 24 步（30%）耗在**截图 → 裁剪 → 放大 → 再看**上，还有一批 `SetForegroundWindow`/`mouse_event` 抢窗口的 P/Invoke。归因是当时的 `render` 不含图表，只能整屏截图。现在按下面做：
+
+1. **有图表的表：一条 `render -IncludeCharts` 就够**，它同时给出单元格与全部图表；**不要**再截桌面、不要滚轮翻页、不要用 Win32 API 抢前台。
+2. **目检最多 2~3 次**：写完内容看一次、改完版式看一次、交付前看一次。**不要**每改一处就重截一次。
+3. 需要看细节时用 **`-Range` 框小区域 + `-Width` 放大**，不要截 1920×1080 整桌面——整屏截图会让后续每一步都变慢（图像累积进上下文，实测每步从 27 s 涨到 40~80 s）。
+4. 没有图表的表：`render -Range` 直接出区域图，比截图清晰且不含桌面噪音。
 
 ### `write` 的 items 格式
 

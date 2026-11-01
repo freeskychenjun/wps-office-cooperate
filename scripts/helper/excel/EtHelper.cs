@@ -396,6 +396,7 @@ internal static class Program
             case "doctor": return Doctor(a);
             case "status": return Status(a);
             case "open": return OpenBook(a);
+            case "new": return NewBook(a);
             case "read": return ReadBook(a);
             case "search": return SearchBook(a);
             case "selection": return SelectionBook(a);
@@ -418,7 +419,7 @@ internal static class Program
             case "quit": return QuitAll(a);
             case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|write|fill|rows|cols|sheet|comment|render|chart|autofit|format|snapshot|diff|restore|calc|save|close|quit|finish|hint");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|new|read|search|selection|write|fill|rows|cols|sheet|comment|render|chart|autofit|format|snapshot|diff|restore|calc|save|close|quit|finish|hint");
         }
     }
 
@@ -822,6 +823,59 @@ internal static class Program
             info["multiInstanceWarning"] = "ET \u8fd0\u884c\u4e2d\u6709 " + etBefore
                 + " \u4e2a\u8fdb\u7a0b\uff0c\u4f46\u672c skill \u80fd\u63a5\u5230\u7684\u5b9e\u4f8b\u91cc\u6ca1\u6709\u8fd9\u4efd\u5de5\u4f5c\u7c3f\uff1a\u5b83\u53ef\u80fd\u6b63\u5f00\u5728\u53e6\u4e00\u4e2a\u5b9e\u4f8b\u91cc\uff0c\u7ee7\u7eed\u5199\u5165\u4f1a\u4e92\u76f8\u8986\u76d6\u3002";
         }
+        return info;
+    }
+
+    // SaveAs file-format constant for a path. 51 = xlOpenXMLWorkbook (.xlsx).
+    private static int WorkbookFormatFor(string path)
+    {
+        int format = 51;
+        string low = path.ToLowerInvariant();
+        if (low.EndsWith(".xls", StringComparison.Ordinal)) format = 56;
+        else if (low.EndsWith(".csv", StringComparison.Ordinal)) format = 6;
+        else if (low.EndsWith(".xlsm", StringComparison.Ordinal)) format = 52;
+        return format;
+    }
+
+    // Create a brand-new workbook and save it to -Doc. Before v1.16 the only way to get an
+    // empty workbook was open, which refuses paths that do not exist yet, so agents had to
+    // hand-roll an openpyxl script and then re-open it (observed 2026-11-01: 22 steps for
+    // "create a blank xlsx and open it"). Overwrite deletes the target first: a SaveAs onto an
+    // existing path can raise an interactive "already exists" dialog that hangs the helper.
+    private static object NewBook(Bag a)
+    {
+        string full = FullPathOf(a.Need("doc"));
+        bool show = a.Flag("show", true);
+        bool overwrite = a.Flag("overwrite", false);
+        if (File.Exists(full))
+        {
+            if (!overwrite)
+                throw new Fail("EXISTS", "The file already exists: " + full + ". Pass -Overwrite to replace it, or use open to keep it.");
+            // Replacing a workbook that is currently open in WPS cannot work: Windows locks the
+            // file, and even if the delete succeeded the open copy would save over the new one.
+            if (FindOpen(full) != null)
+                throw new Fail("IN_USE", "The workbook is open in WPS: " + full + ". Close it first (close -Doc) or create a different file.");
+            try { File.Delete(full); }
+            catch (Exception e) { throw new Fail("IN_USE", "cannot replace the existing file (is it open elsewhere?): " + Clean(e.Message)); }
+        }
+        string dir = Path.GetDirectoryName(full);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        dynamic app = App(true, show);
+        dynamic wb;
+        try { wb = app.Workbooks.Add(); }
+        catch (Exception e) { throw new Fail("COM_ERROR", "Workbooks.Add failed: " + Clean(e.Message)); }
+        try { wb.SaveAs(full, WorkbookFormatFor(full)); }
+        catch (Exception e)
+        {
+            try { wb.Close(false); } catch (Exception) { }
+            throw new Fail("COM_ERROR", "SaveAs failed for " + full + ": " + Clean(e.Message));
+        }
+        MarkerSet(full);
+        Dictionary<string, object> info = BookInfo(wb);
+        info["how"] = "created";
+        info["note"] = "brand-new workbook saved to disk; write to it like any opened workbook";
+        if (!a.Flag("noHint", false)) info["hint"] = HintOnTakeover(wb, a);
         return info;
     }
 
@@ -1600,9 +1654,19 @@ internal static class Program
 
     private static bool TryRender(dynamic ws, string address, string pngPath)
     {
+        try { return TryRenderRange(ws.Range(address), pngPath); }
+        catch (Exception) { return false; }
+    }
+
+    // CopyPicture one Range into a PNG. CopyPicture renders CELLS ONLY: floating chart objects
+    // are not part of the range picture (verified 2026-11-01 on a sheet with five charts), which
+    // is why render -IncludeCharts composites the chart images on top instead of trusting the
+    // range copy. The helper writes the file itself (System.Drawing), so the PNG stays plaintext
+    // even on machines where WPS-written files come out encrypted.
+    private static bool TryRenderRange(dynamic range, string pngPath)
+    {
         try
         {
-            dynamic range = ws.Range(address);
             range.CopyPicture(1, 2); // xlScreen, xlBitmap
             if (!Clipboard.ContainsImage()) return false;
             using (Image img = Clipboard.GetImage())
@@ -1616,28 +1680,238 @@ internal static class Program
         catch (Exception) { return false; }
     }
 
+    // Capture one floating chart as an owned Bitmap (CopyPicture -> clipboard -> copy).
+    // Chart.Export is avoided on purpose: WPS writes that file through its own writer and on
+    // this machine the transparent-encryption driver turns it into unreadable ciphertext - the
+    // same failure that made the PPT side use Slide.Copy instead of Slide.Export.
+    private static Image CaptureChartImage(dynamic co)
+    {
+        try
+        {
+            co.CopyPicture(1, 2); // xlScreen, xlBitmap
+            if (Clipboard.ContainsImage())
+            {
+                using (Image src = Clipboard.GetImage())
+                {
+                    if (src != null)
+                    {
+                        Bitmap owned = new Bitmap(src);
+                        Clipboard.Clear();
+                        return owned;
+                    }
+                }
+            }
+            Clipboard.Clear();
+        }
+        catch (Exception) { }
+        try
+        {
+            dynamic chart = co.Chart;
+            chart.CopyPicture(1, 2);
+            if (Clipboard.ContainsImage())
+            {
+                using (Image src2 = Clipboard.GetImage())
+                {
+                    if (src2 != null)
+                    {
+                        Bitmap owned2 = new Bitmap(src2);
+                        Clipboard.Clear();
+                        return owned2;
+                    }
+                }
+            }
+            Clipboard.Clear();
+        }
+        catch (Exception) { }
+        return null;
+    }
+
+    // Draw the picked chart images on top of a rendered cell range, in sheet-point space.
+    // Geometry is self-calibrated: pxPerPt comes from the rendered bitmap width divided by the
+    // range width in points, so it works at any zoom / DPI without reading the window.
+    private static int CompositeCharts(string sourcePng, string outPng, dynamic baseRange, List<dynamic> picked, List<object> info)
+    {
+        if (picked.Count == 0) return 0;
+        double boxW = (double)baseRange.Width;
+        double boxH = (double)baseRange.Height;
+        if (boxW <= 0 || boxH <= 0) return 0;
+        int capWidth = 3000;
+        int drawn = 0;
+        using (Image baseImg = Image.FromFile(sourcePng))
+        {
+            int bw = baseImg.Width, bh = baseImg.Height;
+            double pxPerPt = (double)bw / boxW;
+            Bitmap canvas;
+            if (bw > capWidth)
+            {
+                int nh = (int)Math.Round((double)bh * capWidth / bw);
+                if (nh < 1) nh = 1;
+                canvas = new Bitmap(capWidth, nh);
+                using (Graphics g0 = Graphics.FromImage(canvas))
+                using (Bitmap small = new Bitmap(baseImg, capWidth, nh))
+                {
+                    g0.DrawImageUnscaled(small, 0, 0);
+                }
+                pxPerPt = (double)capWidth / boxW;
+            }
+            else
+            {
+                canvas = new Bitmap(bw, bh);
+                using (Graphics g1 = Graphics.FromImage(canvas))
+                {
+                    g1.DrawImageUnscaled(baseImg, 0, 0);
+                }
+            }
+            double originLeft = (double)baseRange.Left;
+            double originTop = (double)baseRange.Top;
+            using (Graphics g = Graphics.FromImage(canvas))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                for (int k = 0; k < picked.Count; k++)
+                {
+                    dynamic co = picked[k];
+                    double cl, ct, cw, chh;
+                    try
+                    {
+                        cl = (double)co.Left; ct = (double)co.Top;
+                        cw = (double)co.Width; chh = (double)co.Height;
+                    }
+                    catch (Exception) { continue; }
+                    int dx = (int)Math.Round((cl - originLeft) * pxPerPt);
+                    int dy = (int)Math.Round((ct - originTop) * pxPerPt);
+                    int dw = (int)Math.Round(cw * pxPerPt);
+                    int dh = (int)Math.Round(chh * pxPerPt);
+                    if (dw < 1 || dh < 1) continue;
+                    using (Image ci = CaptureChartImage(co))
+                    {
+                        if (ci == null) continue;
+                        g.DrawImage(ci, new Rectangle(dx, dy, dw, dh));
+                    }
+                    drawn++;
+                    Dictionary<string, object> one = new Dictionary<string, object>();
+                    one["index"] = k + 1;
+                    one["name"] = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
+                    one["title"] = Convert.ToString(TryGet(() => (object)co.Chart.ChartTitle.Text, ""), CultureInfo.InvariantCulture);
+                    one["left"] = Math.Round(cl, 1);
+                    one["top"] = Math.Round(ct, 1);
+                    info.Add(one);
+                }
+            }
+            canvas.Save(outPng, ImageFormat.Png);
+            canvas.Dispose();
+        }
+        return drawn;
+    }
+
     private static object RenderBook(Bag a)
     {
         dynamic wb = RequireBook(a, true);
         dynamic ws = TargetSheet(wb, a);
         if (ws == null) throw new Fail("COM_ERROR", "No target sheet.");
-        string address = a.Str("range", null);
-        if (address == null || address.Length == 0)
-            address = Convert.ToString(TryGet(() => (object)ws.UsedRange.Address[false, false], "A1"), CultureInfo.InvariantCulture);
+        bool withCharts = a.Flag("includeCharts", false);
+        string requested = a.Str("range", null);
+        if (requested == null || requested.Length == 0)
+            requested = Convert.ToString(TryGet(() => (object)ws.UsedRange.Address[false, false], "A1"), CultureInfo.InvariantCulture);
 
         string outDir = a.Need("out");
         Directory.CreateDirectory(outDir);
         string sheetName = Convert.ToString(TryGet(() => (object)ws.Name, "Sheet"), CultureInfo.InvariantCulture);
         string safe = new string(sheetName.Where(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_').ToArray());
         if (safe.Length == 0) safe = "sheet";
-        string png = Path.Combine(outDir, safe + "-" + address.Replace(":", "_").Replace("!", "_") + ".png");
 
-        if (!TryRender(ws, address, png))
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        List<object> chartInfo = new List<object>();
+        List<dynamic> picked = new List<dynamic>();
+        int chartsIncluded = 0;
+        string address = requested;
+        dynamic baseRange = null;
+        bool needBase = false;
+
+        if (withCharts)
+        {
+            // -IncludeCharts: grow the view to cover the requested range plus EVERY floating
+            // chart on this sheet (not only the overlapping ones - the common layout is a table
+            // in A..D with the charts parked in J onward, which CopyPicture never renders).
+            dynamic range = ws.Range(requested);
+            double x1 = (double)range.Left, y1 = (double)range.Top;
+            double x2 = x1 + (double)range.Width, y2 = y1 + (double)range.Height;
+            int tlRow = (int)range.Cells[1, 1].Row, tlCol = (int)range.Cells[1, 1].Column;
+            dynamic brc0 = range.Cells[(int)range.Rows.Count, (int)range.Columns.Count];
+            int brRow = (int)brc0.Row, brCol = (int)brc0.Column;
+            int n = 0;
+            try { n = (int)ws.ChartObjects().Count; } catch (Exception) { }
+            for (int k = 1; k <= n; k++)
+            {
+                dynamic co = null;
+                try { co = ws.ChartObjects().Item(k); } catch (Exception) { continue; }
+                double cl, ct, cw, chh;
+                try
+                {
+                    cl = (double)co.Left; ct = (double)co.Top;
+                    cw = (double)co.Width; chh = (double)co.Height;
+                }
+                catch (Exception) { continue; }
+                picked.Add(co);
+                if (cl < x1) x1 = cl;
+                if (ct < y1) y1 = ct;
+                if (cl + cw > x2) x2 = cl + cw;
+                if (ct + chh > y2) y2 = ct + chh;
+                try
+                {
+                    dynamic tlc = co.TopLeftCell;
+                    if ((int)tlc.Row < tlRow) tlRow = (int)tlc.Row;
+                    if ((int)tlc.Column < tlCol) tlCol = (int)tlc.Column;
+                    dynamic brc = co.BottomRightCell;
+                    if ((int)brc.Row > brRow) brRow = (int)brc.Row;
+                    if ((int)brc.Column > brCol) brCol = (int)brc.Column;
+                }
+                catch (Exception) { }
+            }
+            baseRange = ws.Range(ws.Cells[tlRow, tlCol], ws.Cells[brRow, brCol]);
+            address = Convert.ToString(baseRange.Address[false, false], CultureInfo.InvariantCulture);
+            needBase = true;
+            if (picked.Count == 0)
+                r["note"] = "no floating charts on this sheet; the plain range image already shows everything";
+        }
+
+        string png = Path.Combine(outDir, safe + "-" + address.Replace(":", "_").Replace("!", "_") + ".png");
+        bool ok;
+        if (needBase)
+        {
+            // Render the cells to a scratch file: the composite must save over the final path,
+            // and GDI+ cannot write to a file that is still open for reading.
+            string scratch = png + ".cells.png";
+            try
+            {
+                ok = TryRenderRange(baseRange, scratch);
+                if (ok && picked.Count > 0)
+                {
+                    // The composite writes to the final path, so the cell render must live in a
+                    // separate file: GDI+ cannot save over an image it still has open.
+                    chartsIncluded = CompositeCharts(scratch, png, baseRange, picked, chartInfo);
+                }
+                else if (ok) File.Copy(scratch, png, true);
+            }
+            finally
+            {
+                try { File.Delete(scratch); } catch (Exception) { }
+            }
+        }
+        else ok = TryRender(ws, address, png);
+
+        if (!ok)
             throw new Fail("COM_ERROR", "CopyPicture produced no image (range " + address + "). The range may be empty, or WPS refused the copy.");
+
+        if (withCharts)
+        {
+            r["chartsIncluded"] = chartsIncluded;
+            if (chartInfo.Count > 0) r["charts"] = chartInfo;
+            if (chartsIncluded > 0)
+                r["hint"] = "this image is the cells plus every overlapping chart, so one look is enough - do not take a desktop screenshot to cross-check";
+        }
 
         // rescale to the requested width (dispose the source before touching its file)
         int wantWidth = a.Int("width", 1100);
-        Dictionary<string, object> r = new Dictionary<string, object>();
         int srcW = 0, srcH = 0;
         try { using (Image img = Image.FromFile(png)) { srcW = img.Width; srcH = img.Height; } }
         catch (Exception) { }
@@ -1661,6 +1935,7 @@ internal static class Program
         catch (Exception) { }
         r["sheet"] = sheetName;
         r["range"] = address;
+        if (withCharts && requested != address) r["requestedRange"] = requested;
         r["png"] = png;
         return r;
     }
@@ -1740,15 +2015,17 @@ internal static class Program
         if (a.Has("borders"))
         {
             string b = a.Str("borders", "").ToLowerInvariant();
-            int style = b == "none" ? -4142 : b == "thick" ? -4137 : 1; // xlContinuous
-            double weight = b == "none" ? 2 : b == "thick" ? -4137 : 2;
+            // XlBordersIndex 5 = xlDiagonalDown, 6 = xlDiagonalUp. Styling those together with the
+            // real edges (7..12) paints one huge X across the whole range instead of a grid
+            // (observed 2026-11-01 on a 4x9 table). Diagonals are always cleared, never drawn.
             for (int edge = 5; edge <= 12; edge++)
             {
                 try
                 {
                     dynamic bd = range.Borders.Item(edge);
+                    if (edge == 5 || edge == 6) { bd.LineStyle = -4142; continue; } // xlLineStyleNone
                     if (b == "none") { bd.LineStyle = -4142; }
-                    else { bd.LineStyle = 1; bd.Weight = b == "thick" ? 4 : 2; }
+                    else { bd.LineStyle = 1; bd.Weight = b == "thick" ? 4 : 2; } // xlContinuous
                 }
                 catch (Exception) { }
             }

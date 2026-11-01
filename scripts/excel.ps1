@@ -8,7 +8,7 @@
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'write', 'fill', 'rows', 'cols', 'sheet', 'comment', 'render', 'chart', 'autofit', 'format',
+    [ValidateSet('doctor', 'status', 'open', 'new', 'read', 'search', 'selection', 'write', 'fill', 'rows', 'cols', 'sheet', 'comment', 'render', 'chart', 'autofit', 'format',
                  'snapshot', 'diff', 'restore', 'calc', 'save', 'close', 'quit', 'finish', 'hint', 'serve')]
     [string]$Command,
 
@@ -58,6 +58,7 @@ param(
     # render options
     [string]$Out,
     [string]$Width,
+    [switch]$IncludeCharts,
     # misc
     [string]$Since,
     [string]$Cells,
@@ -65,6 +66,7 @@ param(
     [string]$As,
     [switch]$Show,
     [switch]$ReadOnly,
+    [switch]$Overwrite,
     [switch]$Save,
     # takeover hint (see hint command)
     [string]$HintTag,
@@ -263,6 +265,12 @@ switch ($Command) {
         $request['readOnly'] = [bool]$ReadOnly
         if ($NoHint) { $request['noHint'] = $true }
     }
+    'new' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'new needs -Doc <path of the workbook to create>' }
+        $request['show'] = [bool]$Show
+        if ($Overwrite) { $request['overwrite'] = $true }
+        if ($NoHint) { $request['noHint'] = $true }
+    }
     'read' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'read needs -Doc' }
         if ($Sheet) { $request['sheet'] = $Sheet }
@@ -325,6 +333,7 @@ switch ($Command) {
         if ($Range) { $request['range'] = $Range }
         $request['out'] = Resolve-FullPath $Out
         $request['width'] = if ($Width) { [int]$Width } else { 1100 }
+        if ($IncludeCharts) { $request['includeCharts'] = $true }
     }
     'autofit' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'autofit needs -Doc' }

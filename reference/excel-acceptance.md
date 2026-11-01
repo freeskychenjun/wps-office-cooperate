@@ -90,3 +90,20 @@
 
 - 验收：`tests/excel/check_tray.py` 7 条断言全过（托盘启动 + 进程存活 + 状态文件 + `finish` 报告 trayStopped + 进程 8 s 内退出 + 外部关闭工作簿后图标 8.6 s 自动消失）。
 - 坑：spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，任何读到 EOF 的调用方（python `subprocess.communicate`、PowerShell 管道）会被图标的 4 小时寿命卡死（实测复现）。
+
+## v1.16（2026-11-01）——`new` 新建工作簿 + `render -IncludeCharts` 合成图表
+
+环境同上（WPS 12.1.0.29161）。用例在 `D:\DSH工作区\.tmp-excel-test\` 的临时簿上跑，跑完清理。
+
+| # | 用例 | 结果 |
+|---|---|---|
+| 35 | `new -Doc render-test.xlsx`（目标不存在） | ✓ `how:"created"`，落盘 10 KB 空白簿并在 WPS 打开、打上「〔AI接管中〕」标记；`sheets` 返回 Sheet1 / usedRange A1 |
+| 36 | `new` 同一路径（不带 `-Overwrite`） | ✓ `EXISTS`，明确提示用 `-Overwrite` 或改用 `open` |
+| 37 | `new -Overwrite`（目标正开在 WPS 里） | ✓ `IN_USE`（新增码）：先 `FindOpen` 判占用，不会去删被锁文件 |
+| 38 | `write` 10 行数据 + `chart add -Type line -Range A1:B11 -Anchor D2` | ✓ 数据与公式落位，`seriesCount:1` |
+| 39 | `render -Range A1:B11 -Width 900`（对照，不带开关） | ✓ 900×1235，**图里没有图表**（复现 CopyPicture 不含浮动对象） |
+| 40 | `render -Range A1:B11 -Width 900 -IncludeCharts` | ✓ `chartsIncluded:1`，视图自动扩到 `A1:L24`，900×451：左侧表格 + 右侧图表按真实位置合成（目视核对：图表压在 B 列右侧、与工作表里一致） |
+| 41 | 无图表的空表 `render -IncludeCharts` | ✓ `chartsIncluded:0` + `note:"no floating charts on this sheet"`，尺寸与普通 render 相同 |
+| 42 | **实战回归**：桌面 `工作簿1.xlsx`（宽顶堰，5 张图，锚 J3…）`render -Range A1:H40 -IncludeCharts -Width 1400` | ✓ `chartsIncluded:5`，视图扩到 `A1:R113`，1400×1863 整版图，5 张图全部按真实坐标落位（目视核对通过）。**旧流程同一件事要 20+ 步截图/裁剪/滚轮翻页** |
+| 43 | 常驻 vs 一次性 A/B（`WOC_NO_DAEMON=1`）同一命令 | ✓ 返回 JSON 逐字节相同（新增命令未破坏 daemon 契约） |
+| 44 | `format -Borders grid` 对角线 BUG 回归 | ✓ 5/6 号边恒清空，多行范围不再出现贯穿对角 X（v1.15 及更早踩过） |
