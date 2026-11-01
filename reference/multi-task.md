@@ -97,7 +97,7 @@
 
 1. 校验 `expect`（与原文比对）、`anchor`、`para` 是否存在（表格段不在 read 里 → 报冲突）。
 2. 按 `para` 把多个任务的 op 合成一条：按 `priority` 顺序在原文上模拟执行，得到最终文本。
-3. 生成**单条** `replace`：取最小改动区间，并**自动扩展到在段内唯一**（`revise` 只替换首个命中，短 find 会打错位置）。
+3. 生成**单条** `replace`：取最小改动区间，并**自动扩展到在段内唯一**（`revise` 只替换首个命中，短 find 会打错位置）；规划给的 `find` 若本身段内歧义，也会自动向左右扩上下文（连同 `replace` 一起扩），扩不出来才报冲突。
 4. Guard：数字 token 多重集（默认必须不变）、相似度下限（`set_text` 大改需 `allowRewrite`）。
 
 输出 `merged.json`：`{stats, textOps(降序), tableOps, formatOps, comments, findings, conflicts}`。

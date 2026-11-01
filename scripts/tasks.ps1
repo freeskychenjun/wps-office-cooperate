@@ -102,6 +102,26 @@ function Get-Similarity([string]$a, [string]$b) {
 }
 
 # Smallest single-span replacement turning $before into $after: {find, replace}.
+# Disambiguate a planner-provided find: if it occurs more than once in $text, add context on the
+# left/right (taken verbatim from $text, and the same context added to $replace) until unique.
+function Expand-UniqueFind([string]$text, [string]$find, [string]$replace) {
+    if (-not $find) { return @{ find = $find; replace = $replace; ok = $false } }
+    $idx = $text.IndexOf($find, [System.StringComparison]::Ordinal)
+    if ($idx -lt 0) { return @{ find = $find; replace = $replace; ok = $false } }
+    $count = ($text.Length - $text.Replace($find, '').Length) / $find.Length
+    if ($count -le 1) { return @{ find = $find; replace = $replace; ok = $true } }
+    $max = [Math]::Min(16, [Math]::Max(6, $text.Length))
+    for ($k = 1; $k -le $max; $k++) {
+        $leftStart = [Math]::Max(0, $idx - $k)
+        $left = $text.Substring($leftStart, $idx - $leftStart)
+        $rightLen = [Math]::Min($k, $text.Length - ($idx + $find.Length))
+        $right = $text.Substring($idx + $find.Length, $rightLen)
+        $f2 = $left + $find + $right
+        $c2 = ($text.Length - $text.Replace($f2, '').Length) / $f2.Length
+        if ($c2 -eq 1) { return @{ find = $f2; replace = ($left + $replace + $right); ok = $true } }
+    }
+    return @{ find = $find; replace = $replace; ok = $false }
+}
 function Get-MinimalReplace([string]$before, [string]$after) {
     # Smallest single-span replacement that turns $before into $after, with enough context that
     # the text occurs exactly once in the paragraph (revise replaces the first hit only).
@@ -286,6 +306,22 @@ function Invoke-Merge {
             elseif ($kind -eq 'replace') {
                 $find = [string]$op.find
                 $repl = [string]$op.replace
+                if (-not $find) {
+                    [void]$conflicts.Add("paragraph ${para}: task $($c.task) has an empty find")
+                    $ok = $false
+                    break
+                }
+                $hits = ($cur.Length - $cur.Replace($find, '').Length) / $find.Length
+                if ($hits -gt 1) {
+                    $fixedSpan = Expand-UniqueFind $cur $find $repl
+                    if (-not $fixedSpan.ok) {
+                        [void]$conflicts.Add("paragraph ${para}: task $($c.task) find='" + $find + "' is ambiguous (" + $hits + " hits) and cannot be disambiguated by context")
+                        $ok = $false
+                        break
+                    }
+                    $find = $fixedSpan.find
+                    $repl = $fixedSpan.replace
+                }
                 $idx = $cur.IndexOf($find, [System.StringComparison]::Ordinal)
                 if ($idx -lt 0) {
                     [void]$conflicts.Add("paragraph ${para}: task $($c.task) find='" + $find + "' is no longer present after another task's edit")
