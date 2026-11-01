@@ -101,9 +101,24 @@
 | 36 | `new` 同一路径（不带 `-Overwrite`） | ✓ `EXISTS`，明确提示用 `-Overwrite` 或改用 `open` |
 | 37 | `new -Overwrite`（目标正开在 WPS 里） | ✓ `IN_USE`（新增码）：先 `FindOpen` 判占用，不会去删被锁文件 |
 | 38 | `write` 10 行数据 + `chart add -Type line -Range A1:B11 -Anchor D2` | ✓ 数据与公式落位，`seriesCount:1` |
-| 39 | `render -Range A1:B11 -Width 900`（对照，不带开关） | ✓ 900×1235，**图里没有图表**（复现 CopyPicture 不含浮动对象） |
-| 40 | `render -Range A1:B11 -Width 900 -IncludeCharts` | ✓ `chartsIncluded:1`，视图自动扩到 `A1:L24`，900×451：左侧表格 + 右侧图表按真实位置合成（目视核对：图表压在 B 列右侧、与工作表里一致） |
+| 39 | `render -Range A1:B11 -Width 900`（对照，不带开关；图表锚在 D2，**在区域外**） | ✓ 900×1235，图里没有图表——区域外的图表本来就不在 CopyPicture 里（v1.17 更正了当时"CopyPicture 不含图表"的误判） |
+| 40 | `render -Range A1:B11 -Width 900 -IncludeCharts` | ✓ `chartsIncluded:1`，视图自动扩到 `A1:L24`，900×451：左侧表格 + 右侧图表（目视核对：图表压在 B 列右侧、与工作表里一致） |
 | 41 | 无图表的空表 `render -IncludeCharts` | ✓ `chartsIncluded:0` + `note:"no floating charts on this sheet"`，尺寸与普通 render 相同 |
-| 42 | **实战回归**：桌面 `工作簿1.xlsx`（宽顶堰，5 张图，锚 J3…）`render -Range A1:H40 -IncludeCharts -Width 1400` | ✓ `chartsIncluded:5`，视图扩到 `A1:R113`，1400×1863 整版图，5 张图全部按真实坐标落位（目视核对通过）。**旧流程同一件事要 20+ 步截图/裁剪/滚轮翻页** |
+| 42 | **实战回归**：桌面 `工作簿1.xlsx`（宽顶堰，5 张图，锚 J3…）`render -Range A1:H40 -IncludeCharts -Width 1400` | ✓ `chartsIncluded:5`，视图扩到 `A1:R113`，1400×1863 整版图，5 张图全部落位（目视核对通过）。**旧流程同一件事要 20+ 步截图/裁剪/滚轮翻页** |
 | 43 | 常驻 vs 一次性 A/B（`WOC_NO_DAEMON=1`）同一命令 | ✓ 返回 JSON 逐字节相同（新增命令未破坏 daemon 契约） |
 | 44 | `format -Borders grid` 对角线 BUG 回归 | ✓ 5/6 号边恒清空，多行范围不再出现贯穿对角 X（v1.15 及更早踩过） |
+
+## v1.17（2026-11-02）——按另一台机器反馈修 P0/P1（WPS 12.0.29161，1536×864 / 125%）
+
+| # | 用例 | 结果 |
+|---|---|---|
+| 45 | `chart -Sheet Sheet1`（活动表是 Sheet2） | ✓ v1.17 前：静默建到 Sheet2 且 `ok:true`（本地已复现）；v1.17：`result.sheet=Sheet1`，图表确实在 Sheet1 |
+| 46 | `chart -Action list -Sheet Sheet1` / `-All` | ✓ 前者只列该表；后者跨表列出并带 `sheet/index/name/type/title/left/top/width/height` |
+| 47 | `sheet -Action activate -Name Sheet1` | ✓ `activated:Sheet1`，`sheets[].active` 同步 |
+| 48 | `chart -Action move -Index 1 -Anchor A20 -Width 300 -Height 200` | ✓ 几何回读 `left:0 top:256.5 width:300 height:200`（WPS 之后会按内容微调宽度，属正常） |
+| 49 | 多系列：`-Range A1:D6`（H + b=2/4/6 三列） | ✓ `seriesCount:3`、`seriesNames:["b=2","b=4","b=6"]`，图例自动出现；`-XTitle "H (m)" -YTitle "Q (m3/s)"` 轴标题落位（渲染目检通过） |
+| 50 | `format -Range "A1:D1;A2:A6" -Bold -FillColor ... -Borders grid` | ✓ 一条命令两个区域，返回 `ranges:[{range,applied},...] count:2` |
+| 51 | `woc.ps1 excel fill -Formula "=A2^1.5"` / `"=1+1"` | ✓ 两条都成功（`topAfter` 正确）；对照 `woc.cmd` 两条都 `BAD_ARGS`（本地复现反馈 §3） |
+| 52 | 参数消费校验：`chart -Action list -Formula "=1"` | ✓ stderr 打 `WARN ignored parameter -Formula for command "chart"`，stdout JSON 不受影响 |
+| 53 | `render -IncludeCharts` 语义回归（v1.16 的合成改成扩视图） | ✓ 控制组 `render A1:H10`（不重叠图表）→ 无图；`A1:H52`（重叠 2 张）→ 2 张都在；`-IncludeCharts` 从 A1:H10 扩到 A1:I52 → `chartsIncluded:2`，**每张图只出现一次**（v1.16 的合成会重复画） |
+| 54 | 常驻 vs 一次性 A/B（新增命令） | ✓ 返回 JSON 逐字节相同 |

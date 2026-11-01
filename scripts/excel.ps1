@@ -1,4 +1,4 @@
-﻿# wps-office-cooperate (excel): thin wrapper around EtHelper.exe.
+# wps-office-cooperate (excel): thin wrapper around EtHelper.exe.
 # Pure ASCII source (Chinese only ever travels inside JSON files, never in this script).
 #
 #   excel.ps1 <command> [-Doc <path>] [options]
@@ -38,6 +38,9 @@ param(
     [string]$Type,
     [string]$Title,
     [string]$Anchor,
+    [string]$XTitle,
+    [string]$YTitle,
+    [int]$Height = 0,
     [string]$Note,
     [int]$Max = 200,
     # format options
@@ -46,6 +49,13 @@ param(
     [switch]$Bold,
     [switch]$Italic,
     [switch]$Underline,
+    # Explicit "turn it off" switches: "-Bold:$false" does not survive `powershell -File` argument
+    # parsing (the value arrives as the string "False"), so turning a format flag OFF needs its
+    # own switch (reported 2026-11-01: there was no way to reset a cell back to regular).
+    [switch]$NoBold,
+    [switch]$NoItalic,
+    [switch]$NoUnderline,
+    [switch]$NoWrap,
     [string]$Color,
     [string]$FillColor,
     [string]$HAlign,
@@ -247,16 +257,31 @@ switch ($Command) {
     'chart' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'chart needs -Doc' }
         $request['action'] = if ($Action) { $Action.ToLowerInvariant() } else { 'add' }
+        # v1.16: -Sheet was silently dropped here, so the chart always landed on the ActiveSheet
+        # and list/delete could not find it again (reported 2026-11-01). Forward it for every action.
+        if ($Sheet) { $request['sheet'] = $Sheet }
         if ($request['action'] -eq 'add') {
             if (-not $Range) { Write-Error-Json 'BAD_ARGS' 'chart add needs -Range <data range>' }
             $request['range'] = $Range
             if ($Type) { $request['type'] = $Type }
             if ($Title) { $request['title'] = $Title }
             if ($Anchor) { $request['anchor'] = $Anchor }
+            if ($Width) { $request['width'] = [int]$Width }
+            if ($Height) { $request['height'] = [int]$Height }
+            if ($XTitle) { $request['xtitle'] = $XTitle }
+            if ($YTitle) { $request['ytitle'] = $YTitle }
         }
-        elseif ($request['action'] -eq 'delete') {
-            if ($Index -lt 1) { Write-Error-Json 'BAD_ARGS' 'chart delete needs -Index <n> (see chart -Action list)' }
+        elseif ($request['action'] -eq 'list') {
+            if ($All) { $request['all'] = $true }
+        }
+        elseif ($request['action'] -eq 'delete' -or $request['action'] -eq 'move') {
+            if ($Index -lt 1) { Write-Error-Json 'BAD_ARGS' ('chart ' + $request['action'] + ' needs -Index <n> (see chart -Action list)') }
             $request['index'] = $Index
+            if ($request['action'] -eq 'move') {
+                if ($Anchor) { $request['anchor'] = $Anchor }
+                if ($Width) { $request['width'] = [int]$Width }
+                if ($Height) { $request['height'] = [int]$Height }
+            }
         }
     }
     'open' {
@@ -346,6 +371,10 @@ switch ($Command) {
         $request['range'] = $Range
         if ($Sheet) { $request['sheet'] = $Sheet }
         Add-Format-Fields $PSBoundParameters
+        if ($NoBold) { $request['bold'] = $false }
+        if ($NoItalic) { $request['italic'] = $false }
+        if ($NoUnderline) { $request['underline'] = $false }
+        if ($NoWrap) { $request['wrap'] = $false }
     }
     'snapshot' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'snapshot needs -Doc' }
@@ -419,8 +448,37 @@ switch ($Command) {
     }
 }
 
-$json = $request | ConvertTo-Json -Depth 12 -Compress
+# ---------------------------------------------------------------- parameter consumption check (v1.16)
+# Silent parameter drops are the worst failure mode this wrapper has had: -Sheet bound fine in
+# PowerShell, was never forwarded, and chart landed on the ActiveSheet while returning ok:true
+# (reported 2026-11-01, cost ~6 min of diagnosis). Any bound parameter that this command did not
+# put into the request now warns on stderr instead of vanishing.
+$paramKeyMap = @{
+    Doc = 'doc'; Sheet = 'sheet'; Range = 'range'; Profile = 'profile'; Items = 'items'
+    Cell = 'cell'; Value = 'value'; Formula = 'formula'; Expect = 'expect'; Action = 'action'
+    Name = 'name'; NewName = 'newName'; Text = 'text'; TextFile = 'text'; Index = 'index'
+    All = 'all'; Case = 'case'; Toast = 'toast'; Sound = 'sound'; Quiet = 'quiet'; Force = 'force'
+    Count = 'count'; Type = 'type'; Title = 'title'; Anchor = 'anchor'; XTitle = 'xtitle'
+    YTitle = 'ytitle'; Height = 'height'; Note = 'note'; Max = 'max'; Font = 'font'; Size = 'size'
+    Bold = 'bold'; Italic = 'italic'; Underline = 'underline'; Color = 'color'; FillColor = 'fillColor'
+    NoBold = 'bold'; NoItalic = 'italic'; NoUnderline = 'underline'; NoWrap = 'wrap'
+    HAlign = 'halign'; VAlign = 'valign'; NumberFormat = 'numberFormat'; ColWidth = 'colWidth'
+    RowHeight = 'rowHeight'; Borders = 'borders'; Wrap = 'wrap'; Out = 'out'; Width = 'width'
+    IncludeCharts = 'includeCharts'; Since = 'since'; Cells = 'cells'; KeepExtras = 'keepExtras'
+    As = 'as'; Show = 'show'; ReadOnly = 'readOnly'; Overwrite = 'overwrite'; Save = 'save'
+    HintTag = 'tag'; Bar = 'bar'; NoHint = 'noHint'; Clear = 'clear'; Tray = 'tray'
+}
+foreach ($boundName in @($PSBoundParameters.Keys)) {
+    if ($boundName -eq 'Command' -or $boundName -eq 'TimeoutSec' -or $boundName -eq 'Delete') { continue }
+    if (-not $paramKeyMap.ContainsKey($boundName)) { continue }
+    if ($request.ContainsKey($paramKeyMap[$boundName])) { continue }
+    # Legitimate "accepted but not forwarded" cases: write builds a nested item, so its cell /
+    # value / formula / expect / sheet never appear at the top level of the request.
+    if ($Command -eq 'write' -and (@('Cell', 'Value', 'Formula', 'Expect', 'Sheet') -contains $boundName)) { continue }
+    [Console]::Error.WriteLine('WARN ignored parameter -' + $boundName + ' for command "' + $Command + '": this command does not forward it')
+}
 
+$json = $request | ConvertTo-Json -Depth 12 -Compress
 if ($Command -ne 'serve' -and $env:WOC_NO_DAEMON -ne '1') {
     $daemonText = Invoke-Daemon $json 900
     if ($null -ne $daemonText) {

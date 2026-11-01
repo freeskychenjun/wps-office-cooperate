@@ -41,3 +41,15 @@
 | 图表合成要避开"文件占用" | `Image.FromFile(scratch)` 还开着时往同一路径 `Save` 会报 GDI+ 一般性错误 | 单元格基准图先写临时文件，合成结果写最终路径，最后删临时文件 |
 | `Workbooks.Add()` + `SaveAs` 造新簿可行 | `new` 落盘后立即 `saved:true`，后续 write/chart/render 全部正常 | 新簿走 `new`；`open` 对不存在的路径报 `NOT_OPEN`（不会替你新建） |
 | `SaveAs` 到已存在且**正打开**的路径会失败 | 文件被 WPS 锁住，`File.Delete` 报"正由另一进程使用" | `new -Overwrite` 先 `FindOpen` 判占用，占用时报 `IN_USE`，让调用方先 `close` |
+
+## v1.17 补充（2026-11-02，来自另一台机器的实战反馈）
+
+| 现象 | 实测表现 | 正确写法 |
+|---|---|---|
+| `wb.ActiveSheet` **不可靠** | 同一分钟内 `open` 报 Sheet2 active、下一条命令看到 Sheet1；窗口显示与 `ActiveSheet` 也会不一致（反馈方 3 表工作簿实测）。它是 `chart`/`render`/`write` 无 `-Sheet` 时的兜底目标 | v1.17 起统一走 **`wb.Windows(1).ActiveSheet`**，取不到才退回 `wb.ActiveSheet`；要确定性就永远显式带 `-Sheet` |
+| 包装层**静默丢弃参数** | v1.16 及更早：`chart` 分支没转发 `$Sheet`，图表永远建到 ActiveSheet，还返回 `ok:true`；`chart list/delete` 同样绑 ActiveSheet ⇒ 落错表后无法自救（反馈方为此耗 ~6 min，最后用裸 COM 删图） | v1.17：chart 全部 action 转发 `-Sheet`；新增 `chart -Action list -All` 跨表扫描；并对所有命令做**参数消费校验**（stderr `WARN ignored parameter ...`） |
+| cmd.exe 层**改写参数** | `woc.cmd excel fill -Formula "=A15^1.5"` → 子进程收到 `A151.5`；`"=1+1"` → `1+1`。`^` 是 cmd 转义符，以 `=` 开头的裸 token 也会丢 `=`。**batch 内部无法修复**（拿到时已坏） | 用 **`scripts\woc.ps1`**（PowerShell→PowerShell，不经 cmd 解析）；或直接 `powershell -Mta -File excel.ps1`；公式内容走 `-Items` JSON |
+| PowerShell **双引号插值**吃 `$` | `-Formula "=$B$5*2*SQRT(2*$B$6)*B15"` 里 `$B`/`$6` 被当变量 → `=*5*2*SQRT(2**6)*B15`，WPS 报 `0x8FE3000B`（不是语法错，是 HRESULT，很难看出） | 含 `$` 的公式用**单引号** `-Formula '=$B$5*...'` |
+| `chart` 建完**无法移动/缩放**（v1.16 及更早） | 尺寸写死 `Add(left, top, 480, 300)`；125% 缩放下 480 pt ≈ 800 px，放在右侧会被窗口裁掉，只能删了重建（反馈方重建 2 轮 4 张图） | v1.17：`-Width/-Height` + `-Action move -Index n [-Anchor X] [-Width] [-Height]`；实操建议图表默认放内容下方，别放右侧 |
+| `chart` **只能单系列**（v1.16 及更早） | 取「第一列=x、最后一列=值」，`-Range A14:E25` 只画一列 | v1.17：第 2..N 列各一条系列（表头作系列名、多系列自动出图例），并支持 `-XTitle/-YTitle` |
+| 没有「激活工作表」原语（v1.16 及更早） | `sheet` 只有 list/add/rename/delete，agent 只能裸 COM `Worksheets.Item(n).Activate()`（违反铁律 0） | v1.17：`sheet -Action activate -Name X` |

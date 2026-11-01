@@ -24,6 +24,7 @@ $includes = @(
     'reference\excel-acceptance.md',
     'scripts\office.ps1',
     'scripts\woc.cmd',
+    'scripts\woc.ps1',
     'scripts\word.ps1',
     'scripts\excel.ps1',
     'scripts\ppt.ps1'

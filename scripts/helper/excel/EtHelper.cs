@@ -602,7 +602,7 @@ internal static class Program
         List<object> list = new List<object>();
         int n = 0;
         try { n = (int)wb.Worksheets.Count; } catch (Exception) { return list; }
-        dynamic active = TryGet(() => (object)wb.ActiveSheet, null);
+        dynamic active = ActiveSheetSafe(wb);
         string activeName = active == null ? "" : Convert.ToString(TryGet(() => (object)active.Name, ""), CultureInfo.InvariantCulture);
         for (int k = 1; k <= n; k++)
         {
@@ -653,10 +653,21 @@ internal static class Program
     }
 
     /// <summary>Resolve the sheet to work on: the -Sheet name, else the active sheet.</summary>
+    // wb.ActiveSheet is not trustworthy on WPS 12: it can disagree with the sheet the user is
+    // actually looking at, and it flaps between two consecutive commands (reported 2026-11-01 on
+    // a 3-sheet workbook: open said Sheet2 active, the next command saw Sheet1). The window's own
+    // ActiveSheet tracks what is on screen, so prefer it and fall back only if it is unavailable.
+    private static dynamic ActiveSheetSafe(dynamic wb)
+    {
+        dynamic ws = TryGet(() => (object)wb.Windows(1).ActiveSheet, null);
+        if (ws != null) return ws;
+        return TryGet(() => (object)wb.ActiveSheet, null);
+    }
+
     private static dynamic TargetSheet(dynamic wb, Bag a)
     {
         string name = a.Str("sheet", null);
-        return name == null ? (dynamic)TryGet(() => (object)wb.ActiveSheet, null) : SheetByName(wb, name);
+        return name == null ? (dynamic)ActiveSheetSafe(wb) : SheetByName(wb, name);
     }
 
     /// <summary>Split an optional "Sheet!A1:B3" reference into sheet name + plain address.</summary>
@@ -743,7 +754,7 @@ internal static class Program
             if (app == null) { probe["renderOk"] = false; probe["note"] = "no running instance to probe"; return probe; }
             dynamic wb = TryGet(() => (object)app.ActiveWorkbook, null);
             if (wb == null) { probe["renderOk"] = true; probe["note"] = "clipboard CopyPicture assumed available; verified when a workbook is open"; return probe; }
-            dynamic ws = TryGet(() => (object)wb.ActiveSheet, null);
+            dynamic ws = ActiveSheetSafe(wb);
             if (ws == null) { probe["renderOk"] = false; return probe; }
             string png = Path.Combine(Path.GetTempPath(), "et-render-probe.png");
             bool ok = TryRender(ws, "A1:A1", png);
@@ -897,7 +908,7 @@ internal static class Program
         if (sheetName == null && address == null)
             return r; // book overview: sheets are already in book.sheets
 
-        dynamic ws = sheetName == null ? (dynamic)TryGet(() => (object)wb.ActiveSheet, null) : SheetByName(wb, sheetName);
+        dynamic ws = sheetName == null ? (dynamic)ActiveSheetSafe(wb) : SheetByName(wb, sheetName);
         if (ws == null) throw new Fail("COM_ERROR", "No active sheet in this workbook.");
         dynamic range;
         if (address == null || address.Length == 0)
@@ -1204,6 +1215,29 @@ internal static class Program
         return Convert.ToString(t, CultureInfo.InvariantCulture);
     }
 
+    // Geometry of one ChartObject, in sheet points. Shared by chart list / move / add so the
+    // agent can see where a chart actually landed instead of guessing from a screenshot.
+    private static Dictionary<string, object> ChartGeometry(dynamic co)
+    {
+        Dictionary<string, object> g = new Dictionary<string, object>();
+        double l = 0, t = 0, w = 0, h = 0;
+        try { l = (double)co.Left; t = (double)co.Top; w = (double)co.Width; h = (double)co.Height; }
+        catch (Exception) { }
+        g["left"] = Math.Round(l, 1);
+        g["top"] = Math.Round(t, 1);
+        g["width"] = Math.Round(w, 1);
+        g["height"] = Math.Round(h, 1);
+        return g;
+    }
+
+    private static void ChartPlace(dynamic ws, dynamic co, string anchorRef)
+    {
+        if (anchorRef == null || co == null) return;
+        dynamic anchor = ws.Range(anchorRef.Split(':')[0]);
+        co.Left = (double)anchor.Left;
+        co.Top = (double)anchor.Top;
+    }
+
     private static object ChartCmd(Bag a)
     {
         dynamic wb = RequireBook(a, true);
@@ -1213,28 +1247,63 @@ internal static class Program
 
         if (action == "list")
         {
+            // -All scans every sheet: when a chart lands on the wrong sheet (the old wrapper
+            // dropped -Sheet, reported 2026-11-01) this is the one command that still finds it.
+            bool all = a.Flag("all", false);
             List<object> list = new List<object>();
-            int n = 0;
-            try { n = (int)ws.ChartObjects().Count; } catch (Exception) { }
-            for (int k = 1; k <= n; k++)
+            int sheetCount = 1;
+            if (all) { try { sheetCount = (int)wb.Worksheets.Count; } catch (Exception) { sheetCount = 1; } }
+            for (int s = 1; s <= sheetCount; s++)
             {
-                dynamic co = null;
-                try { co = ws.ChartObjects().Item(k); } catch (Exception) { continue; }
-                Dictionary<string, object> one = new Dictionary<string, object>();
-                one["index"] = k;
-                one["name"] = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
-                one["type"] = ChartTypeName(TryGet(() => (object)co.Chart.ChartType, null));
-                one["title"] = Convert.ToString(TryGet(() => (object)co.Chart.ChartTitle.Text, ""), CultureInfo.InvariantCulture);
-                list.Add(one);
+                dynamic one = ws;
+                if (all)
+                {
+                    try { one = wb.Worksheets.Item(s); } catch (Exception) { continue; }
+                }
+                string sheetName = Convert.ToString(TryGet(() => (object)one.Name, ""), CultureInfo.InvariantCulture);
+                int n = 0;
+                try { n = (int)one.ChartObjects().Count; } catch (Exception) { }
+                for (int k = 1; k <= n; k++)
+                {
+                    dynamic co = null;
+                    try { co = one.ChartObjects().Item(k); } catch (Exception) { continue; }
+                    Dictionary<string, object> e = new Dictionary<string, object>();
+                    e["sheet"] = sheetName;
+                    e["index"] = k;
+                    e["name"] = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
+                    e["type"] = ChartTypeName(TryGet(() => (object)co.Chart.ChartType, null));
+                    e["title"] = Convert.ToString(TryGet(() => (object)co.Chart.ChartTitle.Text, ""), CultureInfo.InvariantCulture);
+                    foreach (KeyValuePair<string, object> kv in ChartGeometry(co)) e[kv.Key] = kv.Value;
+                    list.Add(e);
+                }
             }
-            return new Dictionary<string, object> { { "sheet", Convert.ToString(TryGet(() => (object)ws.Name, ""), CultureInfo.InvariantCulture) }, { "charts", list }, { "count", list.Count } };
+            return new Dictionary<string, object> {
+                { "sheet", all ? "*" : Convert.ToString(TryGet(() => (object)ws.Name, ""), CultureInfo.InvariantCulture) },
+                { "charts", list }, { "count", list.Count } };
         }
         if (action == "delete")
         {
             int idx = a.Int("index", 0);
             if (idx < 1) throw new Fail("BAD_ARGS", "chart -Action delete needs -Index <n> (see chart -Action list)");
             ws.ChartObjects().Item(idx).Delete();
-            return new Dictionary<string, object> { { "deleted", idx } };
+            return new Dictionary<string, object> {
+                { "sheet", Convert.ToString(TryGet(() => (object)ws.Name, ""), CultureInfo.InvariantCulture) },
+                { "deleted", idx } };
+        }
+        if (action == "move")
+        {
+            int idx = a.Int("index", 0);
+            if (idx < 1) throw new Fail("BAD_ARGS", "chart -Action move needs -Index <n> (see chart -Action list)");
+            dynamic co = ws.ChartObjects().Item(idx);
+            ChartPlace(ws, co, a.Str("anchor", null));
+            if (a.Has("width")) { int w = a.Int("width", 0); if (w > 0) co.Width = (double)w; }
+            if (a.Has("height")) { int h = a.Int("height", 0); if (h > 0) co.Height = (double)h; }
+            Dictionary<string, object> r = new Dictionary<string, object>();
+            r["sheet"] = Convert.ToString(TryGet(() => (object)ws.Name, ""), CultureInfo.InvariantCulture);
+            r["index"] = idx;
+            r["moved"] = true;
+            foreach (KeyValuePair<string, object> kv in ChartGeometry(co)) r[kv.Key] = kv.Value;
+            return r;
         }
         if (action == "add")
         {
@@ -1243,43 +1312,56 @@ internal static class Program
             string type = a.Str("type", "line").ToLowerInvariant();
             int ct = ChartTypeOf(type);
             dynamic data = ws.Range(dataRef);
-            string anchorRef = a.Str("anchor", null);
             double left = 20, top = 20;
+            string anchorRef = a.Str("anchor", null);
             if (anchorRef != null)
             {
                 dynamic anchor = ws.Range(anchorRef.Split(':')[0]);
                 left = (double)anchor.Left; top = (double)anchor.Top;
             }
-            dynamic co = ws.ChartObjects().Add(left, top, 480, 300);
+            int boxW = a.Int("width", 480), boxH = a.Int("height", 300);
+            if (boxW < 100) boxW = 100;
+            if (boxH < 80) boxH = 80;
+            dynamic co = ws.ChartObjects().Add(left, top, (double)boxW, (double)boxH);
             dynamic chart = co.Chart;
             chart.ChartType = ct;
             // Explicit series instead of SetSourceData: on WPS ET a bare single-column
             // SetSourceData guesses the plot direction wrong and explodes into one
-            // series per ROW. Column 1 = x (optional), column 2 (or 1) = values, row 1 = header.
+            // series per ROW. Column 1 = x (optional), columns 2..N = one series each,
+            // row 1 = series names. v1.16: previously only the LAST column became a series,
+            // so a "Q-H family" table silently rendered as a single curve.
             int dataRows = (int)data.Rows.Count, dataCols = (int)data.Columns.Count;
-            dynamic valuesRange, xRange = null; string seriesName = "";
-            int vCol = dataCols >= 2 ? dataCols : 1; // values = LAST column (col 1 is the x/time axis)
-            string v1 = Convert.ToString(data.Cells[2, vCol].Address[false, false], CultureInfo.InvariantCulture);
-            string v2 = Convert.ToString(data.Cells[dataRows, vCol].Address[false, false], CultureInfo.InvariantCulture);
-            valuesRange = ws.Range(v1 + ":" + v2);
-            object h = TryGet(() => (object)data.Cells[1, vCol].Text, null);
-            seriesName = h == null ? "" : Convert.ToString(h, CultureInfo.InvariantCulture);
+            if (dataRows < 2) throw new Fail("BAD_ARGS", "chart -Range must include a header row and at least one data row");
+            dynamic xRange = null;
             if (dataCols >= 2)
             {
                 string x1 = Convert.ToString(data.Cells[2, 1].Address[false, false], CultureInfo.InvariantCulture);
                 string x2 = Convert.ToString(data.Cells[dataRows, 1].Address[false, false], CultureInfo.InvariantCulture);
                 xRange = ws.Range(x1 + ":" + x2);
             }
-            dynamic ser = chart.SeriesCollection().NewSeries();
-            ser.Values = valuesRange;
-            if (xRange != null) { try { ser.XValues = xRange; } catch (Exception) { } }
-            if (seriesName.Length > 0) { try { ser.Name = seriesName; } catch (Exception) { } }
-            try { chart.HasLegend = false; } catch (Exception) { }
+            int firstCol = dataCols >= 2 ? 2 : 1;
+            List<object> seriesNames = new List<object>();
+            for (int c = firstCol; c <= dataCols; c++)
+            {
+                string v1 = Convert.ToString(data.Cells[2, c].Address[false, false], CultureInfo.InvariantCulture);
+                string v2 = Convert.ToString(data.Cells[dataRows, c].Address[false, false], CultureInfo.InvariantCulture);
+                dynamic ser = chart.SeriesCollection().NewSeries();
+                ser.Values = ws.Range(v1 + ":" + v2);
+                if (xRange != null) { try { ser.XValues = xRange; } catch (Exception) { } }
+                object h = TryGet(() => (object)data.Cells[1, c].Text, null);
+                string sName = h == null ? "" : Convert.ToString(h, CultureInfo.InvariantCulture);
+                if (sName.Length > 0) { try { ser.Name = sName; } catch (Exception) { } }
+                seriesNames.Add(sName);
+            }
+            try { chart.HasLegend = seriesNames.Count > 1; } catch (Exception) { }
             string title = a.Str("title", null);
             if (title != null)
             {
                 try { chart.HasTitle = true; chart.ChartTitle.Text = title; } catch (Exception) { }
             }
+            string xTitle = a.Str("xtitle", null), yTitle = a.Str("ytitle", null);
+            if (xTitle != null) { try { chart.Axes(1).HasTitle = true; chart.Axes(1).AxisTitle.Text = xTitle; } catch (Exception) { } }
+            if (yTitle != null) { try { chart.Axes(2).HasTitle = true; chart.Axes(2).AxisTitle.Text = yTitle; } catch (Exception) { } }
             try { co.Name = title != null ? title : ("AI-" + type + "-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture)); } catch (Exception) { }
             Dictionary<string, object> r = new Dictionary<string, object>();
             r["sheet"] = Convert.ToString(TryGet(() => (object)ws.Name, ""), CultureInfo.InvariantCulture);
@@ -1288,10 +1370,12 @@ internal static class Program
             r["title"] = title == null ? "" : title;
             r["name"] = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
             r["seriesCount"] = TryGet(() => (object)(int)chart.SeriesCollection().Count, 0);
-            r["hint"] = "verify visually with render -Range <the area under the chart> before saving";
+            r["seriesNames"] = seriesNames;
+            foreach (KeyValuePair<string, object> kv in ChartGeometry(co)) r[kv.Key] = kv.Value;
+            r["hint"] = "render -IncludeCharts shows the cells plus every chart in one image; no desktop screenshot needed";
             return r;
         }
-        throw new Fail("BAD_ARGS", "chart -Action must be add|list|delete");
+        throw new Fail("BAD_ARGS", "chart -Action must be add|list|delete|move");
     }
 
     // ------------------------------------------------------------ write
@@ -1363,7 +1447,7 @@ internal static class Program
             if (sheetName == null) sheetName = a.Str("sheet", null);
             t.SheetName = sheetName;
             t.Address = address;
-            t.Ws = sheetName == null ? (dynamic)TryGet(() => (object)wb.ActiveSheet, null) : SheetByName(wb, sheetName);
+            t.Ws = sheetName == null ? (dynamic)ActiveSheetSafe(wb) : SheetByName(wb, sheetName);
             if (t.Ws == null) throw new Fail("COM_ERROR", "No active sheet in this workbook.");
             t.Range = t.Ws.Range(address);
             t.Expect = item.Str("expect", null);
@@ -1582,7 +1666,18 @@ internal static class Program
             SheetByName(wb, name).Delete();
             return new Dictionary<string, object> { { "deleted", name }, { "sheets", SheetsBrief(wb) } };
         }
-        throw new Fail("BAD_ARGS", "sheet -Action must be list|add|rename|delete");
+        if (action == "activate")
+        {
+            // Needed because several WPS operations (chart add on older builds) follow the active
+            // sheet, and because "show the user this sheet" had no primitive: agents used raw COM
+            // GetActiveObject + Worksheets.Item(n).Activate() to get here (reported 2026-11-01).
+            string name = a.Need("name");
+            dynamic target = SheetByName(wb, name);
+            try { target.Activate(); }
+            catch (Exception e) { throw new Fail("COM_ERROR", "could not activate sheet \"" + name + "\": " + Clean(e.Message)); }
+            return new Dictionary<string, object> { { "activated", name }, { "sheets", SheetsBrief(wb) } };
+        }
+        throw new Fail("BAD_ARGS", "sheet -Action must be list|add|rename|delete|activate");
     }
 
     // ------------------------------------------------------------ comments
@@ -1680,129 +1775,6 @@ internal static class Program
         catch (Exception) { return false; }
     }
 
-    // Capture one floating chart as an owned Bitmap (CopyPicture -> clipboard -> copy).
-    // Chart.Export is avoided on purpose: WPS writes that file through its own writer and on
-    // this machine the transparent-encryption driver turns it into unreadable ciphertext - the
-    // same failure that made the PPT side use Slide.Copy instead of Slide.Export.
-    private static Image CaptureChartImage(dynamic co)
-    {
-        try
-        {
-            co.CopyPicture(1, 2); // xlScreen, xlBitmap
-            if (Clipboard.ContainsImage())
-            {
-                using (Image src = Clipboard.GetImage())
-                {
-                    if (src != null)
-                    {
-                        Bitmap owned = new Bitmap(src);
-                        Clipboard.Clear();
-                        return owned;
-                    }
-                }
-            }
-            Clipboard.Clear();
-        }
-        catch (Exception) { }
-        try
-        {
-            dynamic chart = co.Chart;
-            chart.CopyPicture(1, 2);
-            if (Clipboard.ContainsImage())
-            {
-                using (Image src2 = Clipboard.GetImage())
-                {
-                    if (src2 != null)
-                    {
-                        Bitmap owned2 = new Bitmap(src2);
-                        Clipboard.Clear();
-                        return owned2;
-                    }
-                }
-            }
-            Clipboard.Clear();
-        }
-        catch (Exception) { }
-        return null;
-    }
-
-    // Draw the picked chart images on top of a rendered cell range, in sheet-point space.
-    // Geometry is self-calibrated: pxPerPt comes from the rendered bitmap width divided by the
-    // range width in points, so it works at any zoom / DPI without reading the window.
-    private static int CompositeCharts(string sourcePng, string outPng, dynamic baseRange, List<dynamic> picked, List<object> info)
-    {
-        if (picked.Count == 0) return 0;
-        double boxW = (double)baseRange.Width;
-        double boxH = (double)baseRange.Height;
-        if (boxW <= 0 || boxH <= 0) return 0;
-        int capWidth = 3000;
-        int drawn = 0;
-        using (Image baseImg = Image.FromFile(sourcePng))
-        {
-            int bw = baseImg.Width, bh = baseImg.Height;
-            double pxPerPt = (double)bw / boxW;
-            Bitmap canvas;
-            if (bw > capWidth)
-            {
-                int nh = (int)Math.Round((double)bh * capWidth / bw);
-                if (nh < 1) nh = 1;
-                canvas = new Bitmap(capWidth, nh);
-                using (Graphics g0 = Graphics.FromImage(canvas))
-                using (Bitmap small = new Bitmap(baseImg, capWidth, nh))
-                {
-                    g0.DrawImageUnscaled(small, 0, 0);
-                }
-                pxPerPt = (double)capWidth / boxW;
-            }
-            else
-            {
-                canvas = new Bitmap(bw, bh);
-                using (Graphics g1 = Graphics.FromImage(canvas))
-                {
-                    g1.DrawImageUnscaled(baseImg, 0, 0);
-                }
-            }
-            double originLeft = (double)baseRange.Left;
-            double originTop = (double)baseRange.Top;
-            using (Graphics g = Graphics.FromImage(canvas))
-            {
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                for (int k = 0; k < picked.Count; k++)
-                {
-                    dynamic co = picked[k];
-                    double cl, ct, cw, chh;
-                    try
-                    {
-                        cl = (double)co.Left; ct = (double)co.Top;
-                        cw = (double)co.Width; chh = (double)co.Height;
-                    }
-                    catch (Exception) { continue; }
-                    int dx = (int)Math.Round((cl - originLeft) * pxPerPt);
-                    int dy = (int)Math.Round((ct - originTop) * pxPerPt);
-                    int dw = (int)Math.Round(cw * pxPerPt);
-                    int dh = (int)Math.Round(chh * pxPerPt);
-                    if (dw < 1 || dh < 1) continue;
-                    using (Image ci = CaptureChartImage(co))
-                    {
-                        if (ci == null) continue;
-                        g.DrawImage(ci, new Rectangle(dx, dy, dw, dh));
-                    }
-                    drawn++;
-                    Dictionary<string, object> one = new Dictionary<string, object>();
-                    one["index"] = k + 1;
-                    one["name"] = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
-                    one["title"] = Convert.ToString(TryGet(() => (object)co.Chart.ChartTitle.Text, ""), CultureInfo.InvariantCulture);
-                    one["left"] = Math.Round(cl, 1);
-                    one["top"] = Math.Round(ct, 1);
-                    info.Add(one);
-                }
-            }
-            canvas.Save(outPng, ImageFormat.Png);
-            canvas.Dispose();
-        }
-        return drawn;
-    }
-
     private static object RenderBook(Bag a)
     {
         dynamic wb = RequireBook(a, true);
@@ -1822,16 +1794,19 @@ internal static class Program
         Dictionary<string, object> r = new Dictionary<string, object>();
         List<object> chartInfo = new List<object>();
         List<dynamic> picked = new List<dynamic>();
-        int chartsIncluded = 0;
         string address = requested;
         dynamic baseRange = null;
         bool needBase = false;
 
         if (withCharts)
         {
-            // -IncludeCharts: grow the view to cover the requested range plus EVERY floating
-            // chart on this sheet (not only the overlapping ones - the common layout is a table
-            // in A..D with the charts parked in J onward, which CopyPicture never renders).
+            // -IncludeCharts grows the view to cover the requested range plus EVERY floating chart
+            // on this sheet. Why expanding is enough: Range.CopyPicture(xlScreen, xlBitmap) paints
+            // the on-screen appearance of the range, so a chart that overlaps it is ALREADY in the
+            // picture - measured 2026-11-02 on this machine: A1:H52 (overlaps two charts) rendered
+            // both, A1:H10 (no overlap) rendered none. What a plain render never shows is a chart
+            // parked outside the range (e.g. tables in A..D, charts in J onward). Drawing the charts
+            // a second time on top would duplicate them, so this path only expands the range.
             dynamic range = ws.Range(requested);
             double x1 = (double)range.Left, y1 = (double)range.Top;
             double x2 = x1 + (double)range.Width, y2 = y1 + (double)range.Height;
@@ -1866,49 +1841,32 @@ internal static class Program
                     if ((int)brc.Column > brCol) brCol = (int)brc.Column;
                 }
                 catch (Exception) { }
+                Dictionary<string, object> one = new Dictionary<string, object>();
+                one["index"] = k;
+                one["name"] = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
+                one["title"] = Convert.ToString(TryGet(() => (object)co.Chart.ChartTitle.Text, ""), CultureInfo.InvariantCulture);
+                one["left"] = Math.Round(cl, 1);
+                one["top"] = Math.Round(ct, 1);
+                chartInfo.Add(one);
             }
             baseRange = ws.Range(ws.Cells[tlRow, tlCol], ws.Cells[brRow, brCol]);
             address = Convert.ToString(baseRange.Address[false, false], CultureInfo.InvariantCulture);
             needBase = true;
+            r["chartsIncluded"] = picked.Count;
             if (picked.Count == 0)
                 r["note"] = "no floating charts on this sheet; the plain range image already shows everything";
+            else
+            {
+                r["charts"] = chartInfo;
+                r["hint"] = "one image now covers the cells and every chart on this sheet; do not take a desktop screenshot to cross-check";
+            }
         }
 
         string png = Path.Combine(outDir, safe + "-" + address.Replace(":", "_").Replace("!", "_") + ".png");
-        bool ok;
-        if (needBase)
-        {
-            // Render the cells to a scratch file: the composite must save over the final path,
-            // and GDI+ cannot write to a file that is still open for reading.
-            string scratch = png + ".cells.png";
-            try
-            {
-                ok = TryRenderRange(baseRange, scratch);
-                if (ok && picked.Count > 0)
-                {
-                    // The composite writes to the final path, so the cell render must live in a
-                    // separate file: GDI+ cannot save over an image it still has open.
-                    chartsIncluded = CompositeCharts(scratch, png, baseRange, picked, chartInfo);
-                }
-                else if (ok) File.Copy(scratch, png, true);
-            }
-            finally
-            {
-                try { File.Delete(scratch); } catch (Exception) { }
-            }
-        }
-        else ok = TryRender(ws, address, png);
+        bool ok = needBase ? TryRenderRange(baseRange, png) : TryRender(ws, address, png);
 
         if (!ok)
             throw new Fail("COM_ERROR", "CopyPicture produced no image (range " + address + "). The range may be empty, or WPS refused the copy.");
-
-        if (withCharts)
-        {
-            r["chartsIncluded"] = chartsIncluded;
-            if (chartInfo.Count > 0) r["charts"] = chartInfo;
-            if (chartsIncluded > 0)
-                r["hint"] = "this image is the cells plus every overlapping chart, so one look is enough - do not take a desktop screenshot to cross-check";
-        }
 
         // rescale to the requested width (dispose the source before touching its file)
         int wantWidth = a.Int("width", 1100);
@@ -1975,14 +1933,11 @@ internal static class Program
         throw new Fail("BAD_ARGS", "color must look like #C00000, got \"" + s + "\"");
     }
 
-    private static object FormatRange(Bag a)
+    // Apply the format options to one Range. Shared by the single-range and the multi-range
+    // (-Range "A1:E1;A5:E5;A9:E9") paths, so a 26-step formatting pass becomes one command.
+    private static List<object> ApplyFormat(dynamic range, Bag a)
     {
-        dynamic wb = RequireBook(a, true);
-        dynamic ws = TargetSheet(wb, a);
-        if (ws == null) throw new Fail("COM_ERROR", "No target sheet.");
-        dynamic range = ws.Range(a.Need("range"));
         List<object> done = new List<object>();
-
         if (a.Has("font")) { range.Font.Name = a.Str("font", ""); done.Add("font"); }
         if (a.Has("size")) { range.Font.Size = ParsePoints(a.Str("size", ""), "size"); done.Add("size"); }
         if (a.Has("bold")) { range.Font.Bold = a.Flag("bold", true) ? 1 : 0; done.Add("bold"); }
@@ -2031,8 +1986,32 @@ internal static class Program
             }
             done.Add("borders");
         }
-        if (done.Count == 0) throw new Fail("BAD_ARGS", "format needs at least one formatting option (font/size/bold/color/fillColor/halign/valign/numberFormat/colWidth/rowHeight/borders/wrap)");
-        return new Dictionary<string, object> { { "range", a.Str("range", "") }, { "applied", done } };
+        return done;
+    }
+
+    private static object FormatRange(Bag a)
+    {
+        dynamic wb = RequireBook(a, true);
+        dynamic ws = TargetSheet(wb, a);
+        if (ws == null) throw new Fail("COM_ERROR", "No target sheet.");
+        string rangeText = a.Need("range");
+        // Semicolon-separated list: one round trip formats many disjoint blocks (v1.16 - a
+        // formatting pass used to cost one command per block, ~0.5-0.8 s each).
+        string[] parts = rangeText.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+        List<object> perRange = new List<object>();
+        for (int i = 0; i < parts.Length; i++)
+        {
+            string part = parts[i].Trim();
+            if (part.Length == 0) continue;
+            dynamic range = ws.Range(part);
+            List<object> done = ApplyFormat(range, a);
+            if (done.Count == 0)
+                throw new Fail("BAD_ARGS", "format needs at least one formatting option (font/size/bold/color/fillColor/halign/valign/numberFormat/colWidth/rowHeight/borders/wrap)");
+            perRange.Add(new Dictionary<string, object> { { "range", part }, { "applied", done } });
+        }
+        if (perRange.Count == 0) throw new Fail("BAD_ARGS", "format needs -Range");
+        if (perRange.Count == 1) return perRange[0];
+        return new Dictionary<string, object> { { "ranges", perRange }, { "count", perRange.Count } };
     }
 
     // ------------------------------------------------------------ snapshot / diff
