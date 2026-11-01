@@ -15,7 +15,7 @@ EXCEL = ROOT / "scripts" / "excel.ps1"
 SRC = ROOT / "tests" / "excel" / "work" / "test.xlsx"
 WORK = ROOT / ".tmp"
 COPY = WORK / "hint-check.xlsx"
-TAG = "〔AI〕"
+TAG = "〔AI接管中〕"
 
 
 def run(*args):

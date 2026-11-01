@@ -79,14 +79,14 @@
 | `Application.StatusBar` | ✓ 可读写，且截图确认状态栏真的显示 `AI 正在协作：…`（Writer 侧只写不读也不渲染）；写 `false` 交还 |
 | 托盘气泡 | ✓ NotifyIcon（与 `finish` 同一机制），`-Quiet` 可静音 |
 
-- `open` 自动打标记（`-NoHint` 关）；只读簿自动标成 `〔AI 只读〕`。
+- `open` 自动打标记（`-NoHint` 关）；只读簿自动标成 `〔AI接管中·只读〕`。
 - `hint -Text "正在核对第 3 张表" -Quiet` 只刷状态栏（截图可见）；`finish` / `close` 自动还原（`hintCleared`）。
 - 验收：`tests/excel/check_hint.py` 9 条断言全过（caption 标记/`status hinted`/状态栏写入/`finish` 还原/显式 `-Clear`/`close`）。
 
 
 ## v1.12（2026-10-30）——常驻托盘图标 `hint -Tray`
 
-表格侧与 Writer 共用 `scripts/helper/shared/Tray.cs`：`hint -Tray` 写状态文件（`%LOCALAPPDATA%\wps-office-cooperate\tray-excel.json`），再用自身 exe 以 `--tray` 重开一份常驻图标；悬停显示「〔AI〕 工作簿 · 当前步骤」，右键「结束协作：还原标题标记」，`finish`/`close` 自动移除。
+表格侧与 Writer 共用 `scripts/helper/shared/Tray.cs`：`hint -Tray` 写状态文件（`%LOCALAPPDATA%\wps-office-cooperate\tray-excel.json`），再用自身 exe 以 `--tray` 重开一份常驻图标；悬停显示「〔AI接管中〕 工作簿 · 当前步骤」，右键「结束协作：还原标题标记」，`finish`/`close` 自动移除。
 
 - 验收：`tests/excel/check_tray.py` 7 条断言全过（托盘启动 + 进程存活 + 状态文件 + `finish` 报告 trayStopped + 进程 8 s 内退出 + 外部关闭工作簿后图标 8.6 s 自动消失）。
 - 坑：spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，任何读到 EOF 的调用方（python `subprocess.communicate`、PowerShell 管道）会被图标的 4 小时寿命卡死（实测复现）。

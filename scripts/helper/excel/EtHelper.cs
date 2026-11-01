@@ -1,4 +1,4 @@
-﻿// wps-excel-cooperate helper: drive WPS Spreadsheets (ET) over COM to read / write / comment /
+// wps-excel-cooperate helper: drive WPS Spreadsheets (ET) over COM to read / write / comment /
 // render a .xlsx workbook live. Pure ASCII source (Chinese only ever travels inside JSON
 // strings), C# 5 (compiled by the in-box csc.exe of .NET Framework 4.x), no third-party
 // dependency.
@@ -2200,8 +2200,8 @@ internal static class Program
     // (~22 half-width cells), so a suffix tag vanishes on long workbook names (measured
     // 2026-10-30 on the Writer side; Spreadsheets uses the same frame/tab). The marker goes
     // in FRONT: "[AI] book.xlsx".
-    private const string HINT_TAG = "\u3014AI\u3015";                    // [AI]
-    private const string HINT_READONLY = "\u3014AI \u53ea\u8bfb\u3015";   // [AI read-only]
+    private const string HINT_TAG = "\u3014AI\u63a5\u7ba1\u4e2d\u3015";                    // 〔AI接管中〕
+    private const string HINT_READONLY = "\u3014AI\u63a5\u7ba1\u4e2d\u00b7\u53ea\u8bfb\u3015";   // 〔AI接管中·只读〕
 
     private static bool IsHinted(string caption)
     {

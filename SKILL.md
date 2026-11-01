@@ -1,4 +1,4 @@
-﻿---
+---
 name: wps-office-cooperate
 description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式改写+批注+版式核对）、Excel（.xlsx/.xls/.csv，批量写值公式+锚点校验+快照回滚+批注+图表）与 PowerPoint（.pptx，预设版式建页+形状级改文字+表格图片+逐页渲染核对+快照对比），改动当场出现在用户正开着的 WPS 窗口里。当用户要求：在 WPS 里改这个文档/表格/演示文稿/PPT、在 WPS 里做修订、实时改 Word/Excel/PPT、一边看着一边改、做汇报 PPT、加批注、核对排版/版式/表格格式，或提到 wps word、wps excel、wps ppt、live edit word/excel/ppt 时使用。不适用：纯离线批量处理（改副本、不要求用户在场，Word 用 docx-paragraph-polish，Excel 用 openpyxl/minimax-xlsx，PPT 用 pptx-generator 等离线方案）、用户明确不要动原文件（只出旁挂报告）、微软 Office 窗口里的文档（本 skill 只走 WPS）。
 ---
@@ -11,9 +11,9 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 **版本 v1.13（2026-11-01）**：读侧真提速——**一次 `WordOpenXML` + 本地 XML 解析**取代逐段读取，并把「静默回退」变成看得见的原因。起因是 Pi 侧 6 次真实 WPS 任务的计时（241 条命令、78 min COM）：`snapshot` 98 s/次、`diff` 103 s/次、`read` 30 s/次，而返回里一直挂着 `textsPath:"slow"` 却不知为何。四个实测根因：① **`Content.Text` 块模型在真实报告上不成立**——7334 段的报告切出 7328 块，从第 2 段起整篇错位（表格单元格顺序不同）；② 更根本的是 **WPS 把每个表格行也计成一个空段落**（Σ表行 555 + 正文 6779 = 7334 = `Paragraphs.Count`；逐表实测：4 个单元格后多一个空段号、8 行表多 8 个），块模型天生对不上；③ 块模型要求 `Revisions.Count == 0`，而 **WPS 实时协作时永远有未处理修订**，所以这条路在协作场景等于关闭；④ 回退是静默的。现在的路径：`doc.Content.WordOpenXML` **一次取全稿**（8.2 MB 实测 0.4–1.7 s）→ 本地解析（`w:p` 按文档序、每 `w:tr` 后**补一个空段落**还原 WPS 段号；`w:tab`/`w:br`(page)/`w:cr`/`w:sym`/`w:drawing`→`/`/`w:delText`(不取，Range.Text 不显示未接受的删除) 逐一对齐）→ 抽样若干段与 COM 逐字比对，不符整体回退；含符号/多内嵌对象的极少数段落**单独回读**。实测（61 页 / 7334 段 / 23 表 / 16 处修订）：`snapshot` **48.5 s → 6.1 s（8×）**、`diff` **48.6 s → 5.5 s（8.9×）**、`read -SkipTableCells` 全篇扫 **8.2 s**；`tests/word` 的 report-300、audit-fixture 两份语料 digest 与逐段文本**全部相同**，本报告 7334 段**逐字节一致**。语义不变：新路径等价于逐段 `Range.Text`（未接受的删除仍不出现），所以 diff 口径与旧版相同。返回字段：`textsPath` = `xml`（新）/`fast`（旧块模型）/`chunk`（分块范围读，兜底）/`slow`；回退时带 **`fastFail`** 说明失败在哪一步（如 `xml: spot p123 differs`）；新命令 **`textdiag`** 一条命令打印块/XML/表格行三条线索的诊断（只读）。
 
-**版本 v1.12（2026-10-30）**：`hint -Tray` —— **常驻托盘图标**。v1.11 的三个信号各有短板：标签页标记常驻但**不带进度**、气泡**一过性**、Writer 状态栏**不渲染**，于是补一个托盘图标：橙色「AI」小圆标，**悬停 = 标记 + 当前步骤**（「〔AI〕 报告.docx · 正在核对第 3 节」），**右键 = 「结束协作：还原标题标记」/「仅关闭托盘图标」**；`finish` / `close` / `hint -Clear` 让它自动退出，忘了也会在 **4 小时**后自灭。实现上**不新增常驻服务**：`hint -Tray` 由短命 helper 写一个状态文件，再用**自己这个 exe 以 `--tray` 重开一份**（只跑消息循环、不发 COM 请求），状态文件就是唯一 IPC；菜单里的「还原」直接调用本 skill 的 `hint -Clear`，所以 daemon 不必懂 COM，三个 app 共用一份 `scripts/helper/shared/Tray.cs`。两个实测坑：① spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，任何读到 EOF 的调用方（python `subprocess.communicate`、PowerShell 管道）会被图标的 4 小时寿命**卡死**；② Windows 把新托盘图标默认收进「^」溢出区，进程无法自我提升，只能提示用户拖出来（`tray.note` 已写明）。**文档被用户关掉后图标会自己消失**（约 10 s：用 RestartManager 问系统"还有没有进程占着这个文件"，开着=1 / 关掉=0；实测 Word 9.6 s、Excel 8.6 s、PPT 7.4 s），`save -As` 会把图标重指到新路径，不会留下"AI 协作中"的假象。
+**版本 v1.12（2026-10-30）**：`hint -Tray` —— **常驻托盘图标**。v1.11 的三个信号各有短板：标签页标记常驻但**不带进度**、气泡**一过性**、Writer 状态栏**不渲染**，于是补一个托盘图标：橙色「AI」小圆标，**悬停 = 标记 + 当前步骤**（「〔AI接管中〕 报告.docx · 正在核对第 3 节」），**右键 = 「结束协作：还原标题标记」/「仅关闭托盘图标」**；`finish` / `close` / `hint -Clear` 让它自动退出，忘了也会在 **4 小时**后自灭。实现上**不新增常驻服务**：`hint -Tray` 由短命 helper 写一个状态文件，再用**自己这个 exe 以 `--tray` 重开一份**（只跑消息循环、不发 COM 请求），状态文件就是唯一 IPC；菜单里的「还原」直接调用本 skill 的 `hint -Clear`，所以 daemon 不必懂 COM，三个 app 共用一份 `scripts/helper/shared/Tray.cs`。两个实测坑：① spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，任何读到 EOF 的调用方（python `subprocess.communicate`、PowerShell 管道）会被图标的 4 小时寿命**卡死**；② Windows 把新托盘图标默认收进「^」溢出区，进程无法自我提升，只能提示用户拖出来（`tray.note` 已写明）。**文档被用户关掉后图标会自己消失**（约 10 s：用 RestartManager 问系统"还有没有进程占着这个文件"，开着=1 / 关掉=0；实测 Word 9.6 s、Excel 8.6 s、PPT 7.4 s），`save -As` 会把图标重指到新路径，不会留下"AI 协作中"的假象。
 
-**版本 v1.11（2026-10-30）**：新增 **`hint`** —— 接管提示。agent 接管一份用户正开着的文档时，用户原本只会看到"窗口自己滚起来、文字突然变成修订"，不知道是谁在动、怎么停。现在 **`open` 自动给窗口标题/标签页打上「〔AI〕」标记**（`〔AI〕 报告.docx`；纯窗口状态，不写进文档、不落盘），`hint -Doc <路径> -Toast` 再补一个托盘气泡说明"已接管《X》：改动以修订/批注呈现，随时可接受或拒绝"，`hint -Text` 还能刷新状态栏（**表格侧实测可见**；Writer 侧 WPS 只接受写入、界面不渲染，截图仍是页面/字数）；收尾 **`finish` / `close` 自动还原**标题与状态栏。实测 WPS 12.0（2026-10-30）：Writer 的 `doc.ActiveWindow.Caption`、表格的 `wb.Windows(1).Caption` 都可写且直接落到真实窗口标题（`〔AI〕 <文件名> - WPS Office`）。注意 **WPS 12 把文档显示成标签页、从右截断**，所以标记放在名字**前面**：后缀在真实报告的长文件名上会被整段截掉（实测同一像素，等于没打），Writer 的 `Application.StatusBar` 只写不读且界面不渲染（截图实测）、表格的可读写且实测会显示；**PPT 没有可写的单文档标题**（`ActiveWindow.Caption` 只读，`Application.Caption` 是应用级、写进去会顶掉本地化的"WPS 演示"），所以 PPT 侧只给气泡并如实返回 `captionSupported:false` + `limitation`。
+**版本 v1.11（2026-10-30）**：新增 **`hint`** —— 接管提示。agent 接管一份用户正开着的文档时，用户原本只会看到"窗口自己滚起来、文字突然变成修订"，不知道是谁在动、怎么停。现在 **`open` 自动给窗口标题/标签页打上「〔AI接管中〕」标记**（`〔AI接管中〕 报告.docx`；纯窗口状态，不写进文档、不落盘），`hint -Doc <路径> -Toast` 再补一个托盘气泡说明"已接管《X》：改动以修订/批注呈现，随时可接受或拒绝"，`hint -Text` 还能刷新状态栏（**表格侧实测可见**；Writer 侧 WPS 只接受写入、界面不渲染，截图仍是页面/字数）；收尾 **`finish` / `close` 自动还原**标题与状态栏。实测 WPS 12.0（2026-10-30）：Writer 的 `doc.ActiveWindow.Caption`、表格的 `wb.Windows(1).Caption` 都可写且直接落到真实窗口标题（`〔AI接管中〕 <文件名> - WPS Office`）。注意 **WPS 12 把文档显示成标签页、从右截断**，所以标记放在名字**前面**：后缀在真实报告的长文件名上会被整段截掉（实测同一像素，等于没打），Writer 的 `Application.StatusBar` 只写不读且界面不渲染（截图实测）、表格的可读写且实测会显示；**PPT 没有可写的单文档标题**（`ActiveWindow.Caption` 只读，`Application.Caption` 是应用级、写进去会顶掉本地化的"WPS 演示"），所以 PPT 侧只给气泡并如实返回 `captionSupported:false` + `limitation`。
 
 **版本 v1.10（2026-10-27）**：把 v1.9 audit 快路径的模式推广到全部"读侧"命令——一次取全文、本地过滤、只在返回/命中处花往返。前提是一天实验证实的**块模型**：WPS 里 `Content.Text` 按 `\r` 切块后**第 k 块就是第 k 段**（表格也不例外：每格是"文本\r+BEL"，BEL 落在下一块开头；表格后首段也带前导 BEL，所以**不能用 BEL 启发式判表内**，表内段区间以 `Table.Range.Paragraphs.Count` 为权威，O(表数) 往返）。统一走 `FastBlocksVerified`：修订非零 / 块数≠段数+1 / 首中末三段抽查不符 → 整体回退旧逐段路径（`-Slow` 可强制），`path`/`textsPath` 字段说明走了哪条。
 - **`read -SkipTableCells / -Only` 快路径**：4479 段 / 20 表语料上 `-SkipTableCells -Count 0` **38.6 s → 8.4 s**（快跑还含 ~6 s 开文档；10521 段的真实报告旧路径 111 s，预期 → 10 s 级）；返回 180 段与旧路径**逐字段一致**（i/text/style/list/inTable/table）。注意 `-Only` 若命中大半文档（如 `[0-9]` 命中 3951/4479），逐段 style/list 明细占大头，快慢持平——快路径吃的是**选择性**过滤。
@@ -81,7 +81,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
    理由不是"体验"，是**会坏**：那些 skill/工具改的是磁盘文件，而这份文档正被 WPS 独占（实测写盘 `PermissionError`）；它们还产出副本，会让你眼前这份和副本分成两条线。
    唯一例外：用户明确要"**不动原件、出一份新稿**"或"**无人值守批量跑**"——那时先 `save` → `close` 交出去，回来再 `open` 产出的文件、`snapshot` 重建基线（Excel 用 `save -As` 另出一份，或在用户关掉文件后离线处理）。
 1. **先 `status`，再动手，并说出在哪儿动手。** 每次开工第一条命令是 `status`，把"几个实例在跑 / 开着哪些文档 / 哪份是 active / 有没有未保存修改"念给用户，并明确报出**即将修改的那份文档的完整路径**（Excel 再加工作表名）。不碰用户没指定的文件。
-   接着**让用户看得见接管**：`open` 已自动把标签/标题改成「〔AI〕 文件名」，再 `hint -Doc <路径> -Toast` 弹一句人话（"已接管《X》…"）——同一份文档一轮协作只需公告一次，后续进度用 `hint -Text "正在做…" -Quiet` 刷状态栏（表格可见；Writer 不渲染，别指望）。要边干边看进度就再加 `-Tray`（托盘图标，悬停看当前步骤、右键可结束并还原；新图标默认在「^」里，提醒用户拖出来）。`finish`/`close` 会自动还原，别留着标记过夜。
+   接着**让用户看得见接管**：`open` 已自动把标签/标题改成「〔AI接管中〕 文件名」，再 `hint -Doc <路径> -Toast` 弹一句人话（"已接管《X》…"）——同一份文档一轮协作只需公告一次，后续进度用 `hint -Text "正在做…" -Quiet` 刷状态栏（表格可见；Writer 不渲染，别指望）。要边干边看进度就再加 `-Tray`（托盘图标，悬停看当前步骤、右键可结束并还原；新图标默认在「^」里，提醒用户拖出来）。`finish`/`close` 会自动还原，别留着标记过夜。
 2. **`readOnly` 就是不许改。** `open`/`read` 返回 `readOnly: true`（文件被别处占用或有只读属性）时，写命令会直接报 `READONLY`。**不要**用另存、改文件属性、杀占用进程等方式绕过去——先问用户。
 3. **不替用户关文档。** `close` 只关本次明确要关的那一份；用户开着的其它文档、用户自己的 WPS 窗口一律不动。关之前先 `status` 确认这份是本次打开的。
    反过来，**用户在你看不见的时候关掉了文档**：Word 的下一条命令会**静默重开**并返回 `reopened:true`（若日志显示关闭前未保存，还会带 `unsavedAtClose:true` 警告，提醒可能丢了改动），Excel/PPT 则返回 `DOC_CLOSED`——必须**显式 `open`** 才能继续，别假装还在协作；托盘图标会在约 10 s 内自动消失。
@@ -100,11 +100,11 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 用户的原话是"agent 接管 wps 文档后可否有比较友好的提示"——所以**接管那一步必须看得见**，而且不能打扰：
 
-- **`open` 自动打标签**：窗口标签/标题变成 `〔AI〕 报告.docx`（Writer / 表格都有；WPS 12 的标签页从右截断，所以标记放前面，长文件名也不会被吃掉）。这是纯窗口状态：不进修订、不写文件、不改 `saved`，`-NoHint` 可关。
+- **`open` 自动打标签**：窗口标签/标题变成 `〔AI接管中〕 报告.docx`（Writer / 表格都有；WPS 12 的标签页从右截断，所以标记放前面，长文件名也不会被吃掉）。这是纯窗口状态：不进修订、不写文件、不改 `saved`，`-NoHint` 可关。
 - **`hint` 补一句人话**：默认弹 6 s 托盘气泡——"已接管《报告.docx》：我会把改动做成修订或批注，你随时可以接受或拒绝。"`-Text` 换说法，`-HintTag` 换标题里的标签文字，`-Bar` 单独控制状态栏那行（表格会显示，Writer 不渲染），`-Quiet` 静默（不弹气泡，适合刷新标题/状态栏）。
 - **还原**：`hint -Clear`、`finish`、`close` 都会把标题恢复成文件名、把状态栏交还 WPS；`status` 每份文档带 `caption` 与 `hinted`，随时可核对当前有没有挂着标记。
 - **PPT 只给气泡**（`captionSupported:false` + `limitation`）：WPS 演示没有可写的单文档标题，别对用户说"标题已标记"。
-- **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
+- **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI接管中〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
 - **不做悬浮窗（用户明确决策，2026-10-30）**：不加置顶悬浮条/浮层——它会遮正文、抢焦点，而且要常驻 daemon 跟随 WPS 窗口（移动/最小化/切标签/异常退出都得收拾）。常驻信息由「标签页前缀标记 + 托盘图标」承担；**不要再向用户推荐，也不要把它做成"可选模式"偷偷加回来**。
 
 ---
@@ -119,7 +119,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 |---|---|---|
 | `doctor` | — | 自检：哪个套件可用/版本/是否在跑/开着的文档/渲染是否可用/各类进程数 |
 | `status` | — | 在跑的实例与文档清单（name / path / saved / readOnly / active / paragraphs） |
-| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回 readOnly、段落数、页数；发现可能开在另一实例时给 `multiInstanceWarning`。**v1.11 起自动给窗口标签打「〔AI〕」接管标记**（`hint.caption`/`hint.captionSet`，纯窗口状态；`-NoHint` 关掉） |
+| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回 readOnly、段落数、页数；发现可能开在另一实例时给 `multiInstanceWarning`。**v1.11 起自动给窗口标签打「〔AI接管中〕」接管标记**（`hint.caption`/`hint.captionSet`，纯窗口状态；`-NoHint` 关掉） |
 | `read` | `-Doc <路径> [-From 1] [-Count 60]`；大文档加 `[-SkipTableCells] [-Only <正则>] [-Slow]` | 段落（编号/样式/自动编号/文本/inTable/**表号**）+ 表格清单 + 页数/修订数/批注数。**凡是带 `-SkipTableCells`/`-Only`，`-Count` 就变成"返回多少段"**（不是"走多少个段落号"），`-Count 0` = 一直扫到底；返回里 `scanned`/`skippedTableCells`/`filter` 说明跳过了什么。**v1.10 起过滤扫默认走快路径**（一次取全文+本地过滤，`path:fast`；4479 段/20 表实测 38.6 s → 8.4 s，与旧路径逐字段一致；有未处理修订或校验失败自动回退，`-Slow` 强制旧路径）。**v1.13 起块模型失效时自动改用 `xml` 路径**（一次 `WordOpenXML`+本地解析，7334 段全篇扫 8.2 s；`path` 字段说明走了哪条）。`-Only` 的收益取决于选择性：命中大半文档时快慢持平 |
 | `search` | `-Doc <路径> -Text <词\|词2\|词3> [-Style 样式名] [-Max 50] [-Case]` | **全文找词**（WPS 原生 Find，大文档秒级；多词用 `\|` 分隔一次查完，返回每词计数）——定位用这个，别一页页 `read` |
 | `selection` | `-Doc <路径>` | **读用户当前选中/光标**：返回选中文本与覆盖的段落号（`fromPara/toPara`）；在表格里时再给 `table`（表号，直通 `table -Table n`/`cell -Table n`）与 `row`/`col`；覆盖**图片**时给 `images`（图号，直通 `picture -Image n`）——只读不改 |
@@ -153,7 +153,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `close` | `-Doc <路径> [-Save]` | 关闭；无其它文档时退出实例，并回报进程数 |
 | `quit` | — | 关掉该实例的**全部**文档并退出（不保存）。**慎用**：会波及用户在同一实例里开的文档，只在自己的独占实例上用 |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | **任务完成信号**（agent 无关，零依赖）：默认**托盘气泡 + 提示音**（原生 .NET），**不触碰文档任何内容**；`-Quiet` 静音。**任务收尾默认调用** |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**三者都是窗口状态，不写文档、不落盘**。`open` 已自动打标签；`-Text` 换气泡/状态栏里的话（如"正在核对第 3 节"）；`-Clear` 还原（`finish`/`close` 也会自动还原）。Writer 的 `Application.StatusBar` 只写不读、且 WPS 界面不渲染（实测状态栏仍是页面/字数），`statusBar:true` 只代表写入被接受；表格侧写入会真的显示。**`-Tray`**（v1.12）：常驻托盘图标，悬停=标记+当前步骤，右键可还原，`finish`/`close`/`-Clear` 自动移除 |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**三者都是窗口状态，不写文档、不落盘**。`open` 已自动打标签；`-Text` 换气泡/状态栏里的话（如"正在核对第 3 节"）；`-Clear` 还原（`finish`/`close` 也会自动还原）。Writer 的 `Application.StatusBar` 只写不读、且 WPS 界面不渲染（实测状态栏仍是页面/字数），`statusBar:true` 只代表写入被接受；表格侧写入会真的显示。**`-Tray`**（v1.12）：常驻托盘图标，悬停=标记+当前步骤，右键可还原，`finish`/`close`/`-Clear` 自动移除 |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）控制等待；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
 
@@ -261,7 +261,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 |---|---|---|
 | `doctor` | — | 自检：ProgID 安装/在跑、进程数、渲染能力、打开的工作簿 |
 | `status` | — | 在跑的实例与工作簿清单（name / path / saved / readOnly / active），工作表概况 |
-| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回工作表清单与各自 usedRange。**v1.11 起自动给窗口标签打「〔AI〕」接管标记**（`hint.caption`；用 `wb.Windows(1).Caption`，WPS 表格里 `wb.ActiveWindow` 常为 null） |
+| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回工作表清单与各自 usedRange。**v1.11 起自动给窗口标签打「〔AI接管中〕」接管标记**（`hint.caption`；用 `wb.Windows(1).Caption`，WPS 表格里 `wb.ActiveWindow` 常为 null） |
 | `read` | `-Doc` `[(-Sheet 名 \| -Range "Sheet1!A1:F40")] [-Profile]` | 不带选项=工作簿概览；带 Sheet=读该表 used range（值 + 公式）；`>60 行或 >15 列`自动改列概况（类型统计/min/median/max/高频值 + 头尾各 5 行样本），要局部全量用 `-Range` |
 | `write` | `-Doc -Items <json>`（或单格 `-Cell B3 -Value x / -Formula "=..."`） | **批量写**（见下）：原子批、`expect` 锚校验、中途失败回滚，每格返回 before→after；**批内自动挂起重算+屏幕刷新，批末一次重算**（大表写几千格不产生重算风暴） |
 | `fill` | `-Doc -Range D2:D5000 [-Sheet] -Formula "=B2*C2"` | **整列填公式**：首格写一次 + 原生 FillDown（2000 行约 2 秒，含进程启动）；比逐格 write 快几个量级，大表必用 |
@@ -282,7 +282,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `close` | `-Doc [-Save]` | 关闭；无其它工作簿时退出实例，回报进程数 |
 | `quit` | — | 关掉该实例**全部**工作簿并退出（不保存）。**慎用** |
 | `finish` | `[-Note "改了什么"] [-Cell A1] [-Toast] [-Sound] [-Quiet] [-Force]` | **任务完成信号**（agent 无关，零依赖）：默认**托盘气泡 + 提示音**（原生 .NET，任何机器都响），**不动工作簿任何内容**。`-Cell` 显式指定时才额外写一行状态（目标格非空拒绝，`-Force` 覆盖）；`-Quiet` 静音。**任务收尾默认调用** |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**不写单元格、不落盘**。`open` 自动打标签，`finish`/`close` 自动还原；表格的 `Application.StatusBar` 可读写且实测会显示这行字，`-Clear` 时写 `false` 把状态栏交还 WPS。`-Tray` 加常驻托盘图标（悬停看进度、右键还原） |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**不写单元格、不落盘**。`open` 自动打标签，`finish`/`close` 自动还原；表格的 `Application.StatusBar` 可读写且实测会显示这行字，`-Clear` 时写 `false` 把状态栏交还 WPS。`-Tray` 加常驻托盘图标（悬停看进度、右键还原） |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
 

@@ -19,7 +19,7 @@ WORD = ROOT / "scripts" / "word.ps1"
 SRC = ROOT / "tests" / "word" / "corpus" / "report-300.pristine.docx"
 WORK = ROOT / ".tmp"
 COPY = WORK / "hint-check.docx"
-TAG = "〔AI〕"
+TAG = "〔AI接管中〕"
 
 
 def run(*args):
@@ -93,7 +93,7 @@ def main():
     r = run("open", "-Doc", str(COPY), "-ReadOnly")["result"]
     h = r.get("hint", {})
     cap = str(h.get("caption", ""))
-    ok &= check("read-only docs are labelled read-only", "〔AI 只读〕" in cap, h)
+    ok &= check("read-only docs are labelled read-only", "〔AI接管中·只读〕" in cap, h)
     r = run("finish", "-Quiet")["result"]
     ok &= check("finish without -Doc clears the active document", r.get("hintCleared", {}).get("captionCleared") is True, r)
     run("close", "-Doc", str(COPY))

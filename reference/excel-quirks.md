@@ -23,7 +23,7 @@
 
 | `Workbook.ActiveWindow` 常为 null | 簿不是当前活动簿时 `wb.ActiveWindow` 返回空，读 `.Caption` 抛异常（v1.11 探针）；`wb.Windows(1).Caption` 读写都正常 | 窗口标题统一走 `wb.Windows(1).Caption`，`ActiveWindow` 只当兜底 | 2026-10-30 v1.11 探针 |
 | `Application.StatusBar` 在表格侧**可读写、且真的显示** | 赋值后能读回，且截图里状态栏出现 `AI 正在协作：…` 那行（Writer 侧只写不读也不渲染，别混）；写 `False` 交还 WPS | 接管提示 `hint` 用它显示"AI 正在做什么"；清空写 `false` | 2026-10-30 v1.11 探针 + 截图 |
-| 窗口标题可写，且只影响窗口 | `wb.Windows(1).Caption = "〔AI〕 <名>"`（WPS 12 标签页从右截断，标记放前面） 不改单元格、不进撤销栈、不改变 `saved` | `hint` 的接管标记；`close`/`finish` 写回 `wb.Name` 还原 | 2026-10-30 v1.11 探针 |
+| 窗口标题可写，且只影响窗口 | `wb.Windows(1).Caption = "〔AI接管中〕 <名>"`（WPS 12 标签页从右截断，标记放前面） 不改单元格、不进撤销栈、不改变 `saved` | `hint` 的接管标记；`close`/`finish` 写回 `wb.Name` 还原 | 2026-10-30 v1.11 探针 |
 
 ## 边界与未验证
 

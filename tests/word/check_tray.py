@@ -22,7 +22,7 @@ SRC = ROOT / "tests" / "word" / "corpus" / "report-300.pristine.docx"
 WORK = ROOT / ".tmp"
 COPY = WORK / "tray-check.docx"
 STATE = Path(os.environ["LOCALAPPDATA"]) / "wps-office-cooperate" / "tray-word.json"
-TAG = "〔AI〕"
+TAG = "〔AI接管中〕"
 
 
 def run(*args):

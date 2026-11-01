@@ -1,4 +1,4 @@
-﻿// wps-word-cooperate helper: drive WPS Writer over COM to read / revise / comment / render a .docx.
+// wps-word-cooperate helper: drive WPS Writer over COM to read / revise / comment / render a .docx.
 // Pure ASCII source (Chinese only ever travels inside JSON strings), C# 5 (compiled by the
 // in-box csc.exe of .NET Framework 4.x), no third-party dependency.
 //
@@ -1781,8 +1781,8 @@ internal static partial class Program
     // cells), so a suffix tag silently disappears on real report names ("上高县南港水库引调水
     // 工程可行性研究报告.docx" + suffix = pixel-identical to no tag). A PREFIX marker is
     // always visible, so the tag goes in front: "[AI] report.docx".
-    private const string HINT_TAG = "\u3014AI\u3015";                    // [AI] - prefix marker
-    private const string HINT_READONLY = "\u3014AI \u53ea\u8bfb\u3015";   // [AI read-only]
+    private const string HINT_TAG = "\u3014AI\u63a5\u7ba1\u4e2d\u3015";                    // 〔AI接管中〕 - prefix marker
+    private const string HINT_READONLY = "\u3014AI\u63a5\u7ba1\u4e2d\u00b7\u53ea\u8bfb\u3015";   // 〔AI接管中·只读〕
 
     private static bool IsHinted(string caption)
     {
