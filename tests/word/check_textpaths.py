@@ -1,4 +1,4 @@
-"""Acceptance check for the v1.13 read-side fast paths (pure ASCII on purpose: PS 5.1 reads
+﻿"""Acceptance check for the v1.13 read-side fast paths (pure ASCII on purpose: PS 5.1 reads
 non-ASCII .ps1/.py as ANSI and mangles Chinese strings).
 
     python check_textpaths.py            # full run on the two committed fixtures
@@ -47,7 +47,7 @@ def check(name, ok, detail=''):
 
 
 def run(args):
-    p = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(WORD)] + args,
+    p = subprocess.run(['powershell', '-Mta', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(WORD)] + args,
                        capture_output=True, text=True, encoding='utf-8', errors='replace')
     try:
         return json.loads(p.stdout)

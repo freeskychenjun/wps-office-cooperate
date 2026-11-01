@@ -23,6 +23,7 @@ $includes = @(
     'reference\word-acceptance.md',
     'reference\excel-acceptance.md',
     'scripts\office.ps1',
+    'scripts\woc.cmd',
     'scripts\word.ps1',
     'scripts\excel.ps1',
     'scripts\ppt.ps1'
@@ -59,3 +60,4 @@ Get-ChildItem -LiteralPath $Target -Recurse -File | ForEach-Object {
 $copied = Get-ChildItem -LiteralPath $Target -Recurse -File
 $sum = ($copied | Measure-Object Length -Sum).Sum
 Write-Output ("published " + $copied.Count + " files, " + [math]::Round($sum / 1KB) + " KB -> " + $Target)
+

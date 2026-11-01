@@ -1,4 +1,4 @@
-// wps-excel-cooperate helper: drive WPS Spreadsheets (ET) over COM to read / write / comment /
+﻿// wps-excel-cooperate helper: drive WPS Spreadsheets (ET) over COM to read / write / comment /
 // render a .xlsx workbook live. Pure ASCII source (Chinese only ever travels inside JSON
 // strings), C# 5 (compiled by the in-box csc.exe of .NET Framework 4.x), no third-party
 // dependency.
@@ -291,14 +291,46 @@ internal static class Program
         Console.OutputEncoding = new UTF8Encoding(false);
         // Detached tray daemon mode: same binary, message-loop instead of a COM request.
         if (args != null && args.Length >= 2 && args[0] == "--tray") return TrayDaemon.Run(args[1]);
+        // v1.15 resident mode: keep the COM application alive and serve request JSON over a named
+        // pipe (same transport as the Word helper - see helper/shared/PipeServer.cs).
+        if (args != null && args.Length >= 2 && args[0] == "--serve")
+            return PipeServer.Run(args[1], HandleRequest, OpenDocumentCount);
+
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
+        if (requestPath == null)
+        {
+            Console.Out.Write("{\"ok\":false,\"error\":{\"code\":\"BAD_ARGS\",\"message\":\"usage: EtHelper.exe <request.json> <response.json> | --serve <pipe> | --tray <state>\"}}");
+            return 1;
+        }
+        string text = HandleRequest(File.ReadAllText(requestPath, Encoding.UTF8));
+        if (responsePath != null) File.WriteAllText(responsePath, text, new UTF8Encoding(false));
+        else Console.Out.Write(text);
+        return 0;
+    }
 
+    /// <summary>Set by "daemon-stop": the resident loop exits after answering that request.</summary>
+    private static bool _daemonStop;
+
+    /// <summary>Open documents in this automation instance (the daemon's exit rule).</summary>
+    private static int OpenDocumentCount()
+    {
+        try
+        {
+            if (_daemonStop) return 0;
+            if (_app == null) return 0;
+            return (int)_app.Workbooks.Count;
+        }
+        catch (Exception) { return 0; }
+    }
+
+    /// <summary>One request JSON in, one response JSON out (shared by one-shot and resident modes).</summary>
+    private static string HandleRequest(string requestJson)
+    {
         object response;
         try
         {
-            if (requestPath == null) throw new Fail("BAD_ARGS", "usage: EtHelper.exe <request.json> <response.json>");
-            Bag bag = new Bag(Json.Parse(File.ReadAllText(requestPath, Encoding.UTF8)));
+            Bag bag = new Bag(Json.Parse(requestJson));
             string cmd = bag.Str("cmd", "").Trim().ToLowerInvariant();
             if (cmd.Length == 0) throw new Fail("BAD_ARGS", "\"cmd\" is required");
             response = Ok(cmd, Dispatch(cmd, bag));
@@ -315,16 +347,24 @@ internal static class Program
                 || msg.IndexOf("busy", StringComparison.OrdinalIgnoreCase) >= 0
                 || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0;
             response = Err(busy ? "BUSY" : "COM_ERROR", msg + " (0x" + e.HResult.ToString("X8", CultureInfo.InvariantCulture) + ")");
+            if (!busy) { try { _app = null; } catch (Exception) { } }
         }
         catch (Exception e)
         {
             response = Err("INTERNAL", e.GetType().Name + ": " + Clean(e.Message));
         }
 
-        string text = Json.Write(response);
-        if (responsePath != null) File.WriteAllText(responsePath, text, new UTF8Encoding(false));
-        else Console.Out.Write(text);
-        return 0;
+        return Json.Write(response);
+    }
+
+    /// <summary>Liveness probe for the resident daemon: no COM, returns at once.</summary>
+    private static object Ping()
+    {
+        Dictionary<string, object> d = new Dictionary<string, object>();
+        d["pong"] = true;
+        try { d["pid"] = Process.GetCurrentProcess().Id; } catch (Exception) { }
+        d["serving"] = _app != null;
+        return d;
     }
 
     private static Dictionary<string, object> Ok(string cmd, object result)
@@ -351,6 +391,8 @@ internal static class Program
     {
         switch (cmd)
         {
+            case "ping": return Ping();
+            case "daemon-stop": _daemonStop = true; return new Dictionary<string, object> { { "stopped", true } };
             case "doctor": return Doctor(a);
             case "status": return Status(a);
             case "open": return OpenBook(a);

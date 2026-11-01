@@ -1,4 +1,4 @@
-# wps-office-cooperate (ppt): thin wrapper around WppHelper.exe.
+﻿# wps-office-cooperate (ppt): thin wrapper around WppHelper.exe.
 # Pure ASCII source (Chinese only ever travels inside JSON files, never in this script).
 #
 #   ppt.ps1 <command> [-Doc <path>] [options]
@@ -9,7 +9,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'replace', 'selection', 'slide', 'split', 'merge', 'text', 'textbox', 'image', 'picture', 'comment', 'export', 'table', 'chart', 'shape',
-                 'format', 'font', 'theme', 'master', 'audit', 'check', 'outline', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish', 'hint')]
+                 'format', 'font', 'theme', 'master', 'audit', 'check', 'outline', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'finish', 'hint', 'serve')]
     [string]$Command,
 
     [string]$Doc,
@@ -145,12 +145,73 @@ if ($helperSources.Count -eq 0) { Write-Error-Json 'NO_HELPER' ('No .cs in ' + $
 $sharedDir = Join-Path $scriptRoot 'helper\shared'
 if (Test-Path -LiteralPath $sharedDir) { $helperSources += @(Get-ChildItem -LiteralPath $sharedDir -Filter *.cs | Sort-Object Name) }
 
+# ---------------------------------------------------------------- resident daemon (v1.15)
+# Same transport as the Word wrapper: a warm helper keeps the COM application and answers request
+# JSON over a named pipe, so a command no longer pays "start exe + attach to WPS + find document".
+$daemonPipe = $null
+
+function Get-DaemonPipeName([string]$shaGen12) { return ('woc-ppt-' + $shaGen12) }
+
+function Invoke-Daemon([string]$payload, [int]$connectMs) {
+    if ($script:daemonPipe -eq $null) { return $null }
+    $pipe = $null
+    try {
+        $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $script:daemonPipe, [System.IO.Pipes.PipeDirection]::InOut)
+        $pipe.Connect($connectMs)
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $len = [System.BitConverter]::GetBytes([int]$bytes.Length)
+        $pipe.Write($len, 0, 4)
+        $pipe.Write($bytes, 0, $bytes.Length)
+        $pipe.Flush()
+        $hdr = New-Object byte[] 4
+        $got = 0
+        while ($got -lt 4) {
+            $n = $pipe.Read($hdr, $got, 4 - $got)
+            if ($n -le 0) { return $null }
+            $got += $n
+        }
+        $total = [System.BitConverter]::ToInt32($hdr, 0)
+        if ($total -le 0 -or $total -gt 33554432) { return $null }
+        $buf = New-Object byte[] $total
+        $got = 0
+        while ($got -lt $total) {
+            $n = $pipe.Read($buf, $got, $total - $got)
+            if ($n -le 0) { return $null }
+            $got += $n
+        }
+        return [System.Text.Encoding]::UTF8.GetString($buf)
+    } catch {
+        return $null
+    } finally {
+        if ($pipe) { try { $pipe.Dispose() } catch { } }
+    }
+}
+
+function Start-Daemon([string]$exePath2) {
+    if ($env:WOC_NO_DAEMON -eq '1') { return $false }
+    $probe = '{"cmd":"ping"}'
+    if ($null -ne (Invoke-Daemon $probe 300)) { return $true }
+    try {
+        Start-Process -FilePath $exePath2 -ArgumentList @('--serve', $script:daemonPipe) -WindowStyle Hidden | Out-Null
+    } catch {
+        return $false
+    }
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 100
+        if ($null -ne (Invoke-Daemon $probe 300)) { return $true }
+    }
+    return $false
+}
+
+
 # The cache key covers every source file, so editing any of them rebuilds.
 $hashInput = ($helperSources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
 $shaGen = [System.Security.Cryptography.SHA256]::Create()
 $sha = ([System.BitConverter]::ToString($shaGen.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($hashInput))) -replace '-', '').ToLowerInvariant().Substring(0, 12)
 $cacheDir = Join-Path $env:LOCALAPPDATA ('wps-office-cooperate\ppt-helper-' + $sha)
+$script:daemonPipe = Get-DaemonPipeName $sha
 $exePath = Join-Path $cacheDir 'WppHelper.exe'
+
 
 if (-not (Test-Path -LiteralPath $exePath)) {
     $csc = $null
@@ -528,6 +589,29 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'save needs -Doc' }
         if ($As) { $request['as'] = Resolve-FullPath $As }
     }
+    'serve' {
+        $act = if ($Action) { $Action.ToLowerInvariant() } else { 'start' }
+        if ($act -eq 'stop') {
+            $null = Invoke-Daemon '{"cmd":"daemon-stop"}' 800
+            $serveOut = @{ ok = $true; cmd = 'serve'; result = @{ action = 'stop'; pipe = $script:daemonPipe; note = 'stop requested; the daemon exits after answering' } }
+            [Console]::Out.Write(($serveOut | ConvertTo-Json -Depth 6 -Compress))
+            exit 0
+        }
+        if ($act -eq 'status') {
+            $alive = ($null -ne (Invoke-Daemon '{"cmd":"ping"}' 300))
+            $serveOut = @{ ok = $true; cmd = 'serve'; result = @{ action = 'status'; running = $alive; pipe = $script:daemonPipe } }
+            [Console]::Out.Write(($serveOut | ConvertTo-Json -Depth 6 -Compress))
+            exit 0
+        }
+        $okStart = Start-Daemon $exePath
+        if ($okStart) {
+            $serveOut = @{ ok = $true; cmd = 'serve'; result = @{ action = 'start'; started = $true; pipe = $script:daemonPipe } }
+        } else {
+            $serveOut = @{ ok = $false; error = @{ code = 'DAEMON_FAILED'; message = 'the resident helper did not come up; commands still work through the one-shot path' } }
+        }
+        [Console]::Out.Write(($serveOut | ConvertTo-Json -Depth 6 -Compress))
+        exit 0
+    }
     'close' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'close needs -Doc' }
         $request['save'] = [bool]$Save
@@ -553,6 +637,15 @@ switch ($Command) {
 }
 
 $json = $request | ConvertTo-Json -Depth 12 -Compress
+
+if ($Command -ne 'serve' -and $env:WOC_NO_DAEMON -ne '1') {
+    $daemonText = Invoke-Daemon $json 900
+    if ($null -ne $daemonText) {
+        [Console]::Out.Write($daemonText)
+        if ($daemonText -match '"ok"\s*:\s*false') { exit 2 }
+        exit 0
+    }
+}
 $work = Join-Path $env:TEMP ('wps-office-cooperate-ppt-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $requestPath = Join-Path $work 'request.json'
@@ -575,6 +668,7 @@ $text = [System.IO.File]::ReadAllText($responsePath, [System.Text.Encoding]::UTF
 Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
 [Console]::Out.Write($text)
 if ($text -match '"ok"\s*:\s*false') { exit 2 }
+if ($Command -eq 'open') { $null = Start-Daemon $exePath }
 # -ExitCode turns `check` into a gate: a non-zero blocker count fails the call, so a
 # script (or CI) can refuse to ship the deck without parsing the JSON.
 if ($ExitCode -and $text -match '"blocker"\s*:\s*[1-9]') { exit 3 }

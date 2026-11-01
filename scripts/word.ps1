@@ -212,6 +212,7 @@ $cacheDir = Join-Path $env:LOCALAPPDATA ('wps-office-cooperate\word-helper-' + $
 $script:daemonPipe = Get-DaemonPipeName $sha
 $exePath = Join-Path $cacheDir 'WpsHelper.exe'
 
+
 if (-not (Test-Path -LiteralPath $exePath)) {
     $csc = $null
     foreach ($arch in @('Framework64', 'Framework')) {
