@@ -53,3 +53,12 @@
 | `chart` 建完**无法移动/缩放**（v1.16 及更早） | 尺寸写死 `Add(left, top, 480, 300)`；125% 缩放下 480 pt ≈ 800 px，放在右侧会被窗口裁掉，只能删了重建（反馈方重建 2 轮 4 张图） | v1.17：`-Width/-Height` + `-Action move -Index n [-Anchor X] [-Width] [-Height]`；实操建议图表默认放内容下方，别放右侧 |
 | `chart` **只能单系列**（v1.16 及更早） | 取「第一列=x、最后一列=值」，`-Range A14:E25` 只画一列 | v1.17：第 2..N 列各一条系列（表头作系列名、多系列自动出图例），并支持 `-XTitle/-YTitle` |
 | 没有「激活工作表」原语（v1.16 及更早） | `sheet` 只有 list/add/rename/delete，agent 只能裸 COM `Worksheets.Item(n).Activate()`（违反铁律 0） | v1.17：`sheet -Action activate -Name X` |
+
+## v1.18 补充（2026-11-02，三端参数校验 + 颜色通道 + 窗口归属）
+
+| 现象 | 实测表现 | 正确写法 |
+|---|---|---|
+| **`-Color` / `-FillColor` 红蓝互换**（v0.1–v1.17 一直存在） | COM 的 `Font.Color` / `Interior.Color` 低 24 位是 **BGR**（`R + G*256 + B*65536`），而旧 `ColorFrom` 返回的是 System.Drawing 的 ARGB 掩码（RGB），于是 `-Color "#FF0000"` 渲染成**蓝色**、`"#0000FF"` 渲染成**红色**。2026-11-02 用红/蓝/绿三格对照图抓到的；Word 侧 `WpsHelper.cs` 一直是 `r + g*256 + b*65536`（正确），只有 Excel 侧写反 | v1.18 已改为 `r \| (g<<8) \| (b<<16)`；写颜色前想核对可读回 `Range.Font.Color`（纯红应为 **255**，纯蓝 **16711680**） |
+| **WPS 12 的窗口属于 `wps.exe`，不是 `et.exe`** | 另一台机器实测（1536×864 / 125%）：`et.exe` 存在但 `MainWindowHandle = 0`；真正带窗口的是 `wps.exe`。想用 `PrintWindow` / `GetWindowRect` 抓整窗必须先按 `wps.exe` 找窗口 | 抓窗：`Get-Process wps | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1`；但**优先用 `render -IncludeCharts`**，不要截屏 |
+| 窗口尺寸 ≠ 屏幕尺寸 | 125% 缩放下 480 pt ≈ 800 px；1536 px 宽的屏，A–F 列占 ~1030 px，右侧只剩 ~500 px ⇒ 按 `-Anchor G4` 建 480×300 的图会被窗口右缘裁掉 | 图表默认放**内容下方**（A 列起）；或用 `chart -Width/-Height` 缩到 ≤400 px 再放右侧 |
+| 参数被静默丢弃 | 包装层把 `$PSBoundParameters` 转成 JSON，绑定了却没转发进 request 的参数会**无声消失**（`chart -Sheet` 就这样把图建到了活动表） | v1.18 起三端共用 `scripts\param-check.ps1`：未消费参数在 **stderr** 打 `WARN ignored parameter -X for command "Y"`；`WOC_NO_PARAMCHECK=1` 可关 |

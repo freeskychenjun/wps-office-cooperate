@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.18（2026-11-02）**：**三端统一参数校验 + 批量排版 + 一个藏了很久的颜色 BUG**。① **参数消费校验做成三端共用**：`scripts\param-check.ps1` 里的 `Test-ParamConsumption` 被 `word.ps1` / `excel.ps1` / `ppt.ps1` 共用（v1.17 只在 Excel 侧内联）。判定顺序 = 别名表 → 该端的 `$formatFields` 映射 → 首字母小写约定；显式传默认值（`-From 1`、`-Index 0`）不误报；`WOC_NO_PARAMCHECK=1` 可关。**已知留白**：Word 的 `-Tables` 参数至今没有任何命令消费它（会告警，属真实缺口）。② **`format -Items <json>` 批量形态**：每块自带 range + 格式项，还能按块指定 `sheet`，一次调用排完整版（分号多区域只能共用一套选项，这个能每块不同）。③ **修掉 `-Color`/`-FillColor` 红蓝互换**（v0.1–v1.17 一直存在）：COM 的 `Font.Color`/`Interior.Color` 低 24 位是 **BGR**，旧 `ColorFrom` 给的是 RGB 掩码 ⇒ `-Color "#FF0000"` 渲染成蓝色。Word 侧一直是对的（`r + g*256 + b*65536`），只有 Excel 写反；已用红/蓝/绿三格对照图验证。④ 文档补：WPS 12 的窗口属于 **`wps.exe`**（`et.exe` 的 `MainWindowHandle = 0`），以及 125% 缩放下图表放右侧会被窗口裁掉的尺寸账。
+
 **版本 v1.17（2026-11-02）**：**按另一台机器的实战反馈（v1.15，18 min 里 12 min 花在缺陷上）修一轮**，重点消灭「静默丢弃」与「逃生需求」。① **`chart` 静默忽略 `-Sheet`**（P0，反馈方耗 ~6 min）：包装层没转发 `-Sheet`，图表永远落在 ActiveSheet，且 `list/delete` 同样绑 ActiveSheet ⇒ 落错表后无法自救。现已转发全部 action，并新增 **`chart -Action list -All`**（跨表扫描，带 `sheet/index/name/type/title/left/top/width/height` 几何信息）；活动表解析改走 **`wb.Windows(1).ActiveSheet`**（WPS 12 的 `wb.ActiveSheet` 会与窗口不一致、两条命令之间还会跳变）。② **`woc.cmd` 吞参数**（P0，反馈方耗 ~3 min）：cmd.exe 在 batch 之前就把 `=A15^1.5` 改成 `A151.5`、把前导 `=` 吃掉，`fill/write -Formula` 基本全废。新增 **`scripts\woc.ps1`**（PowerShell→PowerShell 不经过 cmd 解析，`= ^ & | > $` 原样到达），文档改推荐它；`woc.cmd` 保留但标注「公式/特殊字符别走它」。③ **参数消费校验**：包装层现在对「绑定了却没进 request」的参数在 stderr 打 `WARN ignored parameter ...`，同类静默丢弃以后一眼可见。④ **`chart` 能力补齐**：`-Width/-Height`（pt，默认 480×300）、**`-Action move -Index n [-Anchor X] [-Width/-Height]`**（以前建完只能删了重建）、**多系列**（第 1 列=x，第 2..N 列各一条系列，表头作系列名）、`-XTitle/-YTitle` 轴标题——「Q–H 族曲线」终于能一张图讲完。⑤ **`sheet -Action activate -Name X`**（以前只能裸 COM `GetActiveObject` 逃生）。⑥ **`format` 多区域**：`-Range "A4:E4;A13:E13;A27:E27"` 一条命令排完整版（反馈方 26 次串行 ≈ 20 s）。⑦ **修正 v1.16 的错误结论**：实测 `Range.CopyPicture(xlScreen)` **会**把与该区域相交的浮动图表画进去（A1:H52 有图、A1:H10 无图）；`-IncludeCharts` 的正确语义是**把视图扩到覆盖全部图表**（不再二次合成，否则重复画）。
 
 **版本 v1.16（2026-11-01）**：**Excel 侧补齐「能新建、能看见图表」两块短板**，起因是一次 53.7 min / 80 步的会话归因（详见文末「视觉核对纪律」）。① **`excel new -Doc <路径>`**：`Workbooks.Add` + `SaveAs`，直接造空白工作簿并打开（`EXISTS` / `IN_USE` 两个拒绝码），以前只能靠 `open`（对不存在的路径报 `NOT_OPEN`）或自己写 openpyxl 造文件再打开——那次光「建个空表并打开」就花了 22 步 / 10.2 min。② **`excel render -IncludeCharts`**：把视图自动扩到覆盖该表全部浮动图表再出图，返回 `chartsIncluded` 与每张图的 `left/top`——一次 `render -IncludeCharts` 就能看到「表 + 全部图表」的整版效果，不用再整屏截图 + `SetForegroundWindow` + `mouse_event` 滚轮翻页（那次占 24 步 / 30%）。实测同一份 5 图宽顶堰工作簿：一条命令出 1400×1863 整版图（`chartsIncluded:5`）。③ `chart` 的单系列 / 数据须同表 / 尺寸写死 480×300pt 三条限制、`format -Borders` 取值、`render` 的图表语义已写进「Excel 侧已知限制」表（v1.17 起多系列与尺寸已放开）。④ 顺带修掉 v1.15 的 `-Borders grid` 画对角线 BUG（XlBordersIndex 5/6 是 xlDiagonalDown/Up）。⑤ 常驻/一次性 A/B 仍然逐字节一致（新增命令也测了）。
@@ -277,7 +279,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `render` | `-Doc [-Sheet] [-Range] -Out <目录> [-Width 1100]` **`[-IncludeCharts]`** | 区域 `CopyPicture(xlScreen)` → PNG。**语义（v1.17 实测修正）**：图里**会**包含与该区域相交的浮动图表（A1:H52 有两张图 → 都拍到；A1:H10 无重叠 → 一张也没有），但**不含区域之外的**图表。`-IncludeCharts` 把视图自动扩到覆盖该表**全部**图表再出图（返回 `chartsIncluded` 与每张图 `left/top`）——有图表的表用它，**一次成图，不要再截桌面** |
 | `chart` | 加：`-Range 数据区 [-Type column\|bar\|line\|pie\|scatter\|area] [-Title] [-XTitle] [-YTitle] [-Anchor E2] [-Width 480] [-Height 300]`；`-Action list [-All]`；`-Action delete\|move -Index n [-Anchor X] [-Width] [-Height]` | 建原生图表。**v1.17**：① 第 1 列=x，**第 2..N 列各一条系列**（表头作系列名，多系列自动出图例）——「Q–H 族曲线」一张图即可；② 尺寸可调（默认 480×300 pt）；③ 建完可 `move` 挪位/缩放，不用删了重建；④ `list -All` 跨表列出全部图表与几何信息；⑤ `-Sheet` 已正确转发（v1.16 及更早会静默落到活动表） |
 | `autofit` | `-Doc [-Sheet] [-Range]` | 列宽行高自适应 |
-| `format` | `-Doc -Range A1:D1 [-Sheet] + 格式项`；**多区域：`-Range "A4:E4;A13:E13;A27:E27"`（分号分隔，v1.17）** | 字体/字号/加粗/颜色/填充/对齐/数字格式/列宽/行高/框线/换行。一次调用排完整版，别再逐块串行（实测 26 次 ≈ 20 s）。**关掉某项用 `-NoBold/-NoItalic/-NoUnderline/-NoWrap`**（v1.17：`-Bold:$false` 过不了 `powershell -File` 的参数解析） |
+| `format` | `-Doc -Range A1:D1 [-Sheet] + 格式项`；**多区域：`-Range "A4:E4;A13:E13;A27:E27"`（分号，v1.17）**；**每块不同格式：`-Items <json>`（v1.18，见下）** | 字体/字号/加粗/颜色/填充/对齐/数字格式/列宽/行高/框线/换行。一次调用排完整版，别再逐块串行（实测 26 次 ≈ 20 s）。**关掉某项用 `-NoBold/-NoItalic/-NoUnderline/-NoWrap`**（v1.17：`-Bold:$false` 过不了 `powershell -File` 的参数解析）。**v1.18 起 `-Color`/`-FillColor` 的 RGB 通道已修正**（之前红蓝互换） |
 | `snapshot` | `-Doc [-Sheet 名1,名2] [-Out <路径>]` | 存工作表的值+公式快照（默认全部表；大表用 `-Sheet` 限定范围，diff/restore 也只在该范围内比对/回滚，不碰未覆盖的表；默认存 %LOCALAPPDATA%，`-Out` 随文档带走） |
 | `diff` | `-Doc [-Since 快照路径\|last]` | 和快照比：哪些格改了（before→after，含公式联动）、哪些增删——**人改的和 Agent 改的都算** |
 | `restore` | `-Doc [-Since 快照路径\|last] [-Cells "Sheet1!C2,Sheet1!E2"] [-KeepExtras]` | **一键撤回**：把工作簿还原到快照状态（只改有差异的格；快照后新增的非空格默认清空，`-KeepExtras` 保留）。`-Cells` = **选择性回滚**，只还原点名的格（快照中没有的点名格清空），其余一切——包括人改的——原样保留。只还原内存，`diff` 验证后再决定 `save` 或不保存直接 `close` |
@@ -308,7 +310,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
    ```
 2. **公式里的 `$` 在 PowerShell 双引号里会被插值**（`"=$B$5*2"` → `=*5*2`，WPS 报 `0x8FE3000B` 这种诡异 HRESULT）。**含 `$` 的公式用单引号** `-Formula '=$B$5*2*SQRT(2*$B$6)*B15'`；含 `=`/`^` 又不方便转义时，走 `-Items <json>` 文件。
 3. **中文一律走 JSON 文件**（`write -Items`、`comment -TextFile`），不要塞进命令行——`woc.cmd` 那条路还受 OEM 代码页影响。
-4. **参数被静默忽略会告警**：包装层对「绑定了却没进 request」的参数在 stderr 打 `WARN ignored parameter -X for command "Y"`。看到就说明这条命令不吃该参数（v1.16 前是静默丢弃，`chart -Sheet` 就是这么丢的）。
+4. **参数被静默忽略会告警（三端通用，v1.18）**：`scripts\param-check.ps1` 被 Word/Excel/PPT 三个包装器共用，对「绑定了却没进 request」的参数在 stderr 打 `WARN ignored parameter -X for command "Y"`。看到就说明这条命令不吃该参数（v1.16 前是静默丢弃，`chart -Sheet` 就是这么丢的）。显式传默认值（`-From 1`、`-Index 0`）不会误报；`WOC_NO_PARAMCHECK=1` 可整轮关掉。
+5. **颜色通道（Excel 侧 v1.18 修）**：`-Color`/`-FillColor` 之前红蓝互换（COM 要 BGR，旧代码给 RGB），现在 `#FF0000` 就是红色。若历史脚本里颜色看起来"反了"，按新行为重跑即可。
 
 ### skill 没覆盖时：合法逃生通道
 
@@ -345,6 +348,23 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 - 定位：`cell` 单格或 `range` 区块；工作表用 `sheet` 字段，或直接写 `"Sheet名!A1"` 引用（名字带空格/特殊字符用单引号包住）。
 - `expect` 可选但强烈建议：该格**当前显示文本**必须与它完全相等才动手，不符即 `ANCHOR_MISSING`、**整批一条不改**——防编号漂移、防"人刚改了这格"。
 - 整批原子：全部校验通过才开写；万一中途 COM 报错，已写的格用捕获的旧 Formula **逐格还原**，错误信息里写"rolled back N cell(s)"。
+
+### `format` 的 items 格式（v1.18，每块不同格式）
+
+分号多区域（`-Range "A1:E1;A5:E5"`）只能共用**一套**格式项；要「表头加粗蓝底、数值 0.00、第一列红字」这种**每块不同**的排版，用 `-Items`：
+
+```json
+{"items":[
+  {"sheet":"Sheet1","range":"A1:C1","bold":true,"size":"16","fillColor":"#D9E1F2","halign":"center","borders":"grid"},
+  {"sheet":"Sheet1","range":"A2:C5","numberFormat":"0.00","borders":"grid"},
+  {"sheet":"Sheet1","range":"A2:A5","color":"#C00000","bold":true},
+  {"sheet":"Sheet1","range":"A7:C7","font":"黑体","size":"12","italic":true}
+]}
+```
+
+- 每块字段与命令行格式项同名（`font/size/bold/italic/underline/color/fillColor/halign/valign/wrap/numberFormat/colWidth/rowHeight/borders`），可写 `sheet`，`range` 里还能再用分号并多个区域。
+- 关掉某项用 `false`（JSON 里是布尔，不受 `powershell -File` 参数解析限制）；命令行侧对应 `-NoBold/-NoItalic/-NoUnderline/-NoWrap`。
+- 返回 `{"items":[{sheet, ranges:[{range, applied}]}], count:n}`；某块没有格式项直接 `BAD_ARGS`。
 - 每条返回 `before`/`after`（写入前后该格显示文本）——**立刻比对**，能第一时间发现写错位置。
 - **撤销**：表格的 COM 修改不进撤销栈且会清掉用户自己的撤销记录——写前 `snapshot`、写后看 before/after，别指望 Ctrl+Z。
 

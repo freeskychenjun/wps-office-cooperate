@@ -636,6 +636,23 @@ switch ($Command) {
     }
 }
 
+# ---------------------------------------------------------------- parameter consumption check (v1.18)
+# Shared with the other two wrappers: any bound parameter this command did not copy into the
+# request warns on stderr instead of vanishing (see scripts\param-check.ps1).
+$paramAliases = @{
+    HintTag = 'tag'; KeepCrop = 'resetCrop'; FitInside = 'keepSize'
+}
+$paramCommandSkips = @{
+    '*' = @('ExitCode')
+    'text' = @('Expect', 'Text', 'TextFile', 'Shape', 'ShapeIdx', 'Slide')
+}
+$paramCheckPath = Join-Path $PSScriptRoot 'param-check.ps1'
+if (Test-Path -LiteralPath $paramCheckPath) {
+    . $paramCheckPath
+    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Slide = 0; ShapeIdx = 0; L = -1; T = -1; W = 0; H = 0 }
+Test-ParamConsumption -Command $Command -Bound $PSBoundParameters -Request $request `
+        -Aliases $paramAliases -FormatFields $formatFields -CommandSkips $paramCommandSkips -DefaultValues $paramDefaultValues
+}
 $json = $request | ConvertTo-Json -Depth 12 -Compress
 
 if ($Command -ne 'serve' -and $env:WOC_NO_DAEMON -ne '1') {

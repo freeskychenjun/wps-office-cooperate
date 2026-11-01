@@ -584,6 +584,24 @@ switch ($Command) {
     }
 }
 
+# ---------------------------------------------------------------- parameter consumption check (v1.18)
+# Shared with the other two wrappers: any bound parameter this command did not copy into the
+# request warns on stderr instead of vanishing (see scripts\param-check.ps1).
+$paramAliases = @{
+    TextFile = 'text'; HintTag = 'tag'; Case = 'caseSensitive'
+    NoNumbering = 'numbering'; HeaderRow = 'header'; AtPara = 'para'
+    HeaderText = 'header'; FooterText = 'footer'; PageNumber = 'pageNumber'
+}
+$paramCommandSkips = @{
+
+}
+$paramCheckPath = Join-Path $PSScriptRoot 'param-check.ps1'
+if (Test-Path -LiteralPath $paramCheckPath) {
+    . $paramCheckPath
+    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Para = 0; To = 0; Row = 0; Col = 0; Table = 0; AtPara = 0; Passes = 0; Slide = 0 }
+Test-ParamConsumption -Command $Command -Bound $PSBoundParameters -Request $request `
+        -Aliases $paramAliases -FormatFields $formatFields -CommandSkips $paramCommandSkips -DefaultValues $paramDefaultValues
+}
 $json = $request | ConvertTo-Json -Depth 12 -Compress
 
 # Resident path first: same request JSON, same response JSON, just no process start and no COM

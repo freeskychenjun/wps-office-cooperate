@@ -1921,6 +1921,10 @@ internal static class Program
         return v;
     }
 
+    // COM wants the colour packed as BGR in the low 24 bits (value = R + G*256 + B*65536), not as
+    // the ARGB int System.Drawing produces. Getting this backwards silently swaps red and blue:
+    // `-Color "#FF0000"` rendered BLUE until 2026-11-02 (found while testing the format batch form;
+    // the Word helper already packed BGR correctly - WpsHelper.cs "r + g * 256 + b * 65536").
     private static int ColorFrom(string s)
     {
         string t = s.Trim().TrimStart('#');
@@ -1928,7 +1932,10 @@ internal static class Program
         {
             int v;
             if (int.TryParse(t, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v))
-                return Color.FromArgb((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF).ToArgb() & 0xFFFFFF;
+            {
+                int r = (v >> 16) & 0xFF, g = (v >> 8) & 0xFF, b = v & 0xFF;
+                return r | (g << 8) | (b << 16);
+            }
         }
         throw new Fail("BAD_ARGS", "color must look like #C00000, got \"" + s + "\"");
     }
@@ -1994,6 +2001,39 @@ internal static class Program
         dynamic wb = RequireBook(a, true);
         dynamic ws = TargetSheet(wb, a);
         if (ws == null) throw new Fail("COM_ERROR", "No target sheet.");
+        // Batch form (v1.18): {"items":[{"range":"A1:E1","bold":true,"fillColor":"#D9E1F2"},
+        //                                {"sheet":"Sheet2","range":"A5:E5","font":"黑体"}]}
+        // Each item carries its own options, so one command can lay out a whole sheet with
+        // per-block differences (the semicolon list below only supports ONE option set).
+        List<object> batch = a.List("items");
+        if (batch.Count > 0)
+        {
+            List<object> results = new List<object>();
+            for (int i = 0; i < batch.Count; i++)
+            {
+                Bag one = new Bag(batch[i]);
+                string rangeText0 = one.Need("range");
+                dynamic sheet = ws;
+                string sheetName = one.Str("sheet", null);
+                if (sheetName != null) sheet = SheetByName(wb, sheetName);
+                string[] chunks = rangeText0.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+                List<object> applied = new List<object>();
+                for (int c = 0; c < chunks.Length; c++)
+                {
+                    string part0 = chunks[c].Trim();
+                    if (part0.Length == 0) continue;
+                    List<object> done0 = ApplyFormat(sheet.Range(part0), one);
+                    if (done0.Count == 0)
+                        throw new Fail("BAD_ARGS", "format items[" + i + "] for \"" + part0 + "\" has no formatting option");
+                    applied.Add(new Dictionary<string, object> { { "range", part0 }, { "applied", done0 } });
+                }
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["sheet"] = Convert.ToString(TryGet(() => (object)sheet.Name, ""), CultureInfo.InvariantCulture);
+                entry["ranges"] = applied;
+                results.Add(entry);
+            }
+            return new Dictionary<string, object> { { "items", results }, { "count", results.Count } };
+        }
         string rangeText = a.Need("range");
         // Semicolon-separated list: one round trip formats many disjoint blocks (v1.16 - a
         // formatting pass used to cost one command per block, ~0.5-0.8 s each).
