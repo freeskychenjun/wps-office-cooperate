@@ -2902,7 +2902,12 @@ internal static partial class Program
                     if (!on) continue;
                     dynamic shape = shapes.AddShape(5, left, top, markW, markH);   // msoShapeRoundedRectangle
                     shape.Name = MarkShapeName;
+                    // the theme's default shape style can bring a gradient / transparency with it
+                    // (measured: the pill washed out on a plain white deck), so force a solid fill
+                    try { shape.Fill.Solid(); } catch (Exception) { }
+                    try { shape.Fill.Visible = -1; } catch (Exception) { }
                     try { shape.Fill.ForeColor.RGB = 0x227EE6; } catch (Exception) { }   // BGR for orange
+                    try { shape.Fill.Transparency = 0; } catch (Exception) { }
                     try { shape.Line.Visible = 0; } catch (Exception) { }
                     try { shape.Shadow.Visible = 0; } catch (Exception) { }
                     dynamic tf = shape.TextFrame;
@@ -2911,7 +2916,7 @@ internal static partial class Program
                     try { tf.VerticalAnchor = 3; } catch (Exception) { }          // msoAnchorMiddle
                     dynamic tr = tf.TextRange;
                     tr.Text = TitleTag;
-                    try { tr.Font.Size = Math.Round(markH * 0.42, 1); } catch (Exception) { }
+                    try { tr.Font.Size = Math.Round(markH * 0.46, 1); } catch (Exception) { }
                     tr.Font.Bold = -1;
                     tr.Font.Color.RGB = 0xFFFFFF;
                     try { tr.ParagraphFormat.Alignment = 2; } catch (Exception) { }   // msoAlignCenter
