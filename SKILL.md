@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.24（2026-11-02）**：**跨 app 多任务编排（P3）**——新增 `scripts\tasks-session.ps1`（plan/check/selftest）：输入任务板 `board.json`（id/app/doc/kind/priority/dependsOn），输出**波次调度** `schedule.json`：同一文档自动串行（隐式链），不同文档可同波并行（默认上限 3），显式 `dependsOn` 跨文档依赖也支持；带环检测与未知依赖校验。配套 `reference/multi-task-session.md`（物理约束、任务板字段、例、汇报与验收）。三端工具（`tasks.ps1` / `tasks-excel.ps1` / `tasks-ppt.ps1`）负责每波内部"并行规划、单写者提交"。
+
 **版本 v1.23（2026-11-02）**：**PPT 多任务（P2）**——新增 `scripts\tasks-ppt.ps1`（split/merge/plan/selftest）：`split` 按页区间取形状/文字；`merge` 按 `(页, 形状)` 合并最终文本、`replace` 规则重叠仲裁、批注每形状一条、全局（theme/master/font）与结构（加/删/移页）分列并给出顺序警告；`plan` 输出 `text/replace/comment-items` + `global/structure-ops` + `batch-ops.json`（顺序 **全局 → 文本 → 替换 → 批注**；结构改动必须先做并重读）。配套 `reference/multi-task-ppt.md` 与回归 `tests/ppt/multi-task/check_tasks.ps1`（19 条断言全过）。
 
 **版本 v1.22（2026-11-02）**：**Excel 多任务（P1）**——新增 `scripts\tasks-excel.ps1`（`split/merge/plan/selftest`）：`split` 按 `ranges.json` 逐块 `read -Range` 出切片；`merge` 按单元格/矩形区域合并（同格冲突保留高优先级、缺 `expect` 警告、批注每格一条、结构操作单独警告）；`plan` 输出 `writes/formats/comments/apply-order` 与 `batch-ops.json`（一次 `batch` 跑完 write→format→comment）。配套 `reference/multi-task-excel.md`（任务卡 schema / 四步流程 / 验收清单）、回归 `tests/excel/multi-task/check_tasks.ps1`（15 条断言全过，含冲突仲裁与 `diff` 对账）。边界：**一个 ET 实例只开一个工作簿**（第二个 `open` 会挂起，v1.21 已记录），多工作簿任务串行。
@@ -142,6 +144,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 汇报：回执写清任务清单与顺序理由（例如"T2 在 T1 之后，避免上标被整段重写冲掉"）；完成后分**局部改动 / 全局改动**两栏 + `diff` 摘要 + 待裁决项；**不要 `save`**，等用户确认（铁律 6）。
 
 细节（任务卡字段、三种组合的排法、实测坑与验收清单）见 [reference/multi-task.md](reference/multi-task.md)。
+
+**跨 app 编排**：多份文档/多个 app 的任务先用 `tasks-session.ps1 plan` 排波次（同文档串行、跨文档并行≤3），每波内部再用对应 app 的 `tasks-*.ps1`。
 
 **Excel / PPT 版**：Excel 用 `tasks-excel.ps1`（split/merge/plan，任务卡与坑见 [reference/multi-task-excel.md](reference/multi-task-excel.md)）；PPT 用 `tasks-ppt.ps1`（见 [reference/multi-task-ppt.md](reference/multi-task-ppt.md)）。三端共用同一条纪律：**并行规划、单写者提交**。
 
@@ -708,7 +712,8 @@ ppt check -Doc 稿.pptx -Config 院标规则.json -Out check.md
 - [reference/workflows.md](reference/workflows.md) —— Word 全部典型工作流分步教程 + 排版实测坑详解。
 - [reference/multi-task.md](reference/multi-task.md)
 - [reference/multi-task-excel.md](reference/multi-task-excel.md)
-- [reference/multi-task-ppt.md](reference/multi-task-ppt.md) —— PPT 多任务：页号/形状锚点、全局任务优先、结构先做、`tasks-ppt.ps1` 三条命令与验收。 —— Excel 多任务：任务卡字段、`tasks-excel.ps1` 三条命令、合并/冲突规则、提交顺序与验收。 —— 多任务协作（多章节 / 同章多任务 / 章节+全文）：任务卡字段、`tasks.ps1` 三条命令、提交顺序、合并规则、实测坑与验收清单。
+- [reference/multi-task-ppt.md](reference/multi-task-ppt.md)
+- [reference/multi-task-session.md](reference/multi-task-session.md) —— 跨 app 任务板与波次调度（`tasks-session.ps1`）、物理约束与验收。 —— PPT 多任务：页号/形状锚点、全局任务优先、结构先做、`tasks-ppt.ps1` 三条命令与验收。 —— Excel 多任务：任务卡字段、`tasks-excel.ps1` 三条命令、合并/冲突规则、提交顺序与验收。 —— 多任务协作（多章节 / 同章多任务 / 章节+全文）：任务卡字段、`tasks.ps1` 三条命令、提交顺序、合并规则、实测坑与验收清单。
 - [reference/word-quirks.md](reference/word-quirks.md) —— WPS Writer 与 Word 的实测差异表（冒充版本号、样式中文名、`Range` 是方法、关最后一个文档静默杀实例……）。
 - [reference/excel-quirks.md](reference/excel-quirks.md) —— WPS 表格 COM 的实测差异与坑（冒充 Excel、SaveAs 身份变化、块数组 0 基、渲染走剪贴板……）。
 - [reference/encryption.md](reference/encryption.md) —— 落盘即密文的现象、为什么 COM 路线不受影响、交付与解密链路。
