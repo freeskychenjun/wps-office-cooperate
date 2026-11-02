@@ -988,6 +988,15 @@ internal static partial class Program
         bool existed = FindOpen(full) != null;
         bool fileExisted = File.Exists(full);
         dynamic p = RequirePres(a, true, true);
+        if (a.Flag("show", true))
+        {
+            // An earlier hidden / window-less open leaves the user staring at nothing while we edit.
+            try { dynamic app = App(false, false); if (app != null) app.Visible = true; } catch (Exception) { }
+            int wins = 0;
+            try { wins = (int)p.Windows.Count; } catch (Exception) { }
+            if (wins == 0) { try { p.NewWindow(); } catch (Exception) { } }
+            try { p.Windows(1).Activate(); } catch (Exception) { }
+        }
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["name"] = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
         r["path"] = Convert.ToString(TryGet(() => (object)p.FullName, full), CultureInfo.InvariantCulture);

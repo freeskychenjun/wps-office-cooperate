@@ -904,7 +904,15 @@ internal static partial class Program
         string how;
         int wpsBefore = ProcessCount("wps");
         bool otherInstancePossible = false;
-        if (existing != null) { doc = existing; how = "reused"; }
+        if (existing != null)
+        {
+            doc = existing; how = "reused";
+            if (show)
+            {
+                try { dynamic app2 = App(false, false); if (app2 != null) app2.Visible = true; } catch (Exception) { }
+                try { doc.Activate(); } catch (Exception) { }
+            }
+        }
         else
         {
             // GetActiveObject only ever reaches the FIRST registered instance. If WPS is running

@@ -324,7 +324,11 @@ switch ($Command) {
     }
     'open' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'open needs -Doc' }
-        $request['show'] = [bool]$Show
+        # A takeover must be visible: default to showing the window (an earlier hidden open left the
+        # user staring at nothing while the helper edited a window they could not see). Pass -Show:$false
+        # explicitly if a hidden session is really what you want.
+        $request['show'] = $true
+        if ($PSBoundParameters.ContainsKey('Show')) { $request['show'] = [bool]$Show }
         $request['readOnly'] = [bool]$ReadOnly
         if ($NoHint) { $request['noHint'] = $true }
     }

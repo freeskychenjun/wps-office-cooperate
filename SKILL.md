@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.25（2026-11-02）**：**`open` 默认让窗口可见（接管必须看得见）**——起因：PPT 试点用 `open` 接管一份用户已打开的演示文稿时（未带 `-Show`），helper 把 WPS 窗口隐藏了，用户在界面上看不到任何改动、以为没生效。① 三端 `open` 默认 `show=true` 并 `Activate()`（Word/Excel 复用已打开的文档时也会激活窗口）；要隐藏必须显式 `-Show:$false`。② PPT 若文稿以"无窗口"方式打开（`Windows.Count == 0`），`open` 会 `NewWindow()` 补窗口再激活。③ 顺带确认：同一 WPP 实例可同时打开多份演示（与 Excel 一个实例只能开一个工作簿不同）。
+
 **版本 v1.24（2026-11-02）**：**跨 app 多任务编排（P3）**——新增 `scripts\tasks-session.ps1`（plan/check/selftest）：输入任务板 `board.json`（id/app/doc/kind/priority/dependsOn），输出**波次调度** `schedule.json`：同一文档自动串行（隐式链），不同文档可同波并行（默认上限 3），显式 `dependsOn` 跨文档依赖也支持；带环检测与未知依赖校验。配套 `reference/multi-task-session.md`（物理约束、任务板字段、例、汇报与验收）。三端工具（`tasks.ps1` / `tasks-excel.ps1` / `tasks-ppt.ps1`）负责每波内部"并行规划、单写者提交"。
 
 **版本 v1.23（2026-11-02）**：**PPT 多任务（P2）**——新增 `scripts\tasks-ppt.ps1`（split/merge/plan/selftest）：`split` 按页区间取形状/文字；`merge` 按 `(页, 形状)` 合并最终文本、`replace` 规则重叠仲裁、批注每形状一条、全局（theme/master/font）与结构（加/删/移页）分列并给出顺序警告；`plan` 输出 `text/replace/comment-items` + `global/structure-ops` + `batch-ops.json`（顺序 **全局 → 文本 → 替换 → 批注**；结构改动必须先做并重读）。配套 `reference/multi-task-ppt.md` 与回归 `tests/ppt/multi-task/check_tasks.ps1`（19 条断言全过）。
@@ -475,6 +477,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | **`open` 不存在的路径 = 新建** | 这是特性（新稿靠这次落盘确立身份），但路径写错会留下垃圾文件；旧返回与普通打开无法区分 | v1.19 起返回 `how:"created"` + `note`，看到 `created` 而你以为在打开已有文件 ⇒ 立刻检查路径 |
 | **未转义的 Windows 路径** | 手拼 JSON 时 `C:\Users\...` 里的 `\U`/`\A`/`\D` 被当非法转义，旧解析器**静默丢反斜杠** ⇒ `C:Users...`，再叠加"路径不存在就新建"就凭空多一份稿 | v1.19 起非法转义直接 `BAD_ARGS`；拼请求一律走 JSON 序列化器（`batch` 的 ops 文件也是） |
 | **渲染成本 ~355 ms/页** | 3 页 1471 ms；`check` 全规则 970 ms/次；`read` 3 页 632 ms | 设计阶段渲一次 `-Overview`（6 页/图），之后**只渲改动页**；`check` 过程别跑，收尾跑一遍 `-MinSeverity blocker`；`read` 一次读全稿并缓存形状名 |
+| **接管后窗口不可见**（v1.25 修） | 用 `open`（不带 `-Show`）接管用户已打开的演示时，窗口会被置为隐藏（`Windows.Count=0`/`Visible=false`），用户在 WPS 里看不到任何改动 | v1.25 起 `open` 默认显示并 `Activate()`；确实要后台跑才传 `-Show:$false` |
 | **daemon 必须保温** | 一次性模式 746 ms vs 保温 422 ms；`close` 掉最后一份文档后 daemon 自己退，下一条命令重新付 ~0.5 s | 一轮任务里别频繁 `close` 又重开；批量命令用 `batch`（一次启动跑一批） |
 
 ## PPT 命令速查

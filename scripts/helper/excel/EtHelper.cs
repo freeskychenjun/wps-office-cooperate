@@ -833,7 +833,15 @@ internal static class Program
         string how;
         int etBefore = ProcessCount("et");
         bool otherInstancePossible = false;
-        if (existing != null) { wb = existing; how = "reused"; }
+        if (existing != null)
+        {
+            wb = existing; how = "reused";
+            if (show)
+            {
+                try { dynamic app2 = App(false, false); if (app2 != null) app2.Visible = true; } catch (Exception) { }
+                try { wb.Activate(); } catch (Exception) { }
+            }
+        }
         else
         {
             // GetActiveObject only ever reaches the FIRST registered instance. If more than one
