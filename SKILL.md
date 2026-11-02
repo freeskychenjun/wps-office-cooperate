@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.22（2026-11-02）**：**Excel 多任务（P1）**——新增 `scripts\tasks-excel.ps1`（`split/merge/plan/selftest`）：`split` 按 `ranges.json` 逐块 `read -Range` 出切片；`merge` 按单元格/矩形区域合并（同格冲突保留高优先级、缺 `expect` 警告、批注每格一条、结构操作单独警告）；`plan` 输出 `writes/formats/comments/apply-order` 与 `batch-ops.json`（一次 `batch` 跑完 write→format→comment）。配套 `reference/multi-task-excel.md`（任务卡 schema / 四步流程 / 验收清单）、回归 `tests/excel/multi-task/check_tasks.ps1`（15 条断言全过，含冲突仲裁与 `diff` 对账）。边界：**一个 ET 实例只开一个工作簿**（第二个 `open` 会挂起，v1.21 已记录），多工作簿任务串行。
+
 **版本 v1.21（2026-11-02）**：**多任务地基（P0）**——为 Excel / PPT 多任务铺路。① **Excel/PPT 快照改按文档路径哈希分目录**（原来按文件名：`excel-snapshots\<名字字母数字>\`、`ppt-snapshots\<名字>-tag.json`，同名不同目录的两份文档会共用基线；现在与 Word 一致用 16 位路径哈希）；② **跨 app 剪贴板互斥**（`Local\woc-clipboard`）：Excel `render` 的 `CopyPicture→Clipboard.GetImage` 与 PPT `render` 的 `Slide.Copy→EMF` 并发会串图，实测并发渲染现在都正确（1.5 s 两路）；③ **attach 标记读写加锁 + 原子写**（`Local\woc-state`，写 tmp 再替换），并发 `open` 不再丢条目；④ **修 Word `reopened:true` 粘滞**：helper 的 `_reopened` 是进程级静态标志，从不清零，导致一条命令重开后**每条**响应都误报"文档刚被关过"——现在每请求重置；⑤ 记录一个实测坑：**一个 ET 实例同时开两个工作簿会挂起**（`Workbooks.Open` 不返回，随后实例变幽灵，需结束 `et.exe`；部署版 v1.20b 同样复现，非本次引入）⇒ 多工作簿任务必须串行。
 
 **版本 v1.20（2026-11-02）**：**多任务协作（并行规划、合并写回）**——一个会话里可以同时布置多章节 / 同章多任务 / 章节+全文任务。① 新增 **`scripts\tasks.ps1`**（split / merge / plan / selftest）：`split` 把一次 `read` 切成章节片（子代理零 COM 并行加工）；`merge` 按段合并多任务、做 `expect`/数字多重集/相似度 guard、把同段改动合成**一条** item（find 自动扩到段内唯一，`revise` 只换首个命中）；`plan` 按章节倒序输出 items + comments，`-BatchOps` 可直接喂 `batch` 一次跑完。② **三条实测纪律写进文档**：同一段不能放两条 item（第 2 条 `could not place the edit`，整批回滚）；写回必须**从后往前**（插段使后段号 +1，升序必 `ANCHOR_MISSING`）；`set_text` 丢 run 级格式（上标），优先 `replace`。③ **`unit` 的两个坑**：它对含未接受修订的段落有效（实测 `set_text` 插入的 `1234 m3/s` 能被修成 m³/s），但脚本页守卫会把含 `P=1%` 的真实段落误判为模板而跳过——跑完必须看 `skippedSamples`，误伤段改走 textOp。④ 细节与三套排法见 **reference/multi-task.md**。
@@ -138,6 +140,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 汇报：回执写清任务清单与顺序理由（例如"T2 在 T1 之后，避免上标被整段重写冲掉"）；完成后分**局部改动 / 全局改动**两栏 + `diff` 摘要 + 待裁决项；**不要 `save`**，等用户确认（铁律 6）。
 
 细节（任务卡字段、三种组合的排法、实测坑与验收清单）见 [reference/multi-task.md](reference/multi-task.md)。
+
+**Excel / PPT 版**：Excel 用 `tasks-excel.ps1`（split/merge/plan，任务卡与坑见 [reference/multi-task-excel.md](reference/multi-task-excel.md)）；PPT 用 `tasks-ppt.ps1`（见 [reference/multi-task-ppt.md](reference/multi-task-ppt.md)）。三端共用同一条纪律：**并行规划、单写者提交**。
 
 ---
 
@@ -700,7 +704,8 @@ ppt check -Doc 稿.pptx -Config 院标规则.json -Out check.md
 ## 参考
 
 - [reference/workflows.md](reference/workflows.md) —— Word 全部典型工作流分步教程 + 排版实测坑详解。
-- [reference/multi-task.md](reference/multi-task.md) —— 多任务协作（多章节 / 同章多任务 / 章节+全文）：任务卡字段、`tasks.ps1` 三条命令、提交顺序、合并规则、实测坑与验收清单。
+- [reference/multi-task.md](reference/multi-task.md)
+- [reference/multi-task-excel.md](reference/multi-task-excel.md) —— Excel 多任务：任务卡字段、`tasks-excel.ps1` 三条命令、合并/冲突规则、提交顺序与验收。 —— 多任务协作（多章节 / 同章多任务 / 章节+全文）：任务卡字段、`tasks.ps1` 三条命令、提交顺序、合并规则、实测坑与验收清单。
 - [reference/word-quirks.md](reference/word-quirks.md) —— WPS Writer 与 Word 的实测差异表（冒充版本号、样式中文名、`Range` 是方法、关最后一个文档静默杀实例……）。
 - [reference/excel-quirks.md](reference/excel-quirks.md) —— WPS 表格 COM 的实测差异与坑（冒充 Excel、SaveAs 身份变化、块数组 0 基、渲染走剪贴板……）。
 - [reference/encryption.md](reference/encryption.md) —— 落盘即密文的现象、为什么 COM 路线不受影响、交付与解密链路。
