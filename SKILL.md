@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.21（2026-11-02）**：**多任务地基（P0）**——为 Excel / PPT 多任务铺路。① **Excel/PPT 快照改按文档路径哈希分目录**（原来按文件名：`excel-snapshots\<名字字母数字>\`、`ppt-snapshots\<名字>-tag.json`，同名不同目录的两份文档会共用基线；现在与 Word 一致用 16 位路径哈希）；② **跨 app 剪贴板互斥**（`Local\woc-clipboard`）：Excel `render` 的 `CopyPicture→Clipboard.GetImage` 与 PPT `render` 的 `Slide.Copy→EMF` 并发会串图，实测并发渲染现在都正确（1.5 s 两路）；③ **attach 标记读写加锁 + 原子写**（`Local\woc-state`，写 tmp 再替换），并发 `open` 不再丢条目；④ **修 Word `reopened:true` 粘滞**：helper 的 `_reopened` 是进程级静态标志，从不清零，导致一条命令重开后**每条**响应都误报"文档刚被关过"——现在每请求重置；⑤ 记录一个实测坑：**一个 ET 实例同时开两个工作簿会挂起**（`Workbooks.Open` 不返回，随后实例变幽灵，需结束 `et.exe`；部署版 v1.20b 同样复现，非本次引入）⇒ 多工作簿任务必须串行。
+
 **版本 v1.20（2026-11-02）**：**多任务协作（并行规划、合并写回）**——一个会话里可以同时布置多章节 / 同章多任务 / 章节+全文任务。① 新增 **`scripts\tasks.ps1`**（split / merge / plan / selftest）：`split` 把一次 `read` 切成章节片（子代理零 COM 并行加工）；`merge` 按段合并多任务、做 `expect`/数字多重集/相似度 guard、把同段改动合成**一条** item（find 自动扩到段内唯一，`revise` 只换首个命中）；`plan` 按章节倒序输出 items + comments，`-BatchOps` 可直接喂 `batch` 一次跑完。② **三条实测纪律写进文档**：同一段不能放两条 item（第 2 条 `could not place the edit`，整批回滚）；写回必须**从后往前**（插段使后段号 +1，升序必 `ANCHOR_MISSING`）；`set_text` 丢 run 级格式（上标），优先 `replace`。③ **`unit` 的两个坑**：它对含未接受修订的段落有效（实测 `set_text` 插入的 `1234 m3/s` 能被修成 m³/s），但脚本页守卫会把含 `P=1%` 的真实段落误判为模板而跳过——跑完必须看 `skippedSamples`，误伤段改走 textOp。④ 细节与三套排法见 **reference/multi-task.md**。
 
 **版本 v1.19（2026-11-02）**：**按另一台机器的 PPT 性能实测报告优化调用开销与安全性**。① **`batch` 批量模式（三端）**：`woc.ps1 <app> batch -Ops ops.json` —— 一次进程启动、一条命令跑完一批 helper 请求，实测本机 5 条命令 1982 ms → **891 ms**（每条 op 35–204 ms）；报告方在 PPT 上测得「每条命令 ≈460 ms，其中 COM 只占 55 ms」，批量化正是把这 400 ms 的客户端税摊掉。② **源码哈希缓存**：`Get-FileHash` 扫 9 个 .cs 每条命令要 ~50 ms（实测 52 ms），改成按「文件数+大小+最新 mtime」缓存后省下这笔（报告实测 386→330 ms）。③ **JSON 转义加固（三端）**：旧解析器遇到非法转义（如未转义的 Windows 路径 `C:\Users\...`）会**静默丢掉反斜杠**拼成 `C:Users...`，PPT 侧 `open` 又会在不存在的路径**新建并保存**，于是凭空多出一份垃圾稿（报告方踩到）。现在非法转义直接 `BAD_ARGS`。④ **PPT `open` 的"新建"不再伪装成普通打开**：返回 `how:"created"` + `note`（路径不存在时会新建，这是特性；但路径写错要能看出来）。⑤ 报告方实测的**渲染/检查次数纪律**与 **PPT 页码占位符渲染成重复 "1"** 写进文档。
@@ -326,6 +328,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `chart` 的系列约定 | 第 1 列 = x 轴，第 2..N 列各一条系列，**第 1 行是系列名**（v1.17 起多系列；v1.16 及更早只取最后一列） | 单列数据 = 一条系列（无 x 轴）；要「一族曲线」就按 x + 多值列排好 |
 | `format -Borders` 只认 `grid` / `thick` / `none` | 其他值会静默当 `grid`；**v1.16 起对角线（XlBordersIndex 5/6）恒被清空**，不会再把表格画成大 X（v1.15 及更早有此 BUG） | 表格框线用 `-Borders grid`（细）/`thick`（粗）/`none`（清） |
 | `render` 的宽度上限 | `-Width` 低于 100 不缩放；超大区域按 `-Width` 等比缩放 | 想看全貌用 `-Width 1200~1600`，别一次要 4000 |
+| **一个 ET 实例同时开两个工作簿会挂起**（v1.20 实测，非本次改动引入） | `open` 第二个工作簿时 WPS 12 的 `Workbooks.Open` 不返回（等 30 s+ 无响应；之后实例里剩一个空名幽灵工作簿，后续命令报 `DOC_CLOSED`/`E_FAIL`，只能结束 `et.exe` 重来）；用 `-Show`、走 daemon/一次性、先关再开都复现，部署版 v1.20b 同样复现 | **一个实例只开一个工作簿**：多工作簿任务必须串行（`close` 前一份再 `open` 下一份），不要把两个工作簿并存当并行 |
 
 ### 调用姿势（v1.17，踩过的坑）
 

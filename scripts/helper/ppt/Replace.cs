@@ -769,10 +769,7 @@ internal static partial class Program
 
     private static string SlotSnapshotPath(dynamic p)
     {
-        string name = Convert.ToString(TryGet(() => (object)p.Name, "deck"), CultureInfo.InvariantCulture);
-        if (name.Length == 0) name = "deck";
-        string fileTag = name.Replace(".pptx", "").Replace(".ppt", "") + "-prereplace.json";
-        return Path.Combine(SnapshotDir(), fileTag);
+        return SnapFile(p, "prereplace");
     }
 
     private static string WriteSlotSnapshot(dynamic p, List<TextSlot> slots)

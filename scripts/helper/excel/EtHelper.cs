@@ -537,19 +537,29 @@ internal static class Program
 
     private static void MarkerSave(Dictionary<string, object> m)
     {
+        IDisposable g = WocLocks.State(5000);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(MarkerPath()));
-            File.WriteAllText(MarkerPath(), Json.Write(m), new UTF8Encoding(false));
+            string tmp = MarkerPath() + ".tmp";
+            File.WriteAllText(tmp, Json.Write(m), new UTF8Encoding(false));
+            File.Copy(tmp, MarkerPath(), true);
+            try { File.Delete(tmp); } catch (Exception) { }
         }
         catch (Exception) { }
+        finally { if (g != null) g.Dispose(); }
     }
 
     private static void MarkerSet(string full)
     {
-        Dictionary<string, object> m = MarkerLoad();
-        m[full.ToLowerInvariant()] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-        MarkerSave(m);
+        IDisposable g = WocLocks.State(5000);
+        try
+        {
+            Dictionary<string, object> m = MarkerLoad();
+            m[full.ToLowerInvariant()] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+            MarkerSave(m);
+        }
+        finally { if (g != null) g.Dispose(); }
     }
 
     private static bool MarkerHas(string full)
@@ -559,8 +569,13 @@ internal static class Program
 
     private static void MarkerRemove(string full)
     {
-        Dictionary<string, object> m = MarkerLoad();
-        if (m.Remove(full.ToLowerInvariant())) MarkerSave(m);
+        IDisposable g = WocLocks.State(5000);
+        try
+        {
+            Dictionary<string, object> m = MarkerLoad();
+            if (m.Remove(full.ToLowerInvariant())) MarkerSave(m);
+        }
+        finally { if (g != null) g.Dispose(); }
     }
 
     private static dynamic OpenPath(string full, bool show, bool readOnly)
@@ -1406,12 +1421,10 @@ internal static class Program
         if (set.Count == 0) set.Add("__none__");
         Dictionary<string, object> cap = CaptureBook(wb, set);
         cap.Remove("__none__");
-        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "wps-office-cooperate", "excel-snapshots");
-        Directory.CreateDirectory(dir);
-        string name = Convert.ToString(TryGet(() => (object)wb.Name, "book"), CultureInfo.InvariantCulture);
-        string safe = new string(name.Where(char.IsLetterOrDigit).ToArray());
+        string dir = SnapDirOf(wb);
+        string safe = "batch";
         int seq = 1;
-        string seqFile = Path.Combine(dir, safe + "-seq.txt");
+        string seqFile = Path.Combine(dir, "seq.txt");
         try { seq = int.Parse(File.ReadAllText(seqFile).Trim(), CultureInfo.InvariantCulture) + 1; } catch (Exception) { seq = 1; }
         File.WriteAllText(seqFile, seq.ToString(CultureInfo.InvariantCulture), new UTF8Encoding(false));
         Dictionary<string, object> meta = new Dictionary<string, object>();
@@ -1419,7 +1432,7 @@ internal static class Program
         meta["seq"] = (long)seq;
         meta["sheets"] = sheetNames;
         cap["meta"] = meta;
-        string path = Path.Combine(dir, safe + "-batch" + seq + ".json");
+        string path = Path.Combine(dir, "batch" + seq + ".json");
         File.WriteAllText(path, Json.Write(cap), new UTF8Encoding(false));
         int cells = 0;
         foreach (object s in (List<object>)cap["sheets"]) cells += ((Dictionary<string, object>)((Dictionary<string, object>)s)["cells"]).Count;
@@ -1764,6 +1777,9 @@ internal static class Program
     // even on machines where WPS-written files come out encrypted.
     private static bool TryRenderRange(dynamic range, string pngPath)
     {
+        // The clipboard is a machine-wide resource shared with the PPT helper: serialise renders.
+        IDisposable clip = WocLocks.Clipboard(15000);
+        if (clip == null) throw new Fail("BUSY", "the system clipboard is busy (another render is running); retry in a moment");
         try
         {
             range.CopyPicture(1, 2); // xlScreen, xlBitmap
@@ -1777,6 +1793,7 @@ internal static class Program
             return true;
         }
         catch (Exception) { return false; }
+        finally { clip.Dispose(); }
     }
 
     private static object RenderBook(Bag a)
@@ -2060,13 +2077,34 @@ internal static class Program
 
     // ------------------------------------------------------------ snapshot / diff
 
+    private static string SnapDirOf(dynamic wb)
+    {
+        string full = Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture);
+        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "wps-office-cooperate", "excel-snapshots", DocKey(full));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
     private static string SnapPath(dynamic wb)
     {
-        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "wps-office-cooperate", "excel-snapshots");
-        Directory.CreateDirectory(dir);
-        string name = Convert.ToString(TryGet(() => (object)wb.Name, "book"), CultureInfo.InvariantCulture);
-        string safe = new string(name.Where(char.IsLetterOrDigit).ToArray());
-        return Path.Combine(dir, safe + "-last.json");
+        return Path.Combine(SnapDirOf(wb), "last.json");
+    }
+
+    // Stable per-document key (same idea as the Word side): two workbooks that share a file name
+    // in different folders must never share a snapshot baseline (multi-task sessions hit this).
+    private static string DocKey(string fullPath)
+    {
+        try
+        {
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] b = sha.ComputeHash(Encoding.UTF8.GetBytes((fullPath ?? "").ToLowerInvariant()));
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < 8; i++) sb.Append(b[i].ToString("x2", CultureInfo.InvariantCulture));
+                return sb.ToString();
+            }
+        }
+        catch (Exception) { return "nokey"; }
     }
 
     private static Dictionary<string, object> CaptureBook(dynamic wb, HashSet<string> onlySheets)

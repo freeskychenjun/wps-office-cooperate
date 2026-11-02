@@ -339,6 +339,7 @@ internal static partial class Program
     /// </summary>
     private static string HandleRequest(string requestJson)
     {
+        _reopened = false;   // per-request flag: a reopen earlier in the same daemon must not stick
         object response;
         try
         {

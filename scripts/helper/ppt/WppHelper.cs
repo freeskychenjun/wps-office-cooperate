@@ -595,19 +595,29 @@ internal static partial class Program
 
     private static void MarkerSave(Dictionary<string, object> m)
     {
+        IDisposable g = WocLocks.State(5000);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(MarkerPath()));
-            File.WriteAllText(MarkerPath(), Json.Write(m), new UTF8Encoding(false));
+            string tmp = MarkerPath() + ".tmp";
+            File.WriteAllText(tmp, Json.Write(m), new UTF8Encoding(false));
+            File.Copy(tmp, MarkerPath(), true);
+            try { File.Delete(tmp); } catch (Exception) { }
         }
         catch (Exception) { }
+        finally { if (g != null) g.Dispose(); }
     }
 
     private static void MarkerSet(string full)
     {
-        Dictionary<string, object> m = MarkerLoad();
-        m[full.ToLowerInvariant()] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-        MarkerSave(m);
+        IDisposable g = WocLocks.State(5000);
+        try
+        {
+            Dictionary<string, object> m = MarkerLoad();
+            m[full.ToLowerInvariant()] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+            MarkerSave(m);
+        }
+        finally { if (g != null) g.Dispose(); }
     }
 
     private static bool MarkerHas(string full)
@@ -617,8 +627,13 @@ internal static partial class Program
 
     private static void MarkerRemove(string full)
     {
-        Dictionary<string, object> m = MarkerLoad();
-        if (m.Remove(full.ToLowerInvariant())) MarkerSave(m);
+        IDisposable g = WocLocks.State(5000);
+        try
+        {
+            Dictionary<string, object> m = MarkerLoad();
+            if (m.Remove(full.ToLowerInvariant())) MarkerSave(m);
+        }
+        finally { if (g != null) g.Dispose(); }
     }
 
     private static dynamic OpenPath(string full, bool show, bool readOnly)
@@ -1791,9 +1806,18 @@ internal static partial class Program
         for (int k = from; k <= to; k++)
         {
             dynamic slide = p.Slides.Item(k);
-            slide.Copy();
-            Thread.Sleep(250);
-            Bitmap bmp = ClipboardBitmap(width);
+            Bitmap bmp;
+            {
+                IDisposable clip = WocLocks.Clipboard(20000);
+                if (clip == null) throw new Fail("BUSY", "the system clipboard is busy (another render is running); retry in a moment");
+                try
+                {
+                    slide.Copy();
+                    Thread.Sleep(250);
+                    bmp = ClipboardBitmap(width);
+                }
+                finally { clip.Dispose(); }
+            }
             if (bmp == null)
                 throw new Fail("COM_ERROR", "could not get slide " + k + " as an image from the clipboard (is WPS showing a dialog?)");
             string png = Path.Combine(outDir, "slide-" + k.ToString(CultureInfo.InvariantCulture) + ".png");
@@ -1823,9 +1847,18 @@ internal static partial class Program
             for (int k = start; k <= end; k++)
             {
                 dynamic slide = p.Slides.Item(k);
-                slide.Copy();
-                Thread.Sleep(220);
-                Bitmap bmp = ClipboardBitmap(cellW);
+            Bitmap bmp;
+            {
+                IDisposable clip = WocLocks.Clipboard(20000);
+                if (clip == null) throw new Fail("BUSY", "the system clipboard is busy (another render is running); retry in a moment");
+                try
+                {
+                    slide.Copy();
+                    Thread.Sleep(220);
+                    bmp = ClipboardBitmap(cellW);
+                }
+                finally { clip.Dispose(); }
+            }
                 if (bmp == null) throw new Fail("COM_ERROR", "could not get slide " + k + " as an image from the clipboard");
                 cells.Add(bmp);
                 indexes.Add(k);
@@ -2406,8 +2439,7 @@ internal static partial class Program
         if (File.Exists(since)) path = since;
         else
         {
-            string name = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
-            path = Path.Combine(SnapshotDir(), (name.Replace(".pptx", "").Replace(".ppt", "")) + "-" + since + ".json");
+            path = SnapFile(p, since);
         }
         if (!File.Exists(path)) throw new Fail("BAD_ARGS", "snapshot not found: " + path + ". Take snapshot first (or pass -Since <file>).");
         Bag snap = new Bag(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
@@ -2502,16 +2534,46 @@ internal static partial class Program
         return slides;
     }
 
+    // Snapshots live under ppt-snapshots\<hash of the deck path>\ so two decks with the same
+    // file name in different folders never share a baseline (multi-task sessions hit this).
+    private static string SnapDirOf(dynamic p)
+    {
+        string full = Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture);
+        string dir = Path.Combine(SnapshotDir(), DocKey(full));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static string SnapFile(dynamic p, string tag)
+    {
+        string safe = new string((tag ?? "last").Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_').ToArray());
+        if (safe.Length == 0) safe = "last";
+        return Path.Combine(SnapDirOf(p), safe + ".json");
+    }
+
+    private static string DocKey(string fullPath)
+    {
+        try
+        {
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] b = sha.ComputeHash(Encoding.UTF8.GetBytes((fullPath ?? "").ToLowerInvariant()));
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < 8; i++) sb.Append(b[i].ToString("x2", CultureInfo.InvariantCulture));
+                return sb.ToString();
+            }
+        }
+        catch (Exception) { return "nokey"; }
+    }
+
     private static object SnapshotPres(Bag a)
     {
         dynamic p = RequirePres(a, true);
         string tag = a.Str("tag", "last");
         string safe = new string(tag.Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_').ToArray());
         if (safe.Length == 0) safe = "last";
-        string name = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
-        string fileTag = (name.Length > 0 ? name.Replace(".pptx", "").Replace(".ppt", "") : "deck") + "-" + safe + ".json";
         List<object> state = DeckState(p);
-        string path = Path.Combine(SnapshotDir(), fileTag);
+        string path = SnapFile(p, safe);
         Dictionary<string, object> snap = new Dictionary<string, object>();
         snap["at"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
         snap["slides"] = state;
@@ -2537,9 +2599,7 @@ internal static partial class Program
         if (File.Exists(since)) path = since;
         else
         {
-            string name = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
-            string fileTag = (name.Replace(".pptx", "").Replace(".ppt", "")) + "-" + since + ".json";
-            path = Path.Combine(SnapshotDir(), fileTag);
+            path = SnapFile(p, since);
         }
         if (!File.Exists(path)) throw new Fail("BAD_ARGS", "snapshot not found: " + path + ". Take snapshot first (or pass -Since <file>).");
         Bag snap = new Bag(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
