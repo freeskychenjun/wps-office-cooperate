@@ -61,3 +61,19 @@
 | 总览图排版实测常数 | 7 页样张 `-Overview -Page 1 -To 7` → `overview-1-6.png` **1976×1762**（3 列 × 2 行，格宽 640，gap 14 / label 30，底 `(232,232,236)`，每格上方「第 N 页」）+ `overview-7-7.png`；返回 `shown:7, capped:false` | 每张 6 页、单次 ≤18 页；**格宽固定 640**（别跟着 `-Width` 涨，18 页会变十几 MP）；每页自己 `Dispose`，峰值只有 1 张 sheet + 1 页位图 |
 | 多实例会随命令变多 | 一轮测试里 `wps.exe` 从 2 涨到 10（`doctor`/`status` 的 `processes.wps` 可见）：一次性模式下 `Marshal.GetActiveObject` 偶发失败就会**新建隐藏实例**，`open` 返回里也会给 `multiInstanceWarning` | 收尾 `close` 每个自建文档 → `close` 后只剩用户的实例；只清**无窗口**的 `/Automation` 实例，绝不 `quit` 有用户文档的实例 |
 
+
+## 2026-11-02 WordWrap 极性 / KeepTogether 回读 / fillgaps（v1.30 实测，WPS 12.1.0.29161）
+
+一行一条，全部是本机跑出来的；证据原图在 `%TEMP%\woc-v130\`（`shots/`、`shots0/`、`shots-insert/`、`kt-before/`、`kt-after/`、`gf-final-before/`、`gf-final-after/`）。
+
+| 现象 | 实测表现 | 正确写法 |
+|---|---|---|
+| **`WordWrap` 极性与直觉相反** | 页宽 240 pt / 左右边距 90 pt / 20 pt Arial / "aa 3700000"：`WordWrap=-1` 首行只有 `aa`（数字另起一行，**整词**）；`WordWrap=0` 首行是 `aa 37`（**拆词**）。dsh-office 注释「WordWrap = True is the whole-word setting」同结论 | `noSplitWords` → `pf.WordWrap = v ? -1 : 0`（v1.29 及以前写成 `v ? 0 : -1`，反了）。写完必须回读，返回 `noSplitWords=true (readBack=-1)` |
+| **超长 token 仍会被折断** | 文本列 60 pt 而 "3700000" 需 ~77 pt：即使 `WordWrap=-1`，WPS 也会把它折成 `37000`/`00`——它保住的是"不从空格处提前拆"，不是"永不折断" | 判读整词与否看**首行**：首行只有 `aa` = 整词；首行 `aa 37` = 拆词。别拿"有没有断行"当判据 |
+| **`Row` 对象半实现（再次确认）** | `table.Rows.Item(n).Range.ParagraphFormat.KeepWithNext = -1` 抛 `0x800A1767`，老代码 `try { } catch { }` 吞掉后照样报"已设置" | 逐行走选区：`table.Cell(r,1).Range.Select()` + `app.Selection.MoveEnd(10, 1)`，再读写 `Selection.ParagraphFormat.KeepWithNext` / `Selection.Rows.AllowBreakAcrossPages`，**逐行回读**才算落上 |
+| **`AllowBreakAcrossPages` 可读可写（走 Selection）** | `Selection.Rows.AllowBreakAcrossPages = 0` → 回读 `0`；9 行表 9/9 成功 | 与 KeepWithNext 一起做，结果分两栏报（`allowBreak.rowsSet` / `keepTogether.rowsSet`） |
+| **往 `Table.Range.Start` 赋 `FormattedText` 会落进第一格** | `doc.Range(tableStart, tableStart).FormattedText = para.Range.FormattedText` → 文字出现在 `cell(1,1)` 的**文本上方**（渲染图 `gf-after/page-3.png` 第一版即此现象） | 表格块要先在"表格前一段的段末标记**前**"插 `"\r"`（`doc.Range(start-1,start-1).InsertBefore("\r")`），再往新空段的**折叠位置**赋 `FormattedText`；动手前用 `Range.Information(12)` 探测插入点是否在表内 |
+| **删表格前那段的段末标记 = 把表格并进该段** | 把 `doc.Range(mark+1, mark+2)`（含段末标记）整体替换成 `FormattedText` → 文字又进了第一个单元格（实测复现两次） | 表格前只能**插**内容、不能**删**那段标记；代价是表格上方留一个空段（正常排版也常有） |
+| **`fillgaps` 原语全可用** | `Range.Information(3)`=页码、`(6)`=页内纵向 pt、`(12)`=是否在表内；`Paragraph.OutlineLevel`（10=正文）；`Section.PageSetup.PageHeight/BottomMargin/TopMargin`；`doc.Repaginate()`；`doc.ComputeStatistics(2)`=页数；`Range.FormattedText` 可赋值搬运 | 判据：块前段 `OutlineLevel==10` 且 块首行页码 > 前段页码 且 `gap=(PageHeight-BottomMargin)-前段Information(6)-20 ≥ max(90, 文本高度*12%)`；块后首段非空/正文/无图/非题注/不在表内 |
+| **`-DryRun` 的 moves 是预测** | 同一份 4 页文档：dryRun 报 2 处（gap 124.2 / 210.7），实跑搬了 2 段但表格那处 gap 变成 268.3（先搬的一段改变了后面分页） | dryRun 每个块只报**第一段**；实跑按 `maxMoves` 连搬并重新测量。报告里别承诺"dryRun 几条就搬几条" |
+| **搬完段落数可能 ±1** | 被搬的那段如果是**文档最后一段**，删除时段末标记被 Word 保留 → 段数 +1、末尾多一个空段 | 属正常（文档必须以段落标记结尾）；`result.paragraphs` 会 +1，别据此判断"搬坏了" |

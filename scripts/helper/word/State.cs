@@ -18,7 +18,7 @@ internal static partial class Program
     private static readonly string[] WRITE_COMMANDS = new string[] {
         "revise", "comment", "font", "format", "style", "page", "table", "caption", "picture",
         "toc", "reference", "insert", "cell", "fields", "save", "close", "revisions", "undo",
-        "formula", "footnote",
+        "formula", "footnote", "fillgaps",
     };
 
     private static bool IsWriteCommand(string cmd)

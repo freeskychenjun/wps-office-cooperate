@@ -199,6 +199,7 @@ internal static partial class Program
         try { doc.TrackRevisions = track; } catch (Exception) { }
 
         int from, to;
+        List<string> wordWrap = new List<string>();
         try
         {
             if (where == "before") { anchor.Range.InsertParagraphBefore(); from = at; }
@@ -243,6 +244,9 @@ internal static partial class Program
                 }
                 ApplyCharFormat(p.Range.Font, ib);
                 ApplyParaFormat(p.Format, ib);
+                // Text this skill creates wraps whole words unless the item says otherwise.
+                string ww = DefaultWordWrap(p.Format, ib);
+                if (wordWrap.Count == 0 || wordWrap[wordWrap.Count - 1] != ww) wordWrap.Add(ww);
             }
         }
         finally
@@ -265,6 +269,7 @@ internal static partial class Program
         r["revisions"] = TryGet(() => (object)(int)doc.Revisions.Count, 0);
         r["tracked"] = track;
         r["saved"] = false;
+        r["wordWrap"] = wordWrap;
         r["note"] = (inTable ? "The new paragraphs landed INSIDE a table cell (the anchor paragraph was a cell, or it sat right before a table). " : "")
             + "Paragraph numbers after the insertion moved; read again before the next edit.";
         return r;

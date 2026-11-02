@@ -358,6 +358,9 @@ internal static partial class Program
             {
                 applied.AddRange(TabHeaderRow(table));
             }
+            // Cells of a table this skill creates wrap whole words (a long number must not be split).
+            string wrap = SetWordWrap(table.Range.ParagraphFormat, a.Flag("noSplitWords", true), "new table cells");
+            applied.Add(wrap);
             if (!nested)
             {
                 string tidied = TabTidyAfter(doc, table);
@@ -434,6 +437,7 @@ internal static partial class Program
             {
                 dynamic table = doc.Tables.Item(n);
                 List<string> applied = new List<string>();
+                Dictionary<string, object> keepTogether = null;
                 int rows = (int)table.Rows.Count;
 
                 if (borderMode.Length > 0)
@@ -499,8 +503,13 @@ internal static partial class Program
                 if (a.Flag("keepTogether", false))
                 {
                     Tr("format " + n + ": keepTogether");
-                    applied.AddRange(TabKeepTogether(table));
+                    Dictionary<string, object> keep = TabKeepTogether(App(true, false), table);
+                    applied.Add(Convert.ToString(keep["summary"], CultureInfo.InvariantCulture));
+                    keepTogether = keep;
                     Tr("format " + n + ": keepTogether done");
+                    // A row WPS would not take is never reported as a success.
+                    if (!Convert.ToBoolean(keep["ok"]))
+                        throw new Fail("KEEPTOGETHER_FAILED", Convert.ToString(keep["summary"], CultureInfo.InvariantCulture), keep);
                 }
                 if (applied.Count == 0)
                     applied.Add("(no formatting field given)");
@@ -514,6 +523,7 @@ internal static partial class Program
                 one["rowHeight"] = TryGet(() => (object)Math.Round(Num((object)table.Rows.Item(1).Height, 0), 1), 0);
                 one["align"] = TryGet(() => (object)(int)table.Rows.Alignment, -1);
                 one["borderRead"] = TabBorderReadback(table);
+                if (keepTogether != null) one["keepTogether"] = keepTogether;
                 one["applied"] = applied;
                 done.Add(one);
             }
@@ -956,27 +966,114 @@ internal static partial class Program
         return done;
     }
 
-    private static List<string> TabKeepTogether(dynamic table)
+    /// <summary>
+    /// keepTogether - every row but the last keeps with the next one, and no row may be broken
+    /// across a page. Written through the Selection object because table.Rows.Item(n) is
+    /// half-implemented in WPS (Delete / HeadingFormat / Range / Cells all throw 0x800A1767,
+    /// see Tables2.cs), and every single row is read back: the previous version wrapped the
+    /// writes in "try { } catch { }" and reported success no matter what WPS did.
+    /// Returns {"rowsExpected","rowsSet","readBackFailures":[row,...],"allowBreak":{...},"ok","summary"}.
+    /// </summary>
+    private static Dictionary<string, object> TabKeepTogether(dynamic app, dynamic table)
     {
-        List<string> done = new List<string>();
         int rows = (int)TryGet(() => (object)(int)table.Rows.Count, 0);
-        int kept = 0;
-        for (int r = 1; r <= rows; r++)
+        int expected = Math.Max(0, rows - 1);
+        int rowsSet = 0;
+        List<object> failures = new List<object>();
+        List<object> brkFailures = new List<object>();
+        int brkSet = 0;
+        List<string> notes = new List<string>();
+
+        int selStart = -1, selEnd = -1;
+        try { selStart = (int)app.Selection.Start; selEnd = (int)app.Selection.End; } catch (Exception) { }
+
+        try
         {
-            try
+            // 1) AllowBreakAcrossPages = 0 on every row (read back per row).
+            for (int r = 1; r <= rows; r++)
             {
-                dynamic row = table.Rows.Item(r);
-                row.AllowBreakAcrossPages = 0;
-                kept++;
+                try
+                {
+                    SelectOneRow(app, table, r);
+                    app.Selection.Rows.AllowBreakAcrossPages = 0;
+                    int back = Convert.ToInt32(app.Selection.Rows.AllowBreakAcrossPages, CultureInfo.InvariantCulture);
+                    if (back == 0) brkSet++;
+                    else { brkFailures.Add(r); notes.Add("row " + r + ": AllowBreakAcrossPages read back " + back); }
+                }
+                catch (Exception e)
+                {
+                    brkFailures.Add(r);
+                    notes.Add("row " + r + ": " + Clean(e.Message));
+                }
             }
-            catch (Exception) { }
-            if (r < rows)
+
+            // 2) KeepWithNext = -1 on every row but the last (the last one keeps nothing).
+            for (int r = 1; r < rows; r++)
             {
-                try { table.Rows.Item(r).Range.ParagraphFormat.KeepWithNext = -1; } catch (Exception) { }
+                try
+                {
+                    SelectOneRow(app, table, r);
+                    app.Selection.ParagraphFormat.KeepWithNext = -1;
+                    int back = Convert.ToInt32(app.Selection.ParagraphFormat.KeepWithNext, CultureInfo.InvariantCulture);
+                    if (back == -1) rowsSet++;
+                    else { failures.Add(r); notes.Add("row " + r + ": KeepWithNext read back " + back); }
+                }
+                catch (Exception e)
+                {
+                    failures.Add(r);
+                    notes.Add("row " + r + ": " + Clean(e.Message));
+                }
             }
         }
-        done.Add("keepTogether: " + kept + " row(s) cannot break across pages, and every row but the last keeps with the next");
-        return done;
+        finally
+        {
+            RestoreSelectionSafe(app, selStart, selEnd);
+        }
+
+        Dictionary<string, object> allow = new Dictionary<string, object>();
+        allow["rowsExpected"] = rows;
+        allow["rowsSet"] = brkSet;
+        allow["readBackFailures"] = brkFailures;
+
+        bool ok = failures.Count == 0 && brkFailures.Count == 0;
+        string summary;
+        if (ok)
+            summary = "keepTogether: " + rowsSet + "/" + expected + " row(s) keep with the next row, and all " + brkSet
+                + " row(s) refuse to break across pages (each value read back)";
+        else
+            summary = "keepTogether FAILED for some rows: rowsSet=" + rowsSet + "/" + expected
+                + ", noBreakRows=" + brkSet + "/" + rows + "; WPS \u6ca1\u63a5\u53d7 rows " + JoinRowList(failures)
+                + " (KeepWithNext) / " + JoinRowList(brkFailures) + " (AllowBreakAcrossPages) - \u8fd9\u51e0\u884c WPS \u6ca1\u63a5\u53d7";
+
+        Dictionary<string, object> res = new Dictionary<string, object>();
+        res["ok"] = ok;
+        res["rowsExpected"] = expected;
+        res["rowsSet"] = rowsSet;
+        res["readBackFailures"] = failures;
+        res["allowBreak"] = allow;
+        res["summary"] = summary;
+        if (notes.Count > 0) res["notes"] = notes;
+        return res;
+    }
+
+    /// <summary>Select exactly one row (the Row object itself is not usable in WPS).</summary>
+    private static void SelectOneRow(dynamic app, dynamic table, int row)
+    {
+        table.Cell(row, 1).Range.Select();
+        app.Selection.MoveEnd(WD_ROW, 1);
+    }
+
+    /// <summary>Row numbers as "3, 5, 7" - never "-", which reads like a row number.</summary>
+    private static string JoinRowList(List<object> values)
+    {
+        if (values == null || values.Count == 0) return "none";
+        return JoinInts(values);
+    }
+
+    private static void RestoreSelectionSafe(dynamic app, int start, int end)
+    {
+        if (start < 0) return;
+        try { app.Selection.SetRange(start, end); } catch (Exception) { }
     }
 
     // ============================================================ caption
@@ -1138,6 +1235,8 @@ internal static partial class Program
         }
         // A caption above its table must not be left alone at the foot of a page (图/表题不落单).
         if (above) { try { cap2.Range.ParagraphFormat.KeepWithNext = -1; } catch (Exception) { } }
+        // A caption this skill writes wraps whole words too: a Latin title must not be split.
+        string ww = SetWordWrap(cap2.Range.ParagraphFormat, fmt == null ? true : fmt.Flag("noSplitWords", true), "new caption");
 
         Dictionary<string, object> d = new Dictionary<string, object>();
         d["para"] = index;
@@ -1146,6 +1245,7 @@ internal static partial class Program
         d["text"] = ParaTextAt(doc, index);
         d["field"] = code;
         d["number"] = number;
+        d["noSplitWords"] = ww;
         return d;
     }
 

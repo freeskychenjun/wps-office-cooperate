@@ -395,6 +395,13 @@ internal static partial class Program
         catch (Fail f)
         {
             response = Err(f.Code, f.Message);
+            // A failure that carries structured evidence (which rows, which values read back) keeps it.
+            if (f.Detail != null)
+            {
+                Dictionary<string, object> outer = response as Dictionary<string, object>;
+                Dictionary<string, object> inner = outer == null ? null : outer["error"] as Dictionary<string, object>;
+                if (inner != null) inner["detail"] = f.Detail;
+            }
         }
         catch (COMException e)
         {
@@ -480,6 +487,7 @@ internal static partial class Program
             case "fields": return FieldsDoc(a);
             case "cell": return CellDoc(a);
             case "insert": return InsertDoc(a);
+            case "fillgaps": return FillGapsDoc(a);
             case "revisions": return RevisionsDoc(a);
             case "snapshot": return SnapshotDoc(a);
             case "diff": return DiffDoc(a);
@@ -493,7 +501,7 @@ internal static partial class Program
             case "quit": return QuitAll(a);
             case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|formula|footnote|font|format|style|page|table|captions|caption|picture|toc|reference|view|fields|cell|insert|revisions|snapshot|diff|handoff|audit|save|close|quit|hint");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|formula|footnote|font|format|style|page|table|captions|caption|picture|toc|reference|view|fields|cell|insert|fillgaps|revisions|snapshot|diff|handoff|audit|save|close|quit|hint");
         }
     }
 
@@ -631,8 +639,39 @@ internal static partial class Program
         if (a.Has("spaceBefore")) { pf.SpaceBefore = (float)Points(a.Str("spaceBefore", "0")); done.Add("spaceBefore=" + a.Str("spaceBefore", "")); }
         if (a.Has("spaceAfter")) { pf.SpaceAfter = (float)Points(a.Str("spaceAfter", "0")); done.Add("spaceAfter=" + a.Str("spaceAfter", "")); }
         if (a.Has("pageBreakBefore")) { pf.PageBreakBefore = a.Flag("pageBreakBefore", false) ? 1 : 0; done.Add("pageBreakBefore=" + a.Flag("pageBreakBefore", false)); }
-        if (a.Has("noSplitWords")) { bool v = a.Flag("noSplitWords", true); try { pf.WordWrap = v ? 0 : -1; } catch (Exception) { } done.Add("noSplitWords=" + v); }
+        if (a.Has("noSplitWords")) done.Add(SetWordWrap(pf, a.Flag("noSplitWords", true), "noSplitWords"));
         return done;
+    }
+
+    /// <summary>
+    /// Whole-word line breaking on one paragraph format, with a read-back.
+    /// Polarity measured on WPS 12.1.0.29161 (2026-11-02): with a 240 pt page, 90 pt margins and
+    /// 20 pt Arial, "aa 3700000" breaks as "aa 37|00000" at WordWrap = 0 (False: a Latin word IS
+    /// split) and as "aa|3700000" at WordWrap = -1 (True: the word moves down whole). dsh-office's
+    /// comment ("WordWrap = True is the whole-word setting") says the same, so: true -&gt; -1.
+    /// Returns "noSplitWords=true (readBack=-1)"; a value WPS did not take throws instead of
+    /// being reported as a success.
+    /// </summary>
+    private static string SetWordWrap(dynamic pf, bool wholeWord, string what)
+    {
+        int want = wholeWord ? -1 : 0;
+        try { pf.WordWrap = want; }
+        catch (Exception e) { throw new Fail("COM_ERROR", "WPS refused WordWrap=" + want + " (" + what + "): " + Clean(e.Message)); }
+        int back;
+        try { back = Convert.ToInt32(pf.WordWrap, CultureInfo.InvariantCulture); }
+        catch (Exception e) { throw new Fail("COM_ERROR", "WPS could not read WordWrap back (" + what + "): " + Clean(e.Message)); }
+        if (back != want)
+            throw new Fail("COM_ERROR", "WPS did not take WordWrap=" + want + " for " + what + " (read back " + back + "), so word splitting was NOT changed");
+        return "noSplitWords=" + (wholeWord ? "true" : "false") + " (readBack=" + back + ")";
+    }
+
+    /// <summary>
+    /// The default for text this skill creates: new paragraphs, table cells and captions wrap
+    /// whole words. An explicit "noSplitWords":false in the request overrides it.
+    /// </summary>
+    private static string DefaultWordWrap(dynamic pf, Bag a)
+    {
+        return SetWordWrap(pf, a.Flag("noSplitWords", true), "new paragraph");
     }
 
     private static string Clean(string s)

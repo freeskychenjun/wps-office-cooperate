@@ -10,7 +10,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'undo', 'revise', 'comment', 'render', 'font',
                  'format', 'style', 'page', 'table', 'captions', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit', 'unit', 'units',
-                 'formula', 'footnote',
+                 'formula', 'footnote', 'fillgaps',
                  'save', 'close', 'quit', 'finish', 'hint', 'textdiag', 'batch', 'serve')]
     [string]$Command,
 
@@ -52,6 +52,8 @@ param(
     [switch]$Track,
     [switch]$NoNumbering,
     [switch]$NoSplitWords,
+    # the negative of -NoSplitWords: a SwitchParameter cannot be given as "-NoSplitWords:$false" through woc.ps1
+    [switch]$SplitWords,
     [int]$Row = 0,
     [int]$Col = 0,
     [string]$Where,
@@ -90,6 +92,10 @@ param(
     [string]$Autofit,
     [string]$RowHeight,
     [switch]$KeepTogether,
+    # fillgaps: report only / how many paragraphs may move in front of one block / empty band threshold
+    [switch]$DryRun,
+    [int]$MaxMoves = 8,
+    [int]$MinGapPt = 0,
     [string]$Label,
     [string]$Title,
     [switch]$Above,
@@ -298,6 +304,9 @@ function Add-Format-Fields($bound) {
         $request[$formatFields[$key]] = $value
     }
     if ($bound.ContainsKey('Font')) { $request['font'] = $Font }
+    # -SplitWords is the way to ASK for splitting: "-NoSplitWords:$false" cannot survive woc.ps1's
+    # argument round trip (it arrives as the string "false" and PS refuses to bind it to a switch).
+    if ($bound.ContainsKey('SplitWords')) { $request['noSplitWords'] = -not [bool]$bound['SplitWords'] }
 }
 
 switch ($Command) {
@@ -606,6 +615,12 @@ switch ($Command) {
         if ($Expect) { $request['expect'] = $Expect }
         if ($Track) { $request['track'] = $true }
     }
+    'fillgaps' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'fillgaps needs -Doc' }
+        $request['dryRun'] = [bool]$DryRun
+        $request['maxMoves'] = $MaxMoves
+        if ($MinGapPt -gt 0) { $request['minGapPt'] = $MinGapPt }
+    }
     'revisions' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'revisions needs -Doc' }
         $act = if ($Action) { $Action.ToLowerInvariant() } else { 'list' }
@@ -712,6 +727,7 @@ $paramAliases = @{
     TextFile = 'text'; HintTag = 'tag'; Case = 'caseSensitive'
     NoNumbering = 'numbering'; HeaderRow = 'header'; AtPara = 'para'
     HeaderText = 'header'; FooterText = 'footer'; PageNumber = 'pageNumber'
+    SplitWords = 'noSplitWords'
 }
 $paramCommandSkips = @{
 
@@ -719,7 +735,7 @@ $paramCommandSkips = @{
 $paramCheckPath = Join-Path $PSScriptRoot 'param-check.ps1'
 if (Test-Path -LiteralPath $paramCheckPath) {
     . $paramCheckPath
-    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Para = 0; To = 0; Row = 0; Col = 0; Table = 0; AtPara = 0; Passes = 0; Slide = 0 }
+    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Para = 0; To = 0; Row = 0; Col = 0; Table = 0; AtPara = 0; Passes = 0; Slide = 0; MaxMoves = 8; MinGapPt = 0 }
 Test-ParamConsumption -Command $Command -Bound $PSBoundParameters -Request $request `
         -Aliases $paramAliases -FormatFields $formatFields -CommandSkips $paramCommandSkips -DefaultValues $paramDefaultValues
 }
