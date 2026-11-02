@@ -92,6 +92,37 @@ function Rect-Key($a) { return ('' + $a.r1 + ',' + $a.c1 + '-' + $a.r2 + ',' + $
 
 # ---------------------------------------------------------------- split
 
+function Col-Name([int]$col) {
+    $s = ''
+    while ($col -gt 0) { $m = ($col - 1) % 26; $s = [string][char](65 + $m) + $s; $col = [int](($col - $m) / 26) }
+    return $s
+}
+function Read-RangeChunked([string]$excel, [string]$docPath, [string]$sheet, [string]$range, [string]$outDir) {
+    # read -Range profiles anything over 60 rows, so walk the range in 60-row blocks and stitch
+    $rect = Parse-Rect $range 0 0
+    if ($null -eq $rect) { throw ('unparsable range: ' + $range) }
+    $c1 = Col-Name $rect.c1; $c2 = Col-Name $rect.c2
+    $all = New-Object System.Collections.ArrayList
+    $row = $rect.r1
+    while ($row -le $rect.r2) {
+        $last = [Math]::Min($rect.r2, $row + 59)
+        $sub = $c1 + $row + ':' + $c2 + $last
+        $f = Join-Path $outDir ('chunk-' + $row + '.json')
+        $pa = Start-Process -FilePath 'powershell' -ArgumentList @('-Mta', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $excel, 'read', '-Doc', $docPath, '-Range', ($sheet + '!' + $sub)) -PassThru -NoNewWindow -RedirectStandardOutput $f
+        $pa.WaitForExit()
+        $res = Read-Json $f
+        if (-not $res.ok) { throw ('read failed for ' + $sheet + '!' + $sub + ': ' + $res.error.code + ' ' + $res.error.message) }
+        if ($res.result.PSObject.Properties.Name -contains 'values' -and $res.result.values) {
+            foreach ($r in @($res.result.values)) { [void]$all.Add($r) }
+        }
+        elseif ($res.result.PSObject.Properties.Name -contains 'profile') {
+            throw ('read returned a profile instead of values for a 60-row block (' + $sub + '); the range may be too wide')
+        }
+        $row = $last + 1
+    }
+    return @($all)
+}
+
 function Invoke-Split {
     if (-not $Doc) { throw 'split needs -Doc <xlsx>' }
     if (-not $Ranges) { throw 'split needs -Ranges <ranges.json>' }
@@ -101,35 +132,26 @@ function Invoke-Split {
     $rangeList = @(Read-Json $Ranges)
     if ($rangeList.Count -eq 0) { throw 'ranges.json is empty' }
     $excel = Join-Path $PSScriptRoot 'excel.ps1'
-    $work = Join-Path $Out '_read'
-    New-Item -ItemType Directory -Force -Path $Out, $work | Out-Null
+    $tmp = Join-Path $Out '_read'
+    New-Item -ItemType Directory -Force -Path $Out, $tmp | Out-Null
     $summary = New-Object System.Collections.ArrayList
     foreach ($r in $rangeList) {
         $sheet = [string]$r.sheet
         $range = [string]$r.range
         if (-not $sheet -or -not $range) { throw ('range ' + $r.id + ': needs sheet and range') }
-        $readOut = Join-Path $work ([string]$r.id + '.json')
-        $pa = Start-Process -FilePath 'powershell' -ArgumentList @('-Mta', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $excel, 'read', '-Doc', $d, '-Range', ($sheet + '!' + $range)) -PassThru -NoNewWindow -RedirectStandardOutput $readOut
-        $pa.WaitForExit()
-        $res = Read-Json $readOut
-        if (-not $res.ok) { throw ('read failed for ' + $r.id + ': ' + $res.error.code + ' ' + $res.error.message) }
-        $slice = [pscustomobject]@{
-            id      = [string]$r.id
-            sheet   = $sheet
-            range   = $range
-            rows    = $res.result.rows
-            cols    = $res.result.cols
-            values  = $res.result.values
-        }
+        $values = @(Read-RangeChunked $excel $d $sheet $range $tmp)
+        $rows = $values.Count
+        $cols = 0
+        if ($rows -gt 0) { $cols = @($values[0]).Count }
+        $slice = [pscustomobject]@{ id = [string]$r.id; sheet = $sheet; range = $range; rows = $rows; cols = $cols; values = @($values) }
         $path = Join-Path $Out ('slice-' + $r.id + '.json')
         Write-Json $path $slice
-        [void]$summary.Add([pscustomobject]@{ id = [string]$r.id; sheet = $sheet; range = $range; rows = $res.result.rows; cols = $res.result.cols; file = $path })
-        Write-Output ('slice ' + $r.id + ': ' + $sheet + '!' + $range + ' (' + $res.result.rows + 'x' + $res.result.cols + ') -> ' + $path)
+        [void]$summary.Add([pscustomobject]@{ id = [string]$r.id; sheet = $sheet; range = $range; rows = $rows; cols = $cols; file = $path })
+        Write-Output ('slice ' + $r.id + ': ' + $sheet + '!' + $range + ' (' + $rows + 'x' + $cols + ') -> ' + $path)
     }
     Write-Json (Join-Path $Out 'index.json') ([pscustomobject]@{ doc = $d; slices = @($summary) })
     Write-Output ('split done: ' + $summary.Count + ' slice(s)')
 }
-
 # ---------------------------------------------------------------- merge
 
 function Invoke-Merge {
