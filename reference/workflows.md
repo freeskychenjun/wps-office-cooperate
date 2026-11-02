@@ -341,7 +341,8 @@ office.ps1 word unit -Doc $DOC -Apply -Units "s2"          # 追加真实使用�
 5. **收尾** —— `finish` / `close` 自动还原标题与状态栏并移除托盘图标；漏了就 `hint -Clear`。`status` 的 `caption` / `hinted` 可随时核对。
 
 - Word / Excel 的标记全是**窗口状态**：不进修订、不写文件、不改变 `saved`；`tests/word/check_hint.py` 专门断言"段落数不变、无新增修订"。
-- **PPT 有两层标记（v1.26 / v1.27）**：① 窗口标题（Win32 `SetWindowText` 打在真实窗口框 `PP12FrameClass` 上）——**只有任务栏 / Alt+Tab 看得见**，因为 WPS 演示的标签页是自绘的；② **每页右上角的「〔AI接管中〕」橙色药丸**（形状名 `woc-ai-takeover-mark`，`hint` 默认贴，`-NoSlideMark` 关）——这是唯一"界面里看得见"的通道，编辑视图和放映都显示。页面标记是**内容**：用户自己 Ctrl+S 会存进文件，所以 `save`/`export` 会在落盘前剥离、写完补回；`hint -Clear`/`finish`/`close` 逐页删除。
+- **PPT 有两层标记（v1.26 / v1.27，v1.28 定策略）**：① 窗口标题（Win32 `SetWindowText` 打在真实窗口框 `PP12FrameClass` 上）——**只有任务栏 / Alt+Tab 看得见**，因为 WPS 演示的标签页是自绘的；② **每页右上角的「〔AI接管中〕」橙色药丸**（形状名 `woc-ai-takeover-mark`，`hint -SlideMark` 显式开启 / `-NoSlideMark` 移除）——唯一"界面里看得见"的通道，编辑视图和放映都显示。页面标记是**内容**：用户自己 Ctrl+S 会存进文件，所以 ①默认**不贴**（`hint` 零改动，`inAppHint` 提示怎么开）；②`save`/`export` 落盘前剥离、写完补回；③`hint -Clear`/`finish`/`close` 逐页删除；④**万一被 Ctrl+S 存进去，下一条命令自动修复**：helper 记着"贴标记那一刻的文件 mtime/size"，发现文件被保存过就 剥离→重存→贴回，返回 `badgeRepaired:true`（只读文件 `badgeDirty`、重存失败 `badgeRepairFailed`）。
+- **修复路径的实测坑**：用户 Ctrl+S 之后，**本进程内存里的形状列表可能已经和文件不同步**（用裸 COM `Presentation.Save()` 复现：保存后 `read` 看不到徽章，但重开文件徽章确实在）。所以修复不能依赖"内存里还能找到徽章"——必须**照常 `Save()` 一次**让文件与内存一致（内存无徽章 → 文件被写成干净版），再重新贴回并更新记录。`tests/ppt/check_hint.py` 的 P6 就是这条链路的回归（裸 COM 保存 → 下一条命令 `badgeRepaired` → 重开文件确认干净）。
 - **页面标记不能做在母版上**：实测母版形状在页面形状之下，封面那种满版大图会把它整片盖住（第一版踩过，渲染图上一个像素都看不见）⇒ 逐页贴、置顶。
 - **读侧必须跳过页面标记**：`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 全部按形状名排除，否则它会变成"正文新增文字"、"字号 10.9pt 过小"、"对比度 2.85:1"之类的假问题（实测未排除时 `check` 在 19 页稿上多报 37 条）。`read` 每页用 `takeoverBadge:true` 告知。
 - **PPT 的 COM 标题仍然不可写**：`ActiveWindow.Caption` 只读、`Application.Caption` 写了不重绘、`StatusBar` 不存在，响应带 `captionSupported:false`；`titleMarked:true` 指的是 Win32 那一层，别对用户谎称"标题已标记"。

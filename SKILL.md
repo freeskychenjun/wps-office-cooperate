@@ -5,7 +5,9 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
-**版本 v1.27（2026-11-02）**：**PPT 接管在页面里也看得见（用户在 pi 里实测"窗口标题看不到标记"后的修法）**——v1.26 的标题标记只对任务栏 / Alt+Tab 生效：WPS 演示的标签页是**自绘的**（从文件名画，COM 里 `ActiveWindow.Caption` 只读、`Application.Caption` 不重绘、`StatusBar` 不存在），所以界面里没有任何标记。现在 **`hint` 默认给每一页右上角贴一枚「〔AI接管中〕」橙色药丸**（返回 `slideMarkCount`，如 19 页贴 19 枚）：形状名固定 `woc-ai-takeover-mark`、置于最上层，编辑视图与放映都可见；`hint -Clear`/`finish`/`close` 会逐页删除，**`save`/`export` 落盘前自动剥离、写完再补回**（交付文件绝不会带标记）；`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 一律把它当"自己的 UI"跳过（不算正文、不报字号/对比度、不进 diff），`read` 用每页的 `takeoverBadge:true` 告诉你这页有标记；`-NoSlideMark` 关闭。**为什么不做在母版上**（第一版的做法）：实测母版形状在页面形状**之下**，封面那类整幅大图会把标记整片盖住 —— 所以逐页贴、置顶。
+**版本 v1.28（2026-11-02）**：**PPT 页面标记改为「默认不写文档、按需开启、被 Ctrl+S 污染后自动修复」**（用户质疑 v1.27 的默认行为："用户按 Ctrl+S 徽章就被写进文件，这设计好吗？"——答案是不好，改）。① **`hint` 默认零改动**：只做窗口标题（任务栏可见）+ 气泡 + 可选托盘，返回 `inAppHint` 说明"要界面里看得见请加 `-SlideMark`"。② **`-SlideMark` 显式开启**：逐页贴「〔AI接管中〕」药丸，返回 `slideMarkCount` + `slideMarkWarning`（"这是内容，Ctrl+S 会存进文件"）。③ **自动修复**：helper 记下"贴了标记那一刻的文件 mtime/size"（`%LOCALAPPDATA%\wps-office-cooperate\ppt-slide-mark\<deckHash>.json`），下一条命令若发现**文件被谁保存过**（典型就是用户 Ctrl+S），就剥离徽章→重新保存→再把徽章贴回屏幕，返回 `badgeRepaired:true`（附 `badgeMarksRemoved`）；只读文件给 `badgeDirty`、保存失败给 `badgeRepairFailed`。实测（`tests/ppt/check_hint.py` P6，用裸 COM `Presentation.Save()` 模拟用户 Ctrl+S）：修复后重开文件确认徽章已不在；连续命令不会反复修复。④ 收尾仍是 `hint -Clear` / `finish` / `close`，`save`/`export` 落盘前自动剥离不变。**结论性原则**：PPT 的"界面可见"必然等于"文档被改"（标签页自绘、无状态栏、母版被满版图遮、悬浮窗已否决），所以默认走安全侧，可见性是一次有意识的、可清理的、被自动兜底的动作。
+
+**版本 v1.27（2026-11-02）**：**PPT 接管在页面里也看得见（用户在 pi 里实测"窗口标题看不到标记"后的修法）**——v1.26 的标题标记只对任务栏 / Alt+Tab 生效：WPS 演示的标签页是**自绘的**（从文件名画，COM 里 `ActiveWindow.Caption` 只读、`Application.Caption` 不重绘、`StatusBar` 不存在），所以界面里没有任何标记。现在 **`hint -SlideMark` 给每一页右上角贴一枚「〔AI接管中〕」橙色药丸**（返回 `slideMarkCount`，如 19 页贴 19 枚；v1.28 起改为**按需开启**）：形状名固定 `woc-ai-takeover-mark`、置于最上层，编辑视图与放映都可见；`hint -Clear`/`finish`/`close` 会逐页删除，**`save`/`export` 落盘前自动剥离、写完再补回**（agent 自己落盘的文件绝不会带标记）；`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 一律把它当"自己的 UI"跳过（不算正文、不报字号/对比度、不进 diff），`read` 用每页的 `takeoverBadge:true` 告诉你这页有标记；`-NoSlideMark` 关闭。**为什么不做在母版上**（第一版的做法）：实测母版形状在页面形状**之下**，封面那类整幅大图会把标记整片盖住 —— 所以逐页贴、置顶。
 
 **版本 v1.26（2026-11-02）**：**PPT 接管也有了窗口标题标记**——之前结论是"WPS 演示没有可写的单文档标题"，实测补全：COM 的 `ActiveWindow.Caption` 确实只读、`Application.Caption` 写了也不重绘标题栏、`Application.StatusBar` 属性在 WPP 上不存在；但**真正的窗口框（`PP12FrameClass`，由共享的 `wps.exe` 框架进程持有）仍接受 `SetWindowText`**。现在 `open`/`hint` 会给该窗口标题加「〔AI接管中〕」前缀，`hint -Clear`/`finish`/`close` 自动去掉；实测标记在 COM 编辑/翻页/空闲后都保持，**用户切到另一个标签页时 WPS 会自己重置标题**（所以绝不会把标记挂到别的文档上），切回后下一条命令自动补回。
 
@@ -104,7 +106,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
    理由不是"体验"，是**会坏**：那些 skill/工具改的是磁盘文件，而这份文档正被 WPS 独占（实测写盘 `PermissionError`）；它们还产出副本，会让你眼前这份和副本分成两条线。
    唯一例外：用户明确要"**不动原件、出一份新稿**"或"**无人值守批量跑**"——那时先 `save` → `close` 交出去，回来再 `open` 产出的文件、`snapshot` 重建基线（Excel 用 `save -As` 另出一份，或在用户关掉文件后离线处理）。
 1. **先 `status`，再动手，并说出在哪儿动手。** 每次开工第一条命令是 `status`，把"几个实例在跑 / 开着哪些文档 / 哪份是 active / 有没有未保存修改"念给用户，并明确报出**即将修改的那份文档的完整路径**（Excel 再加工作表名）。不碰用户没指定的文件。
-   接着**让用户看得见接管**：`open` 已自动把标签/标题改成「〔AI接管中〕 文件名」，再 `hint -Doc <路径> -Toast` 弹一句人话（"已接管《X》…"）——同一份文档一轮协作只需公告一次，后续进度用 `hint -Text "正在做…" -Quiet` 刷状态栏（表格可见；Writer 不渲染，别指望）。**PPT 的标签页是自绘的、改标题只有任务栏看得见，所以 `hint` 默认还会在每一页右上角贴「〔AI接管中〕」橙色药丸**（v1.27；`-NoSlideMark` 关闭，`save`/`export` 会自动剥离，收尾 `finish` 清掉）。要边干边看进度就再加 `-Tray`（托盘图标，悬停看当前步骤、右键可结束并还原；新图标默认在「^」里，提醒用户拖出来）。`finish`/`close` 会自动还原，别留着标记过夜。
+   接着**让用户看得见接管**：`open` 已自动把标签/标题改成「〔AI接管中〕 文件名」，再 `hint -Doc <路径> -Toast` 弹一句人话（"已接管《X》…"）——同一份文档一轮协作只需公告一次，后续进度用 `hint -Text "正在做…" -Quiet` 刷状态栏（表格可见；Writer 不渲染，别指望）。**PPT 的标签页是自绘的、改标题只有任务栏看得见**：只有用户明确要"在页面上/投屏时看得见接管"时才加 `-SlideMark`（逐页贴「〔AI接管中〕」药丸，这是**内容**——Ctrl+S 会存进文件，所以默认不贴；收尾必须 `finish`/`hint -Clear`，万一被存进去，下一条命令会自动修复并返回 `badgeRepaired:true`）。要边干边看进度就再加 `-Tray`（托盘图标，悬停看当前步骤、右键可结束并还原；新图标默认在「^」里，提醒用户拖出来）。`finish`/`close` 会自动还原，别留着标记过夜。
 2. **`readOnly` 就是不许改。** `open`/`read` 返回 `readOnly: true`（文件被别处占用或有只读属性）时，写命令会直接报 `READONLY`。**不要**用另存、改文件属性、杀占用进程等方式绕过去——先问用户。
 3. **不替用户关文档。** `close` 只关本次明确要关的那一份；用户开着的其它文档、用户自己的 WPS 窗口一律不动。关之前先 `status` 确认这份是本次打开的。
    反过来，**用户在你看不见的时候关掉了文档**：Word 的下一条命令会**静默重开**并返回 `reopened:true`（若日志显示关闭前未保存，还会带 `unsavedAtClose:true` 警告，提醒可能丢了改动），Excel/PPT 则返回 `DOC_CLOSED`——必须**显式 `open`** 才能继续，别假装还在协作；托盘图标会在约 10 s 内自动消失。
@@ -127,7 +129,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - **`hint` 补一句人话**：默认弹 6 s 托盘气泡——"已接管《报告.docx》：我会把改动做成修订或批注，你随时可以接受或拒绝。"`-Text` 换说法，`-HintTag` 换标题里的标签文字，`-Bar` 单独控制状态栏那行（表格会显示，Writer 不渲染），`-Quiet` 静默（不弹气泡，适合刷新标题/状态栏）。
 - **还原**：`hint -Clear`、`finish`、`close` 都会把标题恢复成文件名、把状态栏交还 WPS；`status` 每份文档带 `caption` 与 `hinted`，随时可核对当前有没有挂着标记。
 - **PPT 的标题标记（v1.26）**：COM 的 `ActiveWindow.Caption` 只读、`Application.Caption` 不重绘标题栏、`StatusBar` 属性不存在，但窗口框（`PP12FrameClass`）接受 `SetWindowText`——`open`/`hint` 给标题加「〔AI接管中〕」前缀，`hint -Clear`/`finish`/`close` 去掉；用户切标签页时 WPS 自己重置（不会挂错文档），下一条命令自动补回。返回里 `captionSupported:false` 仍表示"COM 标题不可写"，`titleMarked:true` 表示 Win32 标记已生效；气泡照旧（`-Toast`）。
-- **PPT 的页面标记（v1.27，真正"界面里看得见"的那一层）**：WPS 演示的标签页是自绘的（从文件名画），改窗口标题只有任务栏 / Alt+Tab 看得见——所以 `hint` 默认在**每一页右上角**贴一枚「〔AI接管中〕」橙色药丸（形状名 `woc-ai-takeover-mark`，最上层，放映时也在）。**落盘不污染**：`save`/`export` 前先剥离、写完补回；`hint -Clear`/`finish`/`close` 逐页删除。**读侧零干扰**：`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 都跳过它（`read` 每页给 `takeoverBadge:true`），不会把它当正文、也不会报"字号过小/对比度不足"。`-NoSlideMark` 关闭（要"一个字节都不碰"的稿子时用）。⚠️ 用户自己按 Ctrl+S 保存时标记会一起存进文件——收尾时用 `finish`/`hint -Clear`，或让 agent 走 `save`。
+- **PPT 的页面标记（v1.27 起，v1.28 改为按需开启）**：WPS 演示的标签页是自绘的（从文件名画），改窗口标题只有任务栏 / Alt+Tab 看得见；唯一"界面里看得见"的通道是在**每一页右上角**贴一枚「〔AI接管中〕」橙色药丸（形状名 `woc-ai-takeover-mark`，最上层，放映时也在）。**它是内容不是窗口状态**，所以：默认**不贴**（`hint` 零改动，响应里 `inAppHint` 提示要加 `-SlideMark`）；`-SlideMark` 显式开启时返回 `slideMarkWarning`；`save`/`export` 落盘前剥离、写完补回；`hint -Clear`/`finish`/`close` 逐页删除；**用户手动 Ctrl+S 造成的污染会自动修复**（下一条命令：剥离→重存→贴回，返回 `badgeRepaired:true`）。读侧零干扰：`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 都跳过它（`read` 每页给 `takeoverBadge:true`）。
 - **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI接管中〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
 - **不做悬浮窗（用户明确决策，2026-10-30）**：不加置顶悬浮条/浮层——它会遮正文、抢焦点，而且要常驻 daemon 跟随 WPS 窗口（移动/最小化/切标签/异常退出都得收拾）。常驻信息由「标签页前缀标记 + 托盘图标」承担；**不要再向用户推荐，也不要把它做成"可选模式"偷偷加回来**。
 
@@ -485,7 +487,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | **接管后窗口不可见**（v1.25 修） | 用 `open`（不带 `-Show`）接管用户已打开的演示时，窗口会被置为隐藏（`Windows.Count=0`/`Visible=false`），用户在 WPS 里看不到任何改动 | v1.25 起 `open` 默认显示并 `Activate()`；确实要后台跑才传 `-Show:$false` |
 | **标题标记会被切标签页清掉**（v1.26 实测） | WPS 12 用共享窗口框（`PP12FrameClass`，属 `wps.exe`），`SetWindowText` 写的「〔AI接管中〕」在 COM 编辑/翻页/空闲后保持，但**用户切到别的标签页时 WPS 会重置标题** | 不是 bug：这样不会把标记挂到别的文档；下一条针对该稿的命令会自动补回（helper 里有 `TitleState` 记录，`hint -Clear`/`finish`/`close` 会停用） |
 | **母版上的标记会被整幅大图盖住**（v1.27 实测） | 第一版把「〔AI接管中〕」药丸加在 `SlideMaster`，实测封面这类**满版图片页**把母版形状整片遮住（母版在页面形状之下），渲染图上完全看不见 | v1.27 起改为**逐页贴、置顶**（`woc-ai-takeover-mark`）；如果自己做类似标记，别指望母版 |
-| **页面标记是内容，不是窗口状态**（v1.27） | 与标题标记不同，药丸是**形状**：用户自己按 Ctrl+S 会把它存进文件；`save`/`export` 已在落盘前自动剥离、写完补回 | 收尾用 `finish`/`hint -Clear` 清掉；要"完全不动文档"就 `hint -NoSlideMark` |
+| **页面标记是内容，不是窗口状态**（v1.28 定案） | 与标题标记不同，药丸是**形状**：用户自己按 Ctrl+S 会把它存进文件（实测：裸 COM `Save()` 后重开，徽章确实在文件里）；`save`/`export` 已在落盘前自动剥离、写完补回 | 默认**不贴**（`hint` 零改动）；要界面可见才 `-SlideMark`，收尾 `finish`/`hint -Clear`；万一被 Ctrl+S 存进去，**下一条命令自动修复**（`badgeRepaired:true`），只读文件给 `badgeDirty` |
 | **daemon 必须保温** | 一次性模式 746 ms vs 保温 422 ms；`close` 掉最后一份文档后 daemon 自己退，下一条命令重新付 ~0.5 s | 一轮任务里别频繁 `close` 又重开；批量命令用 `batch`（一次启动跑一批） |
 
 ## PPT 命令速查
@@ -530,7 +532,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | `close` | `-Doc [-Save]` | 关闭；`-Save` 会先保存（有改动才存，返回 `saved:true`）；最后一份时退出实例，回报 wpp 进程数。**关闭后同一路径可以再 `open`** |
 | `quit` | — | 全部关闭并退出（不保存）。**慎用** |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | 完成信号（托盘气泡+提示音）；**不碰文稿任何内容**。任务收尾默认调用 |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-SlideMark\|-NoSlideMark] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11）：气泡/托盘图标 + 窗口标题标记（v1.26）+ **每页右上角「〔AI接管中〕」页面标记（v1.27，默认开）**；返回 `titleMarked` / `slideMarked` / `slideMarkCount`（贴了几页），COM 标题仍不可写所以 `captionSupported:false`；`-NoSlideMark` 完全不碰页面；`-Clear` 逐页删除并还原标题；`save`/`export` 落盘前自动剥离页面标记 |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-SlideMark\|-NoSlideMark] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11）：气泡/托盘图标 + 窗口标题标记（v1.26）+ **按需的页面标记（v1.27 引入、v1.28 改为 opt-in）**。**默认零改动**，响应 `inAppHint` 说明"要界面可见加 `-SlideMark`"；`-SlideMark` 逐页贴「〔AI接管中〕」并返回 `slideMarkCount` + `slideMarkWarning`；`-NoSlideMark`/`-Clear` 移除；`save`/`export` 落盘前自动剥离；**用户 Ctrl+S 造成的污染由下一条命令自动修复**（`badgeRepaired:true`，只读文件给 `badgeDirty`）。COM 标题仍不可写 → `captionSupported:false` |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，多半是 WPS 弹了对话框。
 

@@ -671,9 +671,10 @@ switch ($Command) {
         if ($Quiet) { $request['quiet'] = $true }
         # -Tray: keep a resident indicator icon; the daemon restores via this same script.
         if ($Tray) { $request['tray'] = $true; $request['wrapper'] = $PSCommandPath }
-        # the on-slide takeover badge is ON by default (the WPS tab cannot show the OS title);
-        # -NoSlideMark opts out for decks that must not be touched at all.
-        $request['slideMark'] = -not [bool]$NoSlideMark
+        # v1.28: the on-slide badge is deck CONTENT (a manual Ctrl+S would save it), so it is
+        # OPT-IN here; -NoSlideMark explicitly removes one that is already showing.
+        if ($SlideMark) { $request['slideMark'] = $true }
+        elseif ($NoSlideMark) { $request['slideMark'] = $false }
     }
     'finish' {
         if ($Note) { $request['note'] = $Note }

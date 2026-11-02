@@ -332,6 +332,29 @@ internal static partial class Program
     /// <summary>Set by "daemon-stop": the resident loop exits after answering that request.</summary>
     private static bool _daemonStop;
 
+    /// <summary>Extra key/values a pre-flight check wants to report with the current response
+    /// (e.g. "the file had been saved with the badge - it was repaired"). Reset per request.</summary>
+    private static Dictionary<string, object> _requestNotes;
+
+    private static void BeginRequest()
+    {
+        _requestNotes = null;
+    }
+
+    private static void Note(string key, object value)
+    {
+        if (_requestNotes == null) _requestNotes = new Dictionary<string, object>();
+        _requestNotes[key] = value;
+    }
+
+    private static void AttachNotes(object result)
+    {
+        if (_requestNotes == null || _requestNotes.Count == 0) return;
+        Dictionary<string, object> rd = result as Dictionary<string, object>;
+        if (rd == null) return;
+        foreach (KeyValuePair<string, object> kv in _requestNotes) rd[kv.Key] = kv.Value;
+    }
+
     /// <summary>Open documents in this automation instance (the daemon's exit rule).</summary>
     private static int OpenDocumentCount()
     {
@@ -350,11 +373,20 @@ internal static partial class Program
         object response;
         try
         {
+            BeginRequest();
             Bag bag = new Bag(Json.Parse(requestJson));
             string cmd = bag.Str("cmd", "").Trim().ToLowerInvariant();
             if (cmd.Length == 0) throw new Fail("BAD_ARGS", "\"cmd\" is required");
-            if (cmd != "open" && cmd != "hint" && cmd != "finish" && cmd != "close") EnsureTitleMarker(bag);
-            response = Ok(cmd, Dispatch(cmd, bag));
+            if (cmd != "open" && cmd != "hint" && cmd != "finish" && cmd != "close")
+            {
+                EnsureTitleMarker(bag);
+                EnsureSlideMarkIntegrity(bag);
+            }
+            object result = Dispatch(cmd, bag);
+            // `open` skips the pre-flight check above (the deck is not open yet) - do it now
+            if (cmd == "open") EnsureSlideMarkIntegrity(bag);
+            AttachNotes(result);
+            response = Ok(cmd, result);
         }
         catch (Fail f)
         {
@@ -2711,6 +2743,9 @@ internal static partial class Program
             if (markCount > 0)
             {
                 try { ApplySlideMark(p, true); } catch (Exception) { }
+                // the file on disk is clean now: record its stats so a later Ctrl+S is detectable
+                try { MarkStateSet(Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture)); }
+                catch (Exception) { }
             }
         }
     }
@@ -2767,6 +2802,7 @@ internal static partial class Program
             }
         }
         try { TitleStateSet(full, false); } catch (Exception) { }
+        try { MarkStateClear(full); } catch (Exception) { }
         p.Close();
         MarkerRemove(full);   // otherwise a later `open -Doc` of the same path is refused as DOC_CLOSED
         TrayDaemon.Stop("ppt");   // drop the resident hint icon of this app, if any
@@ -2941,6 +2977,127 @@ internal static partial class Program
         catch (Exception) { return 0; }
     }
 
+    // ------------------------------------------------- slide-mark integrity (v1.28)
+    // The badge is deck CONTENT, so a manual Ctrl+S writes it into the file and no COM-level guard
+    // can stop that. Instead we remember the file stats we last saw while the badge was on screen
+    // and, on the next command, notice that the file was written behind our back: strip the badge,
+    // save again, put the badge back and say so (badgeRepaired). Same strip -> save -> re-stamp
+    // dance `save`/`export`/`close -Save` already do.
+
+    private static string MarkStateDir()
+    {
+        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                  "wps-office-cooperate", "ppt-slide-mark");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static string MarkStatePath(string full)
+    {
+        return Path.Combine(MarkStateDir(), DocKey(full) + ".json");
+    }
+
+    private static Dictionary<string, object> MarkStateGet(string full)
+    {
+        try
+        {
+            string p = MarkStatePath(full);
+            if (!File.Exists(p)) return null;
+            return Json.Parse(File.ReadAllText(p, Encoding.UTF8)) as Dictionary<string, object>;
+        }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>Record the deck file's current stats, i.e. "this is what the file looks like while a
+    /// badge is on screen". A later difference means somebody saved the deck with the badge in it.</summary>
+    private static void MarkStateSet(string full)
+    {
+        try
+        {
+            if (full == null || full.Length == 0) return;
+            if (!File.Exists(full)) { MarkStateClear(full); return; }
+            FileInfo fi = new FileInfo(full);
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["full"] = full;
+            d["at"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+            d["mtimeUtc"] = fi.LastWriteTimeUtc.ToString("o", CultureInfo.InvariantCulture);
+            d["size"] = fi.Length;
+            File.WriteAllText(MarkStatePath(full), Json.Write(d), new UTF8Encoding(false));
+        }
+        catch (Exception) { }
+    }
+
+    private static void MarkStateClear(string full)
+    {
+        try
+        {
+            if (full == null || full.Length == 0) return;
+            string p = MarkStatePath(full);
+            if (File.Exists(p)) File.Delete(p);
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>If the deck was saved while the badge was in it, remove the badge from the file.</summary>
+    private static void EnsureSlideMarkIntegrity(Bag a)
+    {
+        try
+        {
+            string doc = a.Str("doc", null);
+            if (doc == null || doc.Length == 0) return;
+            string full = FullPathOf(doc);
+            Dictionary<string, object> st = MarkStateGet(full);
+            if (st == null) return;
+            if (!File.Exists(full)) return;   // deck may be open-but-never-saved; keep the state
+
+            FileInfo fi = new FileInfo(full);
+            string recMtime = "";
+            long recSize = -1;
+            try { if (st.ContainsKey("mtimeUtc")) recMtime = Convert.ToString(st["mtimeUtc"], CultureInfo.InvariantCulture); }
+            catch (Exception) { }
+            try { if (st.ContainsKey("size")) recSize = Convert.ToInt64(st["size"], CultureInfo.InvariantCulture); }
+            catch (Exception) { }
+            bool same = string.Equals(recMtime, fi.LastWriteTimeUtc.ToString("o", CultureInfo.InvariantCulture), StringComparison.Ordinal)
+                        && recSize == fi.Length;
+            if (same) return;   // the file on disk is the one we recorded: badge still only on screen
+
+            dynamic p = FindOpen(full);
+            if (p == null) return;   // closed for now: repair on the next command that touches it
+
+            // Strip whatever badge is still in the in-memory deck. Careful: an external save (the
+            // user's Ctrl+S, or our own raw-COM test) can leave this client's object graph out of
+            // sync with the file, so "no badge found in memory" does NOT mean the file is clean -
+            // the save below is what actually rewrites the file without the badge.
+            int had = 0;
+            try { had = ApplySlideMark(p, false); } catch (Exception) { }
+
+            bool ro = false;
+            try { ro = (int)p.ReadOnly != 0; } catch (Exception) { }
+            if (ro)
+            {
+                try { ApplySlideMark(p, true); } catch (Exception) { }
+                Note("badgeDirty", "the deck was saved while the takeover badge was in it, but the file is read-only -"
+                    + " run hint -Clear and save again before delivering it");
+                return;
+            }
+            try { ComRetry(() => { p.Save(); return 0; }); }
+            catch (Exception e)
+            {
+                try { ApplySlideMark(p, true); } catch (Exception) { }
+                Note("badgeRepairFailed", "stripped the takeover badge but could not save the repaired file: " + Clean(e.Message));
+                return;
+            }
+            int again = 0;
+            try { again = ApplySlideMark(p, true); } catch (Exception) { }
+            MarkStateSet(full);
+            Note("badgeRepaired", "the deck had been saved (Ctrl+S) with the takeover badge; the badge was removed, the file"
+                + " re-saved, and the badge put back on screen");
+            Note("badgeMarksRemoved", had);
+            Note("slideMarkCount", again);
+        }
+        catch (Exception) { }
+    }
+
     private static IntPtr FrameFor(string presName)
     {
         IntPtr found = IntPtr.Zero;
@@ -3070,7 +3227,9 @@ internal static partial class Program
         catch (Exception) { }
         r["captionSupported"] = false;   // COM caption stays read-only
         r["titleMarked"] = titleMarked;  // the real marker is a Win32 SetWindowText on the frame
-        bool wantSlideMark = !clear && a.Flag("slideMark", true);
+        // v1.28: the slide badge is deck CONTENT (a manual Ctrl+S writes it into the file), so it is
+        // opt-in. Default: window title + balloon + optional tray only, zero document changes.
+        bool wantSlideMark = !clear && a.Flag("slideMark", false);
         int slideMarkCount = 0;
         try
         {
@@ -3080,15 +3239,25 @@ internal static partial class Program
         catch (Exception) { }
         r["slideMarked"] = slideMarkCount > 0;
         if (slideMarkCount > 0) r["slideMarkCount"] = slideMarkCount;
+        try
+        {
+            if (slideMarkCount > 0) MarkStateSet(full);
+            else if (full.Length > 0) MarkStateClear(full);
+        }
+        catch (Exception) { }
         r["limitation"] = titleMarked
             ? "the per-document caption is read-only in COM, so the marker is written on the real window frame"
               + " (class PP12FrameClass); WPS clears it when you switch to another tab and the next command re-applies it"
             : "no visible frame matched this deck (it may not be the active tab); the tray balloon is the only signal";
+        if (slideMarkCount > 0)
+            r["slideMarkWarning"] = "the badge is deck content: if the user presses Ctrl+S it is written into the file."
+                + " Call finish (or hint -Clear) before the deck is saved or delivered; should the file get saved anyway,"
+                + " the next command strips the badge, re-saves and reports badgeRepaired:true";
         if (!clear && slideMarkCount == 0)
-            r["inAppHint"] = "no slide badge is showing on this deck (-NoSlideMark, or the deck refuses new shapes);"
-                + " the WPS Presentation tab is custom-drawn from the file name, so the OS title is only visible in the"
-                + " taskbar / Alt+Tab - the on-slide badge is the only in-app marker (hint -SlideMark stamps it,"
-                + " hint -Clear or finish removes it)";
+            r["inAppHint"] = "nothing was written into the deck (default). The WPS Presentation tab is custom-drawn from the"
+                + " file name, so the OS title is only visible in the taskbar / Alt+Tab. Pass -SlideMark to stamp the"
+                + " in-app badge on every slide - it is deck content, so it has to be cleared again (finish / hint -Clear)"
+                + " before the deck is saved or handed over";
 
         bool quiet = a.Flag("quiet", false);
         bool toast = !quiet && a.Flag("toast", !clear);
@@ -3136,7 +3305,9 @@ internal static partial class Program
             if (target != null)
             {
                 ApplyTitleMarker(target, false);
-                TitleStateSet(Convert.ToString(TryGet(() => (object)target.FullName, ""), CultureInfo.InvariantCulture), false);
+                string tfull = Convert.ToString(TryGet(() => (object)target.FullName, ""), CultureInfo.InvariantCulture);
+                TitleStateSet(tfull, false);
+                MarkStateClear(tfull);   // no badge left, nothing to repair later
             }
         }
         catch (Exception) { }
