@@ -5,6 +5,8 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+**版本 v1.26（2026-11-02）**：**PPT 接管也有了窗口标题标记**——之前结论是"WPS 演示没有可写的单文档标题"，实测补全：COM 的 `ActiveWindow.Caption` 确实只读、`Application.Caption` 写了也不重绘标题栏、`Application.StatusBar` 属性在 WPP 上不存在；但**真正的窗口框（`PP12FrameClass`，由共享的 `wps.exe` 框架进程持有）仍接受 `SetWindowText`**。现在 `open`/`hint` 会给该窗口标题加「〔AI接管中〕」前缀，`hint -Clear`/`finish`/`close` 自动去掉；实测标记在 COM 编辑/翻页/空闲后都保持，**用户切到另一个标签页时 WPS 会自己重置标题**（所以绝不会把标记挂到别的文档上），切回后下一条命令自动补回。
+
 **版本 v1.25（2026-11-02）**：**`open` 默认让窗口可见（接管必须看得见）**——起因：PPT 试点用 `open` 接管一份用户已打开的演示文稿时（未带 `-Show`），helper 把 WPS 窗口隐藏了，用户在界面上看不到任何改动、以为没生效。① 三端 `open` 默认 `show=true` 并 `Activate()`（Word/Excel 复用已打开的文档时也会激活窗口）；要隐藏必须显式 `-Show:$false`。② PPT 若文稿以"无窗口"方式打开（`Windows.Count == 0`），`open` 会 `NewWindow()` 补窗口再激活。③ 顺带确认：同一 WPP 实例可同时打开多份演示（与 Excel 一个实例只能开一个工作簿不同）。
 
 **版本 v1.24（2026-11-02）**：**跨 app 多任务编排（P3）**——新增 `scripts\tasks-session.ps1`（plan/check/selftest）：输入任务板 `board.json`（id/app/doc/kind/priority/dependsOn），输出**波次调度** `schedule.json`：同一文档自动串行（隐式链），不同文档可同波并行（默认上限 3），显式 `dependsOn` 跨文档依赖也支持；带环检测与未知依赖校验。配套 `reference/multi-task-session.md`（物理约束、任务板字段、例、汇报与验收）。三端工具（`tasks.ps1` / `tasks-excel.ps1` / `tasks-ppt.ps1`）负责每波内部"并行规划、单写者提交"。
@@ -122,7 +124,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - **`open` 自动打标签**：窗口标签/标题变成 `〔AI接管中〕 报告.docx`（Writer / 表格都有；WPS 12 的标签页从右截断，所以标记放前面，长文件名也不会被吃掉）。这是纯窗口状态：不进修订、不写文件、不改 `saved`，`-NoHint` 可关。
 - **`hint` 补一句人话**：默认弹 6 s 托盘气泡——"已接管《报告.docx》：我会把改动做成修订或批注，你随时可以接受或拒绝。"`-Text` 换说法，`-HintTag` 换标题里的标签文字，`-Bar` 单独控制状态栏那行（表格会显示，Writer 不渲染），`-Quiet` 静默（不弹气泡，适合刷新标题/状态栏）。
 - **还原**：`hint -Clear`、`finish`、`close` 都会把标题恢复成文件名、把状态栏交还 WPS；`status` 每份文档带 `caption` 与 `hinted`，随时可核对当前有没有挂着标记。
-- **PPT 只给气泡**（`captionSupported:false` + `limitation`）：WPS 演示没有可写的单文档标题，别对用户说"标题已标记"。
+- **PPT 的标题标记（v1.26）**：COM 的 `ActiveWindow.Caption` 只读、`Application.Caption` 不重绘标题栏、`StatusBar` 属性不存在，但窗口框（`PP12FrameClass`）接受 `SetWindowText`——`open`/`hint` 给标题加「〔AI接管中〕」前缀，`hint -Clear`/`finish`/`close` 去掉；用户切标签页时 WPS 自己重置（不会挂错文档），下一条命令自动补回。返回里 `captionSupported:false` 仍表示"COM 标题不可写"，`titleMarked:true` 表示 Win32 标记已生效；气泡照旧（`-Toast`）。
 - **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI接管中〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
 - **不做悬浮窗（用户明确决策，2026-10-30）**：不加置顶悬浮条/浮层——它会遮正文、抢焦点，而且要常驻 daemon 跟随 WPS 窗口（移动/最小化/切标签/异常退出都得收拾）。常驻信息由「标签页前缀标记 + 托盘图标」承担；**不要再向用户推荐，也不要把它做成"可选模式"偷偷加回来**。
 
@@ -478,6 +480,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | **未转义的 Windows 路径** | 手拼 JSON 时 `C:\Users\...` 里的 `\U`/`\A`/`\D` 被当非法转义，旧解析器**静默丢反斜杠** ⇒ `C:Users...`，再叠加"路径不存在就新建"就凭空多一份稿 | v1.19 起非法转义直接 `BAD_ARGS`；拼请求一律走 JSON 序列化器（`batch` 的 ops 文件也是） |
 | **渲染成本 ~355 ms/页** | 3 页 1471 ms；`check` 全规则 970 ms/次；`read` 3 页 632 ms | 设计阶段渲一次 `-Overview`（6 页/图），之后**只渲改动页**；`check` 过程别跑，收尾跑一遍 `-MinSeverity blocker`；`read` 一次读全稿并缓存形状名 |
 | **接管后窗口不可见**（v1.25 修） | 用 `open`（不带 `-Show`）接管用户已打开的演示时，窗口会被置为隐藏（`Windows.Count=0`/`Visible=false`），用户在 WPS 里看不到任何改动 | v1.25 起 `open` 默认显示并 `Activate()`；确实要后台跑才传 `-Show:$false` |
+| **标题标记会被切标签页清掉**（v1.26 实测） | WPS 12 用共享窗口框（`PP12FrameClass`，属 `wps.exe`），`SetWindowText` 写的「〔AI接管中〕」在 COM 编辑/翻页/空闲后保持，但**用户切到别的标签页时 WPS 会重置标题** | 不是 bug：这样不会把标记挂到别的文档；下一条针对该稿的命令会自动补回（helper 里有 `TitleState` 记录，`hint -Clear`/`finish`/`close` 会停用） |
 | **daemon 必须保温** | 一次性模式 746 ms vs 保温 422 ms；`close` 掉最后一份文档后 daemon 自己退，下一条命令重新付 ~0.5 s | 一轮任务里别频繁 `close` 又重开；批量命令用 `batch`（一次启动跑一批） |
 
 ## PPT 命令速查
@@ -522,7 +525,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | `close` | `-Doc [-Save]` | 关闭；`-Save` 会先保存（有改动才存，返回 `saved:true`）；最后一份时退出实例，回报 wpp 进程数。**关闭后同一路径可以再 `open`** |
 | `quit` | — | 全部关闭并退出（不保存）。**慎用** |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | 完成信号（托盘气泡+提示音）；**不碰文稿任何内容**。任务收尾默认调用 |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11；v1.12 起 `-Tray` 是 PPT 侧**唯一常驻通道**）：**气泡/托盘图标**——WPS 演示不支持可写的单文档标题，返回 `captionSupported:false` + `limitation`；`-Quiet` 静默。**别对用户谎称"标题已标记"** |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11；v1.12 起 `-Tray` 是 PPT 侧**唯一常驻通道**）：**气泡/托盘图标**——WPS 演示不支持可写的单文档标题，返回 `captionSupported:false` + `limitation`；`-Quiet` 静默。v1.26 起标题标记改为写真实窗口框（Win32）；COM 标题仍不可写，返回值里 `captionSupported:false` + `titleMarked:true` |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，多半是 WPS 弹了对话框。
 

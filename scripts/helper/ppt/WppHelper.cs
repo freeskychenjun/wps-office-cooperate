@@ -353,6 +353,7 @@ internal static partial class Program
             Bag bag = new Bag(Json.Parse(requestJson));
             string cmd = bag.Str("cmd", "").Trim().ToLowerInvariant();
             if (cmd.Length == 0) throw new Fail("BAD_ARGS", "\"cmd\" is required");
+            if (cmd != "open" && cmd != "hint" && cmd != "finish" && cmd != "close") EnsureTitleMarker(bag);
             response = Ok(cmd, Dispatch(cmd, bag));
         }
         catch (Fail f)
@@ -996,6 +997,11 @@ internal static partial class Program
             try { wins = (int)p.Windows.Count; } catch (Exception) { }
             if (wins == 0) { try { p.NewWindow(); } catch (Exception) { } }
             try { p.Windows(1).Activate(); } catch (Exception) { }
+        }
+        if (!a.Flag("noHint", false))
+        {
+            bool marked = ApplyTitleMarker(p, true);
+            try { TitleStateSet(Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture), true); } catch (Exception) { }
         }
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["name"] = Convert.ToString(TryGet(() => (object)p.Name, "?"), CultureInfo.InvariantCulture);
@@ -2709,6 +2715,8 @@ internal static partial class Program
                 }
             }
         }
+        try { ApplyTitleMarker(p, false); } catch (Exception) { }
+        try { TitleStateSet(full, false); } catch (Exception) { }
         p.Close();
         MarkerRemove(full);   // otherwise a later `open -Doc` of the same path is refused as DOC_CLOSED
         TrayDaemon.Stop("ppt");   // drop the resident hint icon of this app, if any
@@ -2766,6 +2774,125 @@ internal static partial class Program
         catch (Exception) { return false; }
     }
 
+    // ------------------------------------------------------------ window title marker
+    // WPS Presentation gives no writable per-document caption (ActiveWindow.Caption is read-only and
+    // Application.Caption does not repaint the frame), but the real frame window - class
+    // PP12FrameClass, owned by the shared wps.exe frame host - still accepts SetWindowText.
+    // Measured 2026-11-02: the prefix survives COM edits, slide switches and idle; WPS resets the
+    // title when the user switches to another tab, so the marker can never show on the wrong deck.
+    private const string TitleTag = "\u3014AI\u63a5\u7ba1\u4e2d\u3015";
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool SetWindowText(IntPtr h, string s);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+
+    private static IntPtr FrameFor(string presName)
+    {
+        IntPtr found = IntPtr.Zero;
+        string want = presName ?? "";
+        EnumWindowsProc cb = delegate(IntPtr h, IntPtr l)
+        {
+            StringBuilder cls = new StringBuilder(64);
+            GetClassName(h, cls, cls.Capacity);
+            if (!string.Equals(cls.ToString(), "PP12FrameClass", StringComparison.Ordinal)) return true;
+            if (!IsWindowVisible(h)) return true;
+            StringBuilder tb = new StringBuilder(1024);
+            GetWindowText(h, tb, tb.Capacity);
+            string title = tb.ToString();
+            if (title.Length == 0) return true;
+            if (want.Length > 0 && title.IndexOf(want, StringComparison.OrdinalIgnoreCase) < 0) return true;
+            found = h;
+            return false;
+        };
+        EnumWindows(cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        return found;
+    }
+
+    /// <summary>Prefix / strip the takeover tag on the real frame title. Returns false when the
+    /// deck is not the active tab (WPS has already reset the title to the other document).</summary>
+    private static bool ApplyTitleMarker(dynamic p, bool on)
+    {
+        try
+        {
+            string name = Convert.ToString(TryGet(() => (object)p.Name, ""), CultureInfo.InvariantCulture);
+            if (name.Length == 0) return false;
+            IntPtr h = FrameFor(name);
+            if (h == IntPtr.Zero) return false;
+            StringBuilder tb = new StringBuilder(1024);
+            GetWindowText(h, tb, tb.Capacity);
+            string title = tb.ToString();
+            if (on)
+            {
+                if (title.StartsWith(TitleTag, StringComparison.Ordinal)) return true;
+                SetWindowText(h, TitleTag + " " + title);
+                return true;
+            }
+            if (title.StartsWith(TitleTag + " ", StringComparison.Ordinal))
+                SetWindowText(h, title.Substring(TitleTag.Length + 1));
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    private static string TitleStatePath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "wps-office-cooperate", "ppt-title-hint.json");
+    }
+    private static bool TitleStateGet(string full)
+    {
+        try
+        {
+            Dictionary<string, object> m = Json.Parse(File.ReadAllText(TitleStatePath(), Encoding.UTF8)) as Dictionary<string, object>;
+            if (m != null && m.ContainsKey(full.ToLowerInvariant())) return Convert.ToInt32(m[full.ToLowerInvariant()], CultureInfo.InvariantCulture) == 1;
+        }
+        catch (Exception) { }
+        return false;
+    }
+    private static void TitleStateSet(string full, bool on)
+    {
+        IDisposable g = WocLocks.State(3000);
+        try
+        {
+            Dictionary<string, object> m = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                Dictionary<string, object> old = Json.Parse(File.ReadAllText(TitleStatePath(), Encoding.UTF8)) as Dictionary<string, object>;
+                if (old != null) m = old;
+            }
+            catch (Exception) { }
+            m[full.ToLowerInvariant()] = on ? 1 : 0;
+            Directory.CreateDirectory(Path.GetDirectoryName(TitleStatePath()));
+            string tmp = TitleStatePath() + ".tmp";
+            File.WriteAllText(tmp, Json.Write(m), new UTF8Encoding(false));
+            File.Copy(tmp, TitleStatePath(), true);
+            try { File.Delete(tmp); } catch (Exception) { }
+        }
+        catch (Exception) { }
+        finally { if (g != null) g.Dispose(); }
+    }
+
+    /// <summary>Re-apply the marker on later commands: WPS drops it when the user switches tabs.</summary>
+    private static void EnsureTitleMarker(Bag a)
+    {
+        try
+        {
+            string doc = a.Str("doc", null);
+            if (doc == null) return;
+            string full = FullPathOf(doc);
+            if (!TitleStateGet(full)) return;
+            dynamic app = App(false, false);
+            if (app == null) return;
+            dynamic act = null;
+            try { act = app.ActivePresentation; } catch (Exception) { return; }
+            string actFull = Convert.ToString(TryGet(() => (object)act.FullName, ""), CultureInfo.InvariantCulture);
+            if (!string.Equals(actFull, full, StringComparison.OrdinalIgnoreCase)) return;
+            ApplyTitleMarker(act, true);
+        }
+        catch (Exception) { }
+    }
     private static object HintCmd(Bag a)
     {
         dynamic p = RequirePres(a, false);
@@ -2780,10 +2907,20 @@ internal static partial class Program
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["name"] = name;
         r["cleared"] = clear;
-        r["captionSupported"] = false;
-        r["limitation"] = "WPS Presentation exposes no writable per-document window caption"
-            + " (ActiveWindow.Caption is read-only, Application.Caption is app-wide and would replace the"
-            + " localized product name), so the takeover hint here is the tray balloon only.";
+        bool titleMarked = false;
+        string full = Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture);
+        try
+        {
+            titleMarked = ApplyTitleMarker(p, !clear);
+            if (full.Length > 0) TitleStateSet(full, !clear);
+        }
+        catch (Exception) { }
+        r["captionSupported"] = false;   // COM caption stays read-only
+        r["titleMarked"] = titleMarked;  // the real marker is a Win32 SetWindowText on the frame
+        r["limitation"] = titleMarked
+            ? "the per-document caption is read-only in COM, so the marker is written on the real window frame"
+              + " (class PP12FrameClass); WPS clears it when you switch to another tab and the next command re-applies it"
+            : "no visible frame matched this deck (it may not be the active tab); the tray balloon is the only signal";
 
         bool quiet = a.Flag("quiet", false);
         bool toast = !quiet && a.Flag("toast", !clear);
@@ -2811,6 +2948,21 @@ internal static partial class Program
         string note = a.Str("note", "");
         string timeText = DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
         string text = "\u2705 AI \u5df2\u5b8c\u6210 " + timeText + (note.Length > 0 ? " | " + note : "");
+        try
+        {
+            dynamic app = App(false, false);
+            if (app != null)
+            {
+                dynamic act = null;
+                try { act = app.ActivePresentation; } catch (Exception) { }
+                if (act != null)
+                {
+                    ApplyTitleMarker(act, false);
+                    TitleStateSet(Convert.ToString(TryGet(() => (object)act.FullName, ""), CultureInfo.InvariantCulture), false);
+                }
+            }
+        }
+        catch (Exception) { }
 
         Dictionary<string, object> r = new Dictionary<string, object>();
         bool quiet = a.Flag("quiet", false);
