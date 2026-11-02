@@ -819,15 +819,24 @@ internal static partial class Program
     {
         public int Primary = ColorOf("#1F4E79", 0);          // 主色：水利深蓝
         public int Accent = ColorOf("#C99700", 0);           // 强调色：金
+        public int Accent2 = ColorOf("#2E75B6", 0);          // second accent (v1.31: two-tone contrast)
         public int Title = ColorOf("#1F4E79", 0);            // 标题色
         public int Text = ColorOf("#333333", 0);             // 正文色
         public int Muted = ColorOf("#808080", 0);            // 页脚/次要
+        public int Surface = ColorOf("#F2F5F9", 0);          // card ground (v1.31)
         public int White = ColorOf("#FFFFFF", 0);
         public string Font = "\u5fae\u8f6f\u96c5\u9ed1";         // 微软雅黑
         public string TitleFont = "\u5fae\u8f6f\u96c5\u9ed1";
         public string Footer = "";
         public bool PageNumber = true;
         public bool SkipFooterOnCover = true;
+        // v1.31 tokens: card ground + corner radius, and which of the four section looks the
+        // section preset uses.  HasCardFill stays false until a theme file names cardFill, so
+        // "default = surface" keeps working when surface itself is overridden later.
+        public int CardFill = 0;
+        public bool HasCardFill = false;
+        public double CardRadius = 12;
+        public string SectionStyle = "";
 
         public static DeckTheme Load(dynamic pres)
         {
@@ -848,9 +857,18 @@ internal static partial class Program
             if (fallback != null) t = fallback;
             if (b.Has("primary")) t.Primary = ColorOf(b.Str("primary", null), t.Primary);
             if (b.Has("accent")) t.Accent = ColorOf(b.Str("accent", null), t.Accent);
+            if (b.Has("accent2")) t.Accent2 = ColorOf(b.Str("accent2", null), t.Accent2);
             if (b.Has("title")) t.Title = ColorOf(b.Str("title", null), t.Title);
             if (b.Has("text")) t.Text = ColorOf(b.Str("text", null), t.Text);
             if (b.Has("muted")) t.Muted = ColorOf(b.Str("muted", null), t.Muted);
+            if (b.Has("surface")) t.Surface = ColorOf(b.Str("surface", null), t.Surface);
+            if (b.Has("cardFill"))
+            {
+                t.CardFill = ColorOf(b.Str("cardFill", null), t.Surface);
+                t.HasCardFill = true;
+            }
+            if (b.Has("cardRadius")) t.CardRadius = Math.Max(0, Math.Min(60, b.Dbl("cardRadius", t.CardRadius)));
+            if (b.Has("sectionStyle")) t.SectionStyle = (b.Str("sectionStyle", "") ?? "").Trim().ToLowerInvariant();
             if (b.Has("font")) t.Font = b.Str("font", t.Font);
             if (b.Has("titleFont")) t.TitleFont = b.Str("titleFont", t.TitleFont);
             if (b.Has("footer")) t.Footer = b.Str("footer", t.Footer);
@@ -864,9 +882,14 @@ internal static partial class Program
             Dictionary<string, object> d = new Dictionary<string, object>();
             d["primary"] = Hex(Primary);
             d["accent"] = Hex(Accent);
+            d["accent2"] = Hex(Accent2);
             d["title"] = Hex(Title);
             d["text"] = Hex(Text);
             d["muted"] = Hex(Muted);
+            d["surface"] = Hex(Surface);
+            d["cardFill"] = HasCardFill ? Hex(CardFill) : null;
+            d["cardRadius"] = CardRadius;
+            d["sectionStyle"] = SectionStyle;
             d["font"] = Font;
             d["titleFont"] = TitleFont;
             d["footer"] = Footer;
@@ -1247,14 +1270,42 @@ internal static partial class Program
         throw new Fail("BAD_ARGS", "slide -Action must be add|dup|move|delete");
     }
 
-    /// <summary>Preset layouts (borrowed idea from dsh-office's ready-made slides, deliberately simple):
-    /// title / section / bullets / two / end. Geometry derives from the deck's slide size.</summary>
-    private static string BuildPreset(dynamic pres, dynamic slide, Bag a, out List<string> problems)
+    /// <summary>Preset layouts.  The five original ones (title / section / bullets / two / end) keep
+    /// their look; v1.31 adds eight finished layouts (cards / stats / timeline / process / compare /
+    /// summary / gallery / split) drawn on a 960x540 design canvas and scaled to the deck (see
+    /// Kinds.cs).  Both families return {preset, slide, shapes, overflowWarnings, ..}.</summary>
+    private static object BuildPreset(dynamic pres, dynamic slide, Bag a, out List<string> problems)
     {
         problems = new List<string>();
-        List<string> notes = problems;   // C#5: an out parameter cannot be captured by a lambda
+        List<string> notes = problems;
         string preset = a.Str("preset", "").ToLowerInvariant();
         DeckTheme th = DeckTheme.Load(pres);
+        if (IsFinishedPreset(preset))
+        {
+            // A layout that fails half way through leaves the slide deleted, not half drawn
+            // (measured: a failed picture layout used to leave an orphan page behind).
+            try { return BuildFinishedSlide(pres, slide, a, preset, th, out problems); }
+            catch (Exception)
+            {
+                try { slide.Delete(); } catch (Exception) { }
+                throw;
+            }
+        }
+        string made = BuildLegacyPreset(pres, slide, a, preset, th, notes);
+        return PresetReport(pres, slide, made, problems);
+    }
+
+    private static bool IsFinishedPreset(string p)
+    {
+        return p == "cards" || p == "stats" || p == "timeline" || p == "process"
+            || p == "compare" || p == "summary" || p == "gallery" || p == "split";
+    }
+
+    /// <summary>Preset layouts (borrowed idea from dsh-office's ready-made slides, deliberately simple):
+    /// title / section / bullets / two / end. Geometry derives from the deck's slide size.</summary>
+    private static string BuildLegacyPreset(dynamic pres, dynamic slide, Bag a, string preset, DeckTheme th, List<string> problems)
+    {
+        List<string> notes = problems;   // C#5: an out parameter cannot be captured by a lambda
         double W = Convert.ToDouble(TryGet(() => (object)pres.PageSetup.SlideWidth, (object)960.0), CultureInfo.InvariantCulture);
         double H = Convert.ToDouble(TryGet(() => (object)pres.PageSetup.SlideHeight, (object)540.0), CultureInfo.InvariantCulture);
         string title = a.Str("title", "");
@@ -1345,6 +1396,33 @@ internal static partial class Program
         }
         if (preset == "section")
         {
+            // v1.31: four looks, picked by the theme token sectionStyle (solid|side|band|number).
+            // Default (empty) keeps the original left band.
+            string style = th.SectionStyle == null ? "" : th.SectionStyle;
+            if (style == "solid")
+            {
+                bar(0, 0, W, H, th.Primary, "sectionGround");
+                box(W * 0.08, H * 0.26, W * 0.34, H * 0.20, number, 72, -1, "left", th.White, "number", th.TitleFont, false);
+                bar(W * 0.08, H * 0.50, W * 0.10, 5, th.Accent, "accentLine");
+                box(W * 0.08, H * 0.55, W * 0.84, H * 0.22, title, 40, -1, "left", th.White, "sectionTitle", th.TitleFont, false);
+                return "section";
+            }
+            if (style == "band")
+            {
+                bar(0, H * 0.33, W, H * 0.30, th.Primary, "sectionBand");
+                box(W * 0.06, H * 0.33, W * 0.16, H * 0.30, number, 44, -1, "center", th.White, "number", th.TitleFont, false);
+                box(W * 0.24, H * 0.33, W * 0.70, H * 0.30, title, 34, -1, "left", th.White, "sectionTitle", th.TitleFont, false);
+                bar(W * 0.06, H * 0.70, W * 0.10, 5, th.Accent, "accentLine");
+                return "section";
+            }
+            if (style == "number")
+            {
+                box(W * 0.48, H * 0.10, W * 0.46, H * 0.64, number, 220, -1, "right",
+                    KMix(th.Primary, th.White, 0.86), "number", th.TitleFont, false);
+                bar(W * 0.08, H * 0.40, W * 0.08, 5, th.Accent, "accentLine");
+                box(W * 0.08, H * 0.46, W * 0.38, H * 0.22, title, 36, -1, "left", th.Title, "sectionTitle", th.TitleFont, false);
+                return "section";
+            }
             bar(0, 0, W * 0.30, H, th.Primary, "sectionBand");
             box(0, H * 0.34, W * 0.30, H * 0.22, number, 54, -1, "center", th.White, "number", th.TitleFont, false);
             box(W * 0.38, H * 0.40, W * 0.56, H * 0.18, title, 36, -1, "left", th.Title, "sectionTitle", th.TitleFont, false);
@@ -1378,7 +1456,9 @@ internal static partial class Program
             box(W * 0.08, H * 0.66, W * 0.84, H * 0.14, subtitle, 18, 0, "center", th.White, "subtitle", th.Font, false);
             return "end";
         }
-        throw new Fail("BAD_ARGS", "unknown preset \"" + preset + "\"; use title|section|bullets|two|end (or -Layout <n> for a raw PowerPoint layout)");
+        throw new Fail("BAD_ARGS", "unknown preset \"" + preset + "\"; use title|section|bullets|two|end"
+            + " or a finished layout cards|stats|timeline|process|compare|summary|gallery|split"
+            + " (or -Layout <n> for a raw PowerPoint layout)");
     }
 
     /// <summary>Rough Chinese-text capacity check: shrink the font instead of letting text spill

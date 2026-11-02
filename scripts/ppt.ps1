@@ -67,6 +67,8 @@ param(
     # crop: how a picture is fitted into its frame
     [string]$Focus,
     [string]$Fit,
+    # split layout: which half the picture takes
+    [string]$Side,
     # connect: the two shapes a connector joins (the plain -From/-To are slide ranges)
     [string]$FromShape,
     [string]$ToShape,
@@ -377,6 +379,10 @@ switch ($Command) {
         if ($At -gt 0) { $request['at'] = $At }
         if ($Index -gt 0) { $request['index'] = $Index }
         if ($To -gt 0) { $request['to'] = $To }
+        # finished layouts (v1.31): gallery -Fit contain|cover, split -Path <image> -Side left|right
+        if ($Fit) { $request['fit'] = $Fit.ToLowerInvariant() }
+        if ($Path) { $request['path'] = Resolve-FullPath $Path }
+        if ($Side) { $request['side'] = $Side.ToLowerInvariant() }
     }
     'text' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'text needs -Doc' }

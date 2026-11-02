@@ -10,7 +10,8 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'new', 'read', 'search', 'selection', 'write', 'fill', 'rows', 'cols', 'sheet', 'comment', 'render', 'chart', 'autofit', 'format',
                  'snapshot', 'diff', 'restore', 'calc', 'save', 'close', 'quit', 'batch', 'finish', 'hint', 'serve',
-                 'clean', 'fillblanks', 'dedupe', 'deletewhere', 'sort', 'filter', 'copy', 'addcol', 'pivot', 'freeze', 'cformat', 'validate', 'table')]
+                 'clean', 'fillblanks', 'dedupe', 'deletewhere', 'sort', 'filter', 'copy', 'addcol', 'pivot', 'freeze', 'cformat', 'validate', 'table',
+                 'replace')]
     [string]$Command,
 
     [string]$Doc,
@@ -95,6 +96,13 @@ param(
     [string]$Filters,
     [string]$Group,
     [string]$SortBy,
+    # ---- replace (in-memory block replace; see reference/excel-quirks.md for why Range.Replace is not used)
+    [string]$Find,
+    [string]$Replace,
+    [switch]$Whole,
+    [switch]$MatchCase,
+    [switch]$Regex,
+    [switch]$DryRun,
     # ---- finished look + chart extras
     [string]$Rule,
     [string]$Value2,
@@ -493,6 +501,26 @@ switch ($Command) {
             $request['sort'] = $sortSpec
         }
     }
+    'replace' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'replace needs -Doc' }
+        if (-not $Find) { Write-Error-Json 'BAD_ARGS' 'replace needs -Find "<old text>"' }
+        $request['find'] = $Find
+        # -Replace omitted = delete the match. An empty string is a valid replacement, so the
+        # presence of the parameter (not its value) decides.
+        if ($PSBoundParameters.ContainsKey('Replace')) { $request['replace'] = $Replace }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Column) { $request['column'] = $Column }
+        if ($Whole) { $request['whole'] = $true }
+        # -Case is the search switch; -MatchCase is the replace spelling of the same thing.
+        if ($MatchCase -or $Case) { $request['case'] = $true }
+        if ($Regex) { $request['regex'] = $true }
+        if ($DryRun) { $request['dryRun'] = $true }
+        # -Max has a default of 200 for search, so only forward it when it was really given
+        # (an unasked-for cap would silently stop a large replace).
+        if ($PSBoundParameters.ContainsKey('Max')) { $request['max'] = $Max }
+        if ($All) { $request['all'] = $true }
+    }
     'freeze' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'freeze needs -Doc' }
         if ($Sheet) { $request['sheet'] = $Sheet }
@@ -716,6 +744,7 @@ $paramAliases = @{
     # data work / finished look (v1.20): names that do not follow the "lower-case the first letter" rule
     InValues = 'in'; Cond = 'is'; Casing = 'case'; NoHeader = 'header'; Agg = 'values'
     SortBy = 'sort'; AxisMin = 'min'; AxisMax = 'max'
+    MatchCase = 'case'
 }
 $paramCommandSkips = @{
     # write builds a nested item, so these never appear at the top level of the request

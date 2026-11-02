@@ -958,10 +958,30 @@ internal static partial class Program
 
     // ---------------------------------------------------------------- pivot table
 
+    /// <summary>How many row items a pivot table shows; -1 when the app will not say.</summary>
+    private static int RowItemCount(dynamic table)
+    {
+        try { return (int)table.RowRange.Rows.Count; }
+        catch (Exception) { return -1; }
+    }
+
+    private const string GroupRecipe =
+        "Fallback that always works: excel addcol -Header \"\u6708\u4efd\" -Formula \"=TEXT(<date cell>,\"yyyy-mm\")\" "
+        + "(or =YEAR(), or =\"Q\"&ROUNDUP(MONTH(<date cell>)/3,0)), then pivot with -Rows \"\u6708\u4efd\" instead of -Group; "
+        + "keep the helper column: the pivot reads it.";
+
     private static object CmdPivot(Bag a)
     {
         dynamic wb = RequireBook(a, true);
         if (IsReadOnly(wb)) throw new Fail("READONLY", "the workbook is read-only; a pivot table is refused");
+        if (a.Has("group"))
+        {
+            Bag gcheck = new Bag(a.Raw("group"));
+            string byCheck = gcheck.Str("by", "month");
+            if (byCheck != "month" && byCheck != "quarter" && byCheck != "year")
+                throw new Fail("BAD_ARGS", "pivot -Group needs month, quarter or year after the colon (e.g. \"\u65e5\u671f:month\"), not \""
+                    + Clean(byCheck) + "\"");
+        }
         dynamic ws = TargetSheet(wb, a);
         if (ws == null) throw new Fail("COM_ERROR", "no target sheet");
         dynamic source;
@@ -1005,6 +1025,7 @@ internal static partial class Program
         dynamic cache = wb.PivotCaches().Create(1, source);
         dynamic table = cache.CreatePivotTable(dest, a.Str("tableName", a.Str("name", "\u900f\u89c6\u8868")));
         List<string> notes = new List<string>();
+        string groupMode = a.Has("group") ? "unknown" : "none";
 
         Func<object, string> field = delegate(object key)
         {
@@ -1055,18 +1076,33 @@ internal static partial class Program
         if (a.Has("group"))
         {
             // Dates on the rows or columns, gathered by month, quarter or year.
+            // WPS 12.1.0.29161 DOES support the native call (measured 2026-11-02: 24 months ->
+            // 12 / 4 / 2 row items, totals unchanged), but it returns silently when it cannot group
+            // (text dates, mixed types), so the item count is read back instead of trusting it.
             Bag group = new Bag(a.Raw("group"));
             string by = group.Str("by", "month");
+            dynamic gf = table.PivotFields(field(group.Raw("field")));
+            int itemsBefore = RowItemCount(table);
             try
             {
-                dynamic f = table.PivotFields(field(group.Raw("field")));
-                dynamic cell = f.DataRange.Cells[1, 1];
+                dynamic cell = gf.DataRange.Cells[1, 1];
                 object[] periods = new object[] { false, false, false, false, by == "month", by == "quarter", by == "year" };
                 cell.Group(Start: true, End: true, Periods: periods);
+                int itemsAfter = RowItemCount(table);
+                if (itemsBefore > 1 && itemsAfter > 0 && itemsAfter >= itemsBefore)
+                {
+                    groupMode = "failed";
+                    notes.Add("the dates were NOT grouped by " + by + " (the call returned without an error, but the pivot still shows "
+                        + itemsAfter + " row item(s) instead of fewer): the column probably holds text, not real dates. "
+                        + GroupRecipe);
+                }
+                else groupMode = "native";
             }
             catch (Exception error)
             {
-                notes.Add("the dates could not be grouped by " + by + " (" + Clean(error.Message) + "): the column must hold real dates only; or add a month column with a formula and pivot on that");
+                groupMode = "failed";
+                notes.Add("the dates could not be grouped by " + by + " (" + Clean(error.Message)
+                    + "): the column must hold real dates only. " + GroupRecipe);
             }
         }
         if (a.Has("sort"))
@@ -1103,6 +1139,16 @@ internal static partial class Program
         res["range"] = Convert.ToString(TryGet(() => (object)shown2.Address[false, false], ""), CultureInfo.InvariantCulture);
         res["rows"] = rows;
         res["valueFields"] = valueFields;
+        res["groupMode"] = groupMode;
+        if (a.Has("group"))
+        {
+            Bag g = new Bag(a.Raw("group"));
+            Dictionary<string, object> gi = new Dictionary<string, object>();
+            gi["field"] = TextOf(g.Raw("field")).Trim();
+            gi["by"] = g.Str("by", "month");
+            gi["mode"] = groupMode;
+            res["group"] = gi;
+        }
         res["truncated"] = grid.GetLength(0) > limit || grid.GetLength(1) > width;
         res["notes"] = notes;
         if (notes.Count > 0) res["note"] = string.Join("; ", notes.ToArray());

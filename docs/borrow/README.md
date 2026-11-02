@@ -120,7 +120,7 @@ dsh-office 与我们做的是**同一件事的两条路线**：它是「DSH 插�
 | PPT | `crop`（focus 套版）、`connect`（框图连线）、`smartart`、`bg`（纹理/背景）、`anim`（切换/入场）、`chart` 趋势线/雷达/标签/图例 | `AddConnector`+`BeginConnect/EndConnect` 可用；`AddSmartArt` 可建**但节点写不进**（`AllNodes` E_FAIL）；裁切 `CropLeft` **单位是点**（比例会被存下但不渲染）、裁完改 W/H 会洗掉裁切；`OneColorGradient` 回读不可信 | SmartArt 节点文字、`radar` 真渲染（名义支持）、`-Arrow both` 起始箭头未生效——三项都是 WPS 硬限制，已如实标注而非假称成功 |
 | 基础设施 | v1.1–v1.28 changelog 拆出（主文档少读 1.93 万字符）、`publish.ps1` 白名单补 `changelog.md`/`ppt-quirks.md`、新增"daemon 握死引用"故障排查条目 | 杀掉 WPS 进程后 daemon 会握着死 COM 引用 ⇒ 每条命令报 `RPC 服务器不可用`，`serve -Action stop` 后自愈 | MessageFilter 忙重试（~30 行，P0 未做）、参数忽略写进 JSON 返回值、孤儿隐藏实例清扫、Excel render 后恢复用户剪贴板、Word `fill_gaps`/`insert_diagram`、PPT 成品版式层（22 kind + 主题 token，最大差距，估 4–6 人日） |
 
-**下一步（按价值/成本排序，均已在各域报告 §3 里给过依据）**：① ~~Word `fill_gaps` + 两处实现缺陷~~ → **v1.30 已完成**（`fillgaps` 新命令 + `noSplitWords` 极性修正 + `table -KeepTogether` 逐行回读；细节见 `docs/borrow/skill-word-v130.md`）；② Excel `replace` + `pivot` 日期分组实测；③ PPT 成品版式层（把 dsh-office 的 22 种版式 + 主题 token 移植成 `slide -Preset` 新档）；④ 基础设施 MessageFilter + render 剪贴板恢复。
+**下一步（按价值/成本排序，均已在各域报告 §3 里给过依据）**：① ~~Word `fill_gaps` + 两处实现缺陷~~ → **v1.30 已完成**（`fillgaps` 新命令 + `noSplitWords` 极性修正 + `table -KeepTogether` 逐行回读；细节见 `docs/borrow/skill-word-v130.md`）；~~② Excel `replace` + `pivot` 日期分组~~ → **v1.31 已完成**；~~③ PPT 成品版式层~~ → **v1.31 完成 phase 1**（8 档 + 主题 token，grid/canvas/形状图表留 phase 2）；④ 基础设施 MessageFilter + render 剪贴板恢复（未做）。
 
 ---
 

@@ -26,3 +26,15 @@
 - `Shapes.AddShape` 出来的形状**默认名是中文**（"圆角矩形 1"/"椭圆 3"），`-Name` 参数在 v1.29 才被 `shape` 命令消费（此前静默丢弃）→ 给形状命名后 `connect` 才能按名找到。
 - 打开不存在的路径 = 新建空稿（`slides:0`），需先 `slide -Action add`；`open` 冷启动约 17 s，之后每命令 0.5–1.2 s；`chart` 每条 12–14 s（内嵌工作簿轮询）。
 - 临时稿 `close` 后 `wpp` 进程数归 0（本机同机的 `wps.exe` 是别的任务的 Word 接管实例，别按映像名杀）。
+
+## 2026-11-02 · v1.31 成品版式（cards/stats/timeline/process/compare/summary/gallery/split）
+
+- **写 `TextFrame.AutoSize`（任何值）会把文本框压成 29 pt**：实测 `AddTextbox(1,l,t,w,h)` 之后写 `AutoSize = 0`，形状高度回读一律 29（标题框 52 → 29、卡片数字框 46 → 29、页码框 16 → 29 全都变 29），宽度和位置不受影响；后果是 `check` 的 `overflow` 规则拿 29 当框高，**满页报 blocker**（"text needs 33.6pt but the box is 29pt tall"）。做法：**不碰 `AutoSize`**，设完文字后把 `Left/Top/Width/Height` 再写一遍钉死。
+- **`PictureFormat.Crop*` 的比例基数是"图片的自然尺寸"，不是当前框宽**：960×540 半页拦腰 480×540、900×900 方图按 `eL = overX/2` 写裁剪，实测框回读 492×540（少裁 12 pt），且 480+492 出页 → `check` 报 `outframe`。正确写法 `v = e × 自然宽 / 缩放后宽`（`自然宽` = `AddPicture` 之后立刻读到的 `pic.Width`），写完再 `check`：实测框**精确回到 480×540**、无越界。v1.29 的 `crop` 命令用的是"比例 × 缩放后尺寸"，因此它会**少裁几十点**（这正是 v1.29 记录的 480×270→480×224 偏差来源）。
+- **页码必须用普通文本框**：`slide.HeadersFooters.SlideNumber.Visible` 在 WPS 演示上每页都显示 "1"（已知缺陷）。成品版式写 `n / 总数` 的普通文本框（命名 `pageNo`），代价是 `check -Rules pagenum` **每页都报 major "no visible slide number"**（判据就是那个占位符），交付时用 `-Config {"suppress":[{"rule":"pagenum"}]}` 抑制，别当成漏做。
+- `check` 的 `overflow` 判据是**实测 `TextRange.BoundHeight` vs `Shape.Height`**（比值 > `overflowFactor` 1.05 + 2 pt 才算），所以框高一旦被 WPS 改错就会满屏误报；反过来，框高正确时它能抓出真溢出。
+- **`audit` 的 `overlap` 会把"色块 + 落在块内的文字"逐对报出来**（8 页 72 条）：成品版式的卡片底色/面板按设计就压在文字下面，属已知误报，别按条数硬改；判据以 `check` 与 `render` 为准。
+- `check` 的 `fontsize` 用 `profile` 的 `bodyMin`（汇报 14 pt）卡**所有**非标题非页脚文字，所以图注（10 pt）、小标签（13 pt）会报 major；要交就得 `-Config {"bodyMin":12}` 或按规则抑制。
+- **失败版式必须整页回滚**：`BuildPreset` 半途抛异常时（例如 `ShapeD` 对 dynamic 的绑定失败）会把半成品页留在文稿里（下一档就错位一号，`slide 8` 变 `slide 9`）。v1.31 起 `BuildPreset` 捕获异常后 `slide.Delete()` 再抛。
+- 版式几何在 **960×540 设计画布**上写死、按 `PageSetup.SlideWidth/Height` 双向缩放（`Sx = W/960`、`Sy = H/540`、字号取 `min(Sx,Sy)`），所以 4:3 稿不会把字挤出框；`slide -Preset` 的返回值已改为对象 `{preset,slide,shapes,overflowWarnings,fontSizeDrops,layout,...}`（v1.30 及以前是字符串）。
+

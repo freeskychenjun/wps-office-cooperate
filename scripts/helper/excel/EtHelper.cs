@@ -437,6 +437,7 @@ internal static partial class Program
             case "cformat": return CmdConditionalFormat(a);
             case "validate": return CmdValidate(a);
             case "table": return CmdTable(a);
+            case "replace": return CmdReplace(a);
             default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|new|read|search|selection|write|fill|rows|cols|sheet|comment|render|chart|autofit|format|snapshot|diff|restore|calc|save|close|quit|finish|hint|clean|fillblanks|dedupe|deletewhere|sort|filter|copy|addcol|pivot|freeze|cformat|validate|table");
         }
     }

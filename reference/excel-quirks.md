@@ -82,3 +82,17 @@
 | **关掉同一实例里最后一份工作簿会连坐** | 冒烟时先 `close` 无关簿，随后对测试簿的每条命令都报 `DOC_CLOSED`（整个实例已退出） | 同一实例只留一份在用工作簿；先 `save`，或随时 `open` 重新打开 |
 | 经 cmd/PowerShell 传**空字符串**会变成"缺参数" | `excel write -Cell C5 -Value ""` 报 `Missing an argument for parameter 'Value'` | 清空格改用 `write -Items`（JSON 里 `"value":""`） |
 | **表（ListObject）覆盖区域内 `Range.AutoFilter` 报 `E_ACCESSDENIED`（0x80070005）** | 先 `table` 建了 A1:F21，再 `filter -Column site -InValues …` → `UnauthorizedAccessException: 拒绝访问`；同一区域的 `sort`/`dedupe`/`deletewhere`/`fillblanks` 全部正常（实测 2026-11-02） | 先筛选再建表，或先删表；helper 已把该异常翻成 `COM_ERROR` 并说明原因（不要在表内反复试 filter） |
+
+## v1.31 补充（2026-11-02，内存块替换 / 透视表日期分组实测；WPS 12.1.0.29161）
+
+| 现象 | 实测表现 | 正确写法 |
+|---|---|---|
+| **`Range.Replace` 会把刚替换进去的文本再替换一遍** | `P` → `P-` 落到 `P--`（同一调用内二次命中）。dsh-office `helper/OfficeHelper.cs:5045-5065` 实测同源；本机 WPS 12.1.0.29161 一样 | **不要用 `Range.Replace`**。`replace` 走"块读一次 → 本地逐格替换 → 块写一次"：遍历原始字符串、游标移到插入文本**之后**，`PP → P-P-`（单遍），并顺带给出 `samples[].before/after`、`byColumn`、`-DryRun` 清单 |
+| 逐格写回会触发整簿重算 | 几百格一次一格的 `Value2` 写入，WPS 每写一次重算一次 | 写回期间 `PerfOn()`（`Calculation=-4135` + `ScreenUpdating=false`），一次性重算；连续列合并成一行 run 用 1×N 块写（0 基精确尺寸） |
+| **数字列里的"匹配"不能改成文本** | `-Find "0" -Replace "9"` 打 `10/20/30` 这类数字列时，若按文本重写，整列会从数字变文本（后续求和、排序、图表全变味） | v1.31 起**只替换字符串格**：数字/日期/布尔/错误格只计数（`numericMatchesLeftAlone` + `numericNote`），不写 |
+| 公式格不能写值 | 块写会把 `=D2*2` 变成静态值 | 一次读 `Range.Formula`（1 次 COM）判断哪些格以 `=` 开头，这些格跳过并计入 `formulaCellsSkipped`（实测 5/5 跳过） |
+| **WPS 原生支持透视表按日期分组** | `PivotField.DataRange.Cells(1,1).Group(Start:true,End:true,Periods:[false×4,月,季,年])` **可用**：24 个月数据 → 12 / 4 / 2 个行项，合计 8580 不变（月 110…1320、季 660/1650/2640/3630、年 780/7800，均与手算一致） | 直接用原生 `-Group "日期:month\|quarter\|year"`，**不需要**辅助列降级；`Periods` 是 7 元素布尔数组，`xlMonth=4 / xlQuarter=3 / xlYear=2` 的位置分别对应第 5/6/7 位 |
+| 文本日期分组会抛中文异常 | `@` 格式的 `2024-01-15` 走 `Group()` 抛 `选定区域不能分组。`（连异常都不抛的混合列也可能静默不分组） | 分组前后各读一次 `PivotTable.RowRange.Rows.Count`，行项数没变少即判 `groupMode:"failed"` 并给出辅助列配方；`-Group` 省略时 `groupMode:"none"` |
+| 辅助列（降级路线）实测可用 | `=YEAR(A2)` 逐行公式列做 `-Rows` → 2024 780 / 2025 7800 / 总计 8580，与手算一致 | 辅助列 `年份 =YEAR(日期)`、`月份 =TEXT(日期,"yyyy-mm")`、`季度 ="Q"&ROUNDUP(MONTH(日期)/3,0)`；**它是透视表的数据源，建完不能删**；多年度"季"要年+季两列 |
+| `addcol`/`fill` 的公式是**整块同一份** | `body.Formula = "=YEAR(A2)"` 对整列写同一串，不会像手工填充那样按行相对引用（实测：整列都是 `=YEAR(A2)`） | 需要逐行不同公式时走 `write -Items`（每格一条 `formula`），或先写 `=YEAR(A2)` 再在 WPS 里填充；`replace`/`pivot` 的辅助列配方要按这条来 |
+
