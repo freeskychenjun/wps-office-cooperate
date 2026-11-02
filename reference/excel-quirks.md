@@ -62,3 +62,23 @@
 | **WPS 12 的窗口属于 `wps.exe`，不是 `et.exe`** | 另一台机器实测（1536×864 / 125%）：`et.exe` 存在但 `MainWindowHandle = 0`；真正带窗口的是 `wps.exe`。想用 `PrintWindow` / `GetWindowRect` 抓整窗必须先按 `wps.exe` 找窗口 | 抓窗：`Get-Process wps | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1`；但**优先用 `render -IncludeCharts`**，不要截屏 |
 | 窗口尺寸 ≠ 屏幕尺寸 | 125% 缩放下 480 pt ≈ 800 px；1536 px 宽的屏，A–F 列占 ~1030 px，右侧只剩 ~500 px ⇒ 按 `-Anchor G4` 建 480×300 的图会被窗口右缘裁掉 | 图表默认放**内容下方**（A 列起）；或用 `chart -Width/-Height` 缩到 ≤400 px 再放右侧 |
 | 参数被静默丢弃 | 包装层把 `$PSBoundParameters` 转成 JSON，绑定了却没转发进 request 的参数会**无声消失**（`chart -Sheet` 就这样把图建到了活动表） | v1.18 起三端共用 `scripts\param-check.ps1`：未消费参数在 **stderr** 打 `WARN ignored parameter -X for command "Y"`；`WOC_NO_PARAMCHECK=1` 可关 |
+
+## v1.20 补充（2026-11-02，数据操作 / 透视表 / 成品感 / 图表次轴实测；WPS 12.1.0.29161）
+
+| 现象 | 实测表现 | 正确写法 |
+|---|---|---|
+| **`Range.Columns(c).NumberFormat` 整列格式不一致时返回 Null** | 表头是 `General`、数据格是 `@`/`yyyy-mm-dd` 时整列取回空，于是"按显示格式判日期"整列判定失败、日期被当序列号（45717）返回 | 先取整列；为 Null 就抽样第 2 / 中间 / 末格 `Cells(r,c).NumberFormat`（每列 3 次 COM），过半数命中 `[ymd年月日]` 且非 `0.0`/`General` 才算日期列 |
+| **单列块写必须含表头格** | `Columns(c).Value2 = new object[rows,1]` 若 `[0,0]` 留空，**表头被写空**（实测 `clean`/`fillblanks` 曾把 C1 "level" 清掉） | 0 基数块的第一格填回 `grid[1,c]`；每次冒烟都回读 A1/表头 |
+| **`PivotCaches().Create` 只能两参** | `Create(1, source)` + `cache.CreatePivotTable(dest, name)` 两参可行；3/4 参报错。结果读 `TableRange1`（实测 wai zhou 合计 **5100** 正确） | 不写具名 4 参；默认落新表 A3；`AddDataField(field, caption, -4157)`（count -4112 / avg -4106 / max -4136 / min -4139） |
+| 透视表源区域有空表头即拒 | 点名列字母抛 `BAD_ARGS`（透视表要求每列都有名字） | 先补表头；`DataRange.Cells(1,1).Group(Periods:[…])` 按月/季/年分组失败只记 NOTE 不抛错 |
+| **`ws.Sort` 排序可用** | `SortFields.Clear/Add(Key,SortOn:0,Order,DataOption:0)` + `SetRange` + `Header=1` + `Apply()` 实测降序生效；排序**带着公式与格式一起搬**（`=D2*2` 跟着行走） | 用 `ws.Sort`，不要"读出来排完写回"（后者会破坏公式联动） |
+| **`AutoFilter` + `SpecialCells(12)` 可用** | `AutoFilter(Field, Criteria1: string[], Operator: 7)` 生效；`SpecialCells(12).Cells.Count - 1` 数可见行正确（实测 4/20） | 筛选是**隐藏**不是删除；`filter -Action clear`（`ShowAllData` + `AutoFilterMode=false`）复原 |
+| **`ListObjects.Add` 可用** | `ListObjects.Add(1, range, Type.Missing, 1)` 建表成功；`table.Name`/`TableStyle` 可写；重复调用需 `app.Intersect` 判"这块已是表" | 表名唯一且不含空格；只改样式时不要重建 |
+| **`Windows(1)` 冻结窗格可用** | `ws.Activate()` → 关旧冻结/拆分 → `ScrollRow/Column=1` → `SplitRow/SplitColumn` → `FreezePanes`，回读 `splitRow=1, freezePanes=true` | 三道重试（窗口非活动时 WPS 拒绝）；`-Action remove` 置 `FreezePanes=false, Split=false` |
+| **`FormatConditions` 便捷方法全部可用** | `Add(1,5,"=1000")`、`AddColorScale(3)`、`AddDatabar()`、`AddTop10()`、`AddUniqueValues()`、`Type:10`(blank)、`between`(Type 1 + Formula2) 逐条实测 `count` 递增 1→6 | 阈值规则的 `Formula1` 要写成 `="文本"` 或 `=数字`；`clear` 走 `FormatConditions.Delete()` |
+| **`Validation.Add(3,1,1,"a,b,c")` 可用** | 下拉列表落地；列表值是逗号拼接，**>255 字符或值本身含逗号会坏** | 本命令已拦 255 上限并报错；值含逗号属未做缺口 |
+| **组合图 + 次坐标轴可用，`Axes(2,2)` 首次可能为 Null** | 先建完所有系列，再逐条 `SeriesCollection(k).ChartType=65` / `AxisGroup=2`；`chart.Axes(2,2)` 第一次取回 Null，重试 2 次可得；双轴、右轴刻度 0–160、图例位置、数据标签实测全部生效 | 标题按 dsh-office `4736-4753` 重试：第 3 次（attempt==2）改 `SetElement(2)` 再设 `ChartTitle.Text` |
+| `render -Overview` 拼图可行 | 每表 `UsedRange.CopyPicture` 出临时 PNG → GDI+ 拼 2 列 + 表名标签；两表实测 **1260×595** | 临时子目录 `out\overview-parts` 拼完即删；缩略图按 `-Width/2` 算格宽 |
+| **关掉同一实例里最后一份工作簿会连坐** | 冒烟时先 `close` 无关簿，随后对测试簿的每条命令都报 `DOC_CLOSED`（整个实例已退出） | 同一实例只留一份在用工作簿；先 `save`，或随时 `open` 重新打开 |
+| 经 cmd/PowerShell 传**空字符串**会变成"缺参数" | `excel write -Cell C5 -Value ""` 报 `Missing an argument for parameter 'Value'` | 清空格改用 `write -Items`（JSON 里 `"value":""`） |
+| **表（ListObject）覆盖区域内 `Range.AutoFilter` 报 `E_ACCESSDENIED`（0x80070005）** | 先 `table` 建了 A1:F21，再 `filter -Column site -InValues …` → `UnauthorizedAccessException: 拒绝访问`；同一区域的 `sort`/`dedupe`/`deletewhere`/`fillblanks` 全部正常（实测 2026-11-02） | 先筛选再建表，或先删表；helper 已把该异常翻成 `COM_ERROR` 并说明原因（不要在表内反复试 filter） |

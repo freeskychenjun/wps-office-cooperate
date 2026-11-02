@@ -9,7 +9,8 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'replace', 'selection', 'slide', 'split', 'merge', 'text', 'textbox', 'image', 'picture', 'comment', 'export', 'table', 'chart', 'shape',
-                 'format', 'font', 'theme', 'master', 'audit', 'check', 'outline', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'batch', 'finish', 'hint', 'serve')]
+                 'format', 'font', 'theme', 'master', 'audit', 'check', 'outline', 'align', 'zorder', 'notes', 'view', 'render', 'snapshot', 'diff', 'restore', 'save', 'close', 'quit', 'batch', 'finish', 'hint', 'serve',
+                 'crop', 'smartart', 'connect', 'bg', 'anim')]
     [string]$Command,
 
     [string]$Doc,
@@ -59,6 +60,30 @@ param(
     [string]$XTitle,
     [string]$YTitle,
     [switch]$Legend,
+    # chart extensions (v1.29): trend line, data labels, legend position
+    [switch]$Trendline,
+    [switch]$DataLabels,
+    [string]$LegendPos,
+    # crop: how a picture is fitted into its frame
+    [string]$Focus,
+    [string]$Fit,
+    # connect: the two shapes a connector joins (the plain -From/-To are slide ranges)
+    [string]$FromShape,
+    [string]$ToShape,
+    [string]$FromSide,
+    [string]$ToSide,
+    [string]$Kind,
+    [string]$Arrow,
+    [string]$Label,
+    # bg: texture name / background image
+    [switch]$Gradient,
+    [string]$Texture,
+    [string]$Image,
+    # anim: transition + entrance effect
+    [string]$Transition,
+    [string]$Effect,
+    [switch]$OnClick,
+    [double]$Duration = 0.6,
     [int]$Quality = 88,
     [switch]$KeepCrop,
     [switch]$FitInside,
@@ -493,6 +518,9 @@ switch ($Command) {
             if ($XTitle) { $request['xtitle'] = $XTitle }
             if ($YTitle) { $request['ytitle'] = $YTitle }
             if ($Legend) { $request['legend'] = $true }
+            if ($Trendline) { $request['trendline'] = $true }
+            if ($DataLabels) { $request['dataLabels'] = $true }
+            if ($LegendPos) { $request['legendPos'] = $LegendPos.ToLowerInvariant() }
             if ($L -ge 0) { $request['l'] = $L }
             if ($T -ge 0) { $request['t'] = $T }
             if ($W -gt 0) { $request['w'] = $W }
@@ -530,6 +558,7 @@ switch ($Command) {
             if ($H -gt 0) { $request['h'] = $H }
             if ($Line) { $request['line'] = $Line }
             if ($Text) { $request['text'] = $Text }
+            if ($Name) { $request['name'] = $Name }
             Add-Format-Fields $PSBoundParameters
         }
     }
@@ -682,6 +711,82 @@ switch ($Command) {
         if ($Sound) { $request['sound'] = $true }
         if ($Quiet) { $request['quiet'] = $true }
     }
+    'crop' {
+        # a picture cut to a frame: cover (fill the box, cut the overflow) / contain (show it whole)
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'crop needs -Doc' }
+        if ($Slide -lt 1) { Write-Error-Json 'BAD_ARGS' 'crop needs -Slide <n>' }
+        if (-not $Shape -and $ShapeIdx -lt 1 -and -not $Path) { Write-Error-Json 'BAD_ARGS' 'crop needs -Shape <picture> (or -Path <image> to place and cut one)' }
+        $request['slide'] = $Slide
+        if ($Shape) { $request['shape'] = $Shape }
+        if ($ShapeIdx -gt 0) { $request['shapeIdx'] = $ShapeIdx }
+        if ($Path) { $request['path'] = Resolve-FullPath $Path }
+        if ($Name) { $request['name'] = $Name }
+        if ($Focus) { $request['focus'] = $Focus.ToLowerInvariant() }
+        if ($Fit) { $request['fit'] = $Fit.ToLowerInvariant() }
+        if ($L -ge 0) { $request['l'] = $L }
+        if ($T -ge 0) { $request['t'] = $T }
+        if ($W -gt 0) { $request['w'] = $W }
+        if ($H -gt 0) { $request['h'] = $H }
+    }
+    'smartart' {
+        # native SmartArt: -Action list (134 layouts) / add (-Preset + -Items)
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'smartart needs -Doc' }
+        $request['action'] = if ($Action) { $Action.ToLowerInvariant() } else { 'list' }
+        if ($Preset) { $request['preset'] = $Preset }
+        if ($Match) { $request['match'] = $Match }
+        if ($request['action'] -eq 'add') {
+            if ($Slide -lt 1) { Write-Error-Json 'BAD_ARGS' 'smartart -Action add needs -Slide <n>' }
+            $request['slide'] = $Slide
+            if ($Items) { $request['items'] = Read-Items-Json $Items }
+            elseif ($Text) { $request['text'] = $Text }
+            else { Write-Error-Json 'BAD_ARGS' 'smartart -Action add needs -Items <json> (or -Text)' }
+            if ($Name) { $request['name'] = $Name }
+            if ($L -ge 0) { $request['l'] = $L }
+            if ($T -ge 0) { $request['t'] = $T }
+            if ($W -gt 0) { $request['w'] = $W }
+            if ($H -gt 0) { $request['h'] = $H }
+        }
+    }
+    'connect' {
+        # a connector between two shapes: -FromShape / -ToShape (-From/-To are slide ranges)
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'connect needs -Doc' }
+        if ($Slide -lt 1) { Write-Error-Json 'BAD_ARGS' 'connect needs -Slide <n>' }
+        if (-not $FromShape) { Write-Error-Json 'BAD_ARGS' 'connect needs -FromShape <name> (-From is the slide range)' }
+        if (-not $ToShape) { Write-Error-Json 'BAD_ARGS' 'connect needs -ToShape <name> (-To is the slide range)' }
+        $request['slide'] = $Slide
+        $request['fromShape'] = $FromShape
+        $request['toShape'] = $ToShape
+        if ($Kind) { $request['kind'] = $Kind.ToLowerInvariant() }
+        if ($Arrow) { $request['arrow'] = $Arrow.ToLowerInvariant() }
+        if ($Label) { $request['label'] = $Label }
+        if ($Color) { $request['color'] = $Color }
+        if ($FromSide) { $request['fromSide'] = $FromSide.ToLowerInvariant() }
+        if ($ToSide) { $request['toSide'] = $ToSide.ToLowerInvariant() }
+    }
+    'bg' {
+        # slide background: colour / gradient / generated texture / picture / reset
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'bg needs -Doc' }
+        if ($All) { $request['all'] = $true }
+        elseif ($Slide -ge 1) { $request['slide'] = $Slide }
+        else { Write-Error-Json 'BAD_ARGS' 'bg needs -Slide <n> or -All' }
+        if ($Color) { $request['color'] = $Color }
+        if ($Gradient) { $request['gradient'] = $true }
+        if ($Texture) { $request['texture'] = $Texture.ToLowerInvariant() }
+        if ($Image) { $request['path'] = Resolve-FullPath $Image }
+        elseif ($Path) { $request['path'] = Resolve-FullPath $Path }
+        if ($Reset) { $request['reset'] = $true }
+    }
+    'anim' {
+        # slide transition and entrance effects; the response reports what WPS read back
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'anim needs -Doc' }
+        if ($All) { $request['all'] = $true }
+        elseif ($Slide -ge 1) { $request['slide'] = $Slide }
+        else { Write-Error-Json 'BAD_ARGS' 'anim needs -Slide <n> or -All' }
+        if ($Transition) { $request['transition'] = $Transition.ToLowerInvariant() }
+        if ($Effect) { $request['effect'] = $Effect.ToLowerInvariant() }
+        if ($OnClick) { $request['onClick'] = $true }
+        if ($PSBoundParameters.ContainsKey('Duration')) { $request['duration'] = $Duration }
+    }
 }
 
 # ---------------------------------------------------------------- parameter consumption check (v1.18)
@@ -689,6 +794,7 @@ switch ($Command) {
 # request warns on stderr instead of vanishing (see scripts\param-check.ps1).
 $paramAliases = @{
     HintTag = 'tag'; KeepCrop = 'resetCrop'; FitInside = 'keepSize'; SlideMark = 'slideMark'; NoSlideMark = 'slideMark'
+    Image = 'path'
 }
 $paramCommandSkips = @{
     '*' = @('ExitCode')

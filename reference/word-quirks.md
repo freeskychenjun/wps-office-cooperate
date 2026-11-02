@@ -38,5 +38,26 @@
 - **版本**：只在 **12.1.0.29161** 上验证。同事若装的是别的 WPS 版本，上表结论**未验证**，先用 `doctor` + 一份小文档试两三条（样式赋值、`render`、`close`）再上真稿。
 - **并发**：用户正在打字/有对话框时的写入行为（`BUSY` 场景）——[研] §6 记为待补测，**未验证**。稳妥做法是等用户停手再动。
 - **错误码映射**：`BUSY`/`ENCRYPTED` 是 [设] §2 约定的错误码；当前 helper 未单独映射时，会以 `COM_ERROR` + HRESULT（如 app 忙为 `0x8001010A`）出现。见到含义相同的现象，按 [SKILL.md](../SKILL.md) 故障排查表同一条处理。
-- **公式（OMML）**：不在本 skill 范围，未验证。
+- **公式（OMML）**：v1.29 已实现（`formula` 命令），实测事实见文末「2026-11-02 公式 / 脚注 / 总览图」。
 - **Excel / PPT**（`KET.Application` / `KWPP.Application`）：v1.1 起已支持，各自差异见 [excel-quirks.md](excel-quirks.md)；本文件只记 Writer 侧。
+
+## 2026-11-02 公式 / 脚注 / 总览图 实测（v1.29，WPS 12.1.0.29161）
+
+一条一行，全部是这台机器上跑出来的；每条后面是当时的实测证据原文。
+
+| 现象 | 实测表现 | 正确写法 |
+|---|---|---|
+| **WPS 只认 Flat OPC 包** | `range.InsertXML(...)` 传完整 `pkg:package`（`/_rels/.rels` + `/word/document.xml` 里带 `xmlns:m` 的 `<m:oMath>`）→ `Document.OMaths.Count` 0→1，可回读 `OMaths.Item(1).Range.Text`。**裸 `<m:oMathPara>`/`<m:oMath>` 片段不行**（插进去是空/报错） | 用 `FlatDocument()` 拼包（`scripts/helper/word/Formula.cs`），`<w:p>` 里放 `<m:oMath>`（行内）或 `<m:oMathPara><m:oMathParaPr><m:jc m:val="center"/>` + `<m:oMath>`（独立式） |
+| `Document.OMaths.Add(range)` 不可用 | 报「值不在预期范围内」（`0x80020009` 一类），位置参数与命名参数均失败 | 唯一路线是 InsertXML；WPS 不会像微软 Word 那样把线性文本自动转公式 |
+| **编号 `\tag{n}` 用 eqArr + `#`** | `<m:oMath><m:eqArr><m:eqArrPr><m:maxDist m:val="1"/></m:eqArrPr><m:e>…<m:r><m:t>#</m:t></m:r><m:r><m:rPr><m:nor/></m:rPr>…<m:t>(2)</m:t></m:r></m:e></m:eqArr></m:oMath>` → render 出来公式居中、`(2)` 靠右页边 | 照 dsh-office `OfficeHelper.cs:1704-1708` 的做法；编号是**普通文字**不是 SEQ 域，增删公式不会自动重排 |
+| 行内插入会多一个段落标记 | InsertXML 后 `Paragraphs.Count` +1（包是按 `<w:p>` 进来的） | 插完若段数变多，删「插入点所在段的段末 CR」把两行合并（`doc.Range(lineEnd-1, lineEnd).Delete()`），行内式才不会多空行 |
+| 独立式插入会多一个空段 | 先 `host.Range.InsertParagraphAfter()` 造空段再插入，会留下一个空段 | 插完在目标段后 1–3 段内找「文本为空且 `Range.OMaths.Count==0`」的段删掉；再把公式段 `Alignment=1`、段前段后 ≥6pt |
+| **校验判据只有 OMaths.Count** | `InsertXML` 成功但 WPS 没建成公式时，`OMaths.Count` 不涨，插进去的东西可能是空段 | 插前记 `mathsBefore`，插后 `<= mathsBefore` 就按 `doc.Content.End` 增量回滚，返回 `MATH_FAILED`；**不要**只看有没有抛异常 |
+| **`Footnotes.Add` 可用** | `doc.Footnotes.Add(spot, "", " ")` 成功（三个位置参数；命名参数也可）；脚注是**原生**的：WPS 自己编号，`render` 页脚能看到 `¹ …` | 插入点 `spot` 用正文 range（`p.Range.Duplicate` 去掉段末 CR，或 `-Find` 锚词后 `Collapse`），`FillNote` 时把正文两端剥开 |
+| 脚注正文回读要剥两边 | `note.Range.Text` 形如 `"\u0002正文…\r"`（前导 = 脚注引用标记 U+0002，尾部 = 段末 CR）；直接 `.Text` 赋值会把标记冲掉 | `NoteBody()`：`startsWith("\u0002") → Start+1`、`endsWith("\r") → End-1`，再读/写 |
+| **索引口径：`Range.Footnotes` ≠ `Document.Footnotes`** | 命中 dsh-office 的注记（`OfficeHelper.cs:2251`）：WPS 的 `Footnote.Index` 相对 `Range.Footnotes`；刚 `Add` 完集合可能未重排 | 对外**只暴露 `Document.Footnotes` 的序号**（`doc.Footnotes.Item(k)`），每次改完重读集合；`insert`/`delete` 后提示用户先 `-Action list` 再按序号改 |
+| **`Document.Footnotes.NumberingRule` 可读写**（更正 dsh-office 旁注） | `doc.Footnotes.NumberingRule = 1` → 回读 `1`（`via:"Document.Footnotes"`）；`Range.FootnoteOptions.NumberingRule` 是否同版本可用**未单独验证**，代码先走 Footnotes 集合、失败再试 FootnoteOptions | 脚注编号原子/节/页切换走 `Document.Footnotes.NumberingRule`（0 连续 / 1 按节 / 2 按页），别只盯 `FootnoteOptions` |
+| **`render -Overview` 的先决条件** | `Panes.Item(1).Pages.Count` 只在页面视图下可靠：必须先 `win.View.Type = 3`（现有 `render` 已先切），否则 0 页或错页 | 总览与单页共用同一取图路径（`Pages.Item(n).EnhMetaFileBits` → `Metafile` → GDI+），不引入新截图方式 |
+| 总览图排版实测常数 | 7 页样张 `-Overview -Page 1 -To 7` → `overview-1-6.png` **1976×1762**（3 列 × 2 行，格宽 640，gap 14 / label 30，底 `(232,232,236)`，每格上方「第 N 页」）+ `overview-7-7.png`；返回 `shown:7, capped:false` | 每张 6 页、单次 ≤18 页；**格宽固定 640**（别跟着 `-Width` 涨，18 页会变十几 MP）；每页自己 `Dispose`，峰值只有 1 张 sheet + 1 页位图 |
+| 多实例会随命令变多 | 一轮测试里 `wps.exe` 从 2 涨到 10（`doctor`/`status` 的 `processes.wps` 可见）：一次性模式下 `Marshal.GetActiveObject` 偶发失败就会**新建隐藏实例**，`open` 返回里也会给 `multiInstanceWarning` | 收尾 `close` 每个自建文档 → `close` 后只剩用户的实例；只清**无窗口**的 `/Automation` 实例，绝不 `quit` 有用户文档的实例 |
+

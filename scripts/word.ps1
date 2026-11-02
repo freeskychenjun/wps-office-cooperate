@@ -10,6 +10,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'read', 'search', 'selection', 'undo', 'revise', 'comment', 'render', 'font',
                  'format', 'style', 'page', 'table', 'captions', 'caption', 'picture', 'toc', 'reference', 'view', 'fields', 'cell', 'insert', 'revisions', 'snapshot', 'diff', 'handoff', 'audit', 'unit', 'units',
+                 'formula', 'footnote',
                  'save', 'close', 'quit', 'finish', 'hint', 'textdiag', 'batch', 'serve')]
     [string]$Command,
 
@@ -100,6 +101,13 @@ param(
     [int]$CropTop = -1,
     [int]$CropBottom = -1,
     [string]$Action,
+    # formula: LaTeX source, numbering and inline/display switch
+    [string]$Latex,
+    [switch]$Display,
+    [string]$Number,
+    [string]$Find,
+    # render: one contact sheet per 6 pages instead of one picture per page
+    [switch]$Overview,
     [int]$Passes = 0,
     [switch]$Force,
     [switch]$Apply,
@@ -371,9 +379,80 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'render needs -Doc' }
         if (-not $Out) { Write-Error-Json 'BAD_ARGS' 'render needs -Out <directory>' }
         $request['page'] = $Page
-        if ($To -gt 0) { $request['to'] = $To }
         $request['out'] = Resolve-FullPath $Out
-        $request['width'] = if ($Width) { [int]$Width } else { 1100 }
+        if ($Overview) {
+            # Contact sheet: 6 pages per image, at most 18 pages per call, 640 px per cell.
+            $request['overview'] = $true
+            $request['to'] = if ($To -gt 0) { $To } else { $Page + 5 }
+            $request['width'] = if ($Width) { [int]$Width } else { 640 }
+        }
+        else {
+            if ($To -gt 0) { $request['to'] = $To }
+            $request['width'] = if ($Width) { [int]$Width } else { 1100 }
+        }
+    }
+    'formula' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'formula needs -Doc' }
+        if ($Items) {
+            if (-not (Test-Path -LiteralPath $Items)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $Items) }
+            $rawF = [System.IO.File]::ReadAllText((Resolve-FullPath $Items), [System.Text.Encoding]::UTF8)
+            $parsedF = $rawF | ConvertFrom-Json
+            if ($parsedF.PSObject.Properties.Name -contains 'items') { $request['items'] = @($parsedF.items) } else { $request['items'] = @($parsedF) }
+        }
+        else {
+            if ($Para -lt 1) { Write-Error-Json 'BAD_ARGS' 'formula needs -Para <n> (the paragraph the equation goes in), or -Items <json>' }
+            $request['para'] = $Para
+            if ($Expect) { $request['expect'] = $Expect }
+            if ($Latex) { $request['latex'] = $Latex }
+            elseif ($TextFile) {
+                if (-not (Test-Path -LiteralPath $TextFile)) { Write-Error-Json 'BAD_ARGS' ('Text file not found: ' + $TextFile) }
+                $request['latex'] = [System.IO.File]::ReadAllText((Resolve-FullPath $TextFile), [System.Text.Encoding]::UTF8)
+            }
+            elseif ($Text) { $request['latex'] = $Text }
+            else { Write-Error-Json 'BAD_ARGS' 'formula needs -Latex "<latex>" (or -TextFile <path>, or -Items <json>)' }
+            if ($Display) { $request['display'] = $true }
+            if ($Number) { $request['number'] = $Number }
+            if ($Anchor) { $request['anchor'] = $Anchor }
+            if ($Where) { $request['where'] = $Where }
+        }
+    }
+    'footnote' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'footnote needs -Doc' }
+        $act = if ($Action) { $Action.ToLowerInvariant() } else { 'list' }
+        $request['action'] = $act
+        if ($act -eq 'insert') {
+            if ($Para -lt 1) { Write-Error-Json 'BAD_ARGS' 'footnote -Action insert needs -Para <n> (the paragraph the reference mark goes in)' }
+            $request['para'] = $Para
+            if ($Expect) { $request['expect'] = $Expect }
+            if ($Find) { $request['find'] = $Find }
+            if ($Where) { $request['where'] = $Where }
+            if ($TextFile) {
+                if (-not (Test-Path -LiteralPath $TextFile)) { Write-Error-Json 'BAD_ARGS' ('Text file not found: ' + $TextFile) }
+                $request['text'] = [System.IO.File]::ReadAllText((Resolve-FullPath $TextFile), [System.Text.Encoding]::UTF8)
+            }
+            elseif ($Text) { $request['text'] = $Text }
+            else { Write-Error-Json 'BAD_ARGS' 'footnote -Action insert needs -Text or -TextFile' }
+        }
+        elseif ($act -eq 'edit') {
+            if ($Index -lt 1) { Write-Error-Json 'BAD_ARGS' 'footnote -Action edit needs -Index <n> (as footnote -Action list reports it)' }
+            $request['index'] = $Index
+            if ($Expect) { $request['expect'] = $Expect }
+            if ($TextFile) {
+                if (-not (Test-Path -LiteralPath $TextFile)) { Write-Error-Json 'BAD_ARGS' ('Text file not found: ' + $TextFile) }
+                $request['text'] = [System.IO.File]::ReadAllText((Resolve-FullPath $TextFile), [System.Text.Encoding]::UTF8)
+            }
+            elseif ($Text) { $request['text'] = $Text }
+            else { Write-Error-Json 'BAD_ARGS' 'footnote -Action edit needs -Text or -TextFile' }
+        }
+        elseif ($act -eq 'delete') {
+            if ($Index -lt 1) { Write-Error-Json 'BAD_ARGS' 'footnote -Action delete needs -Index <n>' }
+            $request['index'] = $Index
+            if ($Expect) { $request['expect'] = $Expect }
+        }
+        elseif ($act -eq 'numbering') {
+            if ($Number) { $request['number'] = $Number }
+        }
+        elseif ($act -ne 'list') { Write-Error-Json 'BAD_ARGS' ('unknown footnote -Action "' + $act + '" (list|insert|edit|delete|numbering)') }
     }
     'font' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'font needs -Doc' }

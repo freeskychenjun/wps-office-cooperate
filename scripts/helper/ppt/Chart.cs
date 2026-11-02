@@ -32,7 +32,7 @@ internal static partial class Program
 {
     private static readonly string[] ChartTypeNames = new string[]
     {
-        "column", "bar", "line", "pie", "area", "doughnut", "scatter"
+        "column", "bar", "line", "pie", "area", "doughnut", "scatter", "radar"
     };
 
     /// <summary>PptChartType constants WPS accepted in the probe.</summary>
@@ -47,8 +47,25 @@ internal static partial class Program
             case "area": return 1;                                  // xlArea
             case "doughnut": case "donut": return 80;               // xlDoughnut
             case "scatter": case "xy": return 74;                   // xlXYScatter
+            case "radar": case "spider": return -415;               // xlRadar
+            case "radar-filled": case "radarfilled": return -415;
             default:
-                throw new Fail("BAD_ARGS", "unknown -Type \"" + name + "\"; use column|barh|line|pie|area|doughnut|scatter");
+                throw new Fail("BAD_ARGS", "unknown -Type \"" + name + "\"; use column|barh|line|pie|area|doughnut|scatter|radar");
+        }
+    }
+
+    /// <summary>xlLegendPosition for -LegendPos (bottom is what a column chart usually wants).</summary>
+    private static int LegendPositionConstant(string name)
+    {
+        switch ((name ?? "right").Trim().ToLowerInvariant())
+        {
+            case "bottom": return -4107;    // xlLegendPositionBottom
+            case "top": return -4160;       // xlLegendPositionTop
+            case "left": return -4131;      // xlLegendPositionLeft
+            case "right": return -4152;     // xlLegendPositionRight
+            case "corner": return 2;        // xlLegendPositionCorner
+            default:
+                throw new Fail("BAD_ARGS", "unknown -LegendPos \"" + name + "\"; use bottom|top|left|right|corner");
         }
     }
 
@@ -158,10 +175,17 @@ internal static partial class Program
         r["slide"] = slideNo;
         r["shape"] = Convert.ToString(TryGet(() => (object)shape.Name, ""), CultureInfo.InvariantCulture);
         r["chartType"] = constant;
+        int typeBack = -9999;
+        try { typeBack = Convert.ToInt32(chart.ChartType, CultureInfo.InvariantCulture); } catch (Exception) { }
+        r["chartTypeReadBack"] = typeBack;
+        if (typeBack != constant)
+            r["typeNote"] = "WPS reports chart type " + typeBack + " after being asked for " + constant
+                          + ": this type is not really supported here - the chart is drawn as another type. Judge it in the render.";
         r["series"] = readSeries;
         r["categories"] = new List<object>(data.Categories.ToArray());
         r["firstSeriesValues"] = valuesRead;
         if (LastChartRange != null) { r["rangeNote"] = LastChartRange; LastChartRange = null; }
+        if (LastChartDecor != null) { r["decorations"] = LastChartDecor; LastChartDecor = null; }
         if (seededSeries > 0 && data.Values.Count > seededSeries)
             r["warning"] = "WPS only seeds " + seededSeries + " series and NewSeries is not supported: the extra series in "
                          + "your data were not written (" + (data.Values.Count - seededSeries) + " dropped)";
@@ -301,6 +325,9 @@ internal static partial class Program
     /// <summary>Set while writing a chart when SetSourceData was refused.</summary>
     private static string LastChartRange;
 
+    /// <summary>What the decorations (legend position, data labels, trend line) read back as.</summary>
+    private static Dictionary<string, object> LastChartDecor;
+
     private static void ApplyChartDecorations(dynamic chart, Bag a, ChartData data)
     {
         string title = a.Str("title", null);
@@ -320,6 +347,70 @@ internal static partial class Program
         }
         bool legend = a.Flag("legend", data.Values.Count > 1);
         try { chart.HasLegend = legend; } catch (Exception) { }
+
+        Dictionary<string, object> decor = new Dictionary<string, object>();
+        string legendPos = a.Str("legendPos", null);
+        if (legendPos != null && legendPos.Length > 0)
+        {
+            int want = LegendPositionConstant(legendPos);
+            try
+            {
+                chart.HasLegend = true;
+                chart.Legend.Position = want;
+                decor["legendPosition"] = Convert.ToInt32(TryGet(() => (object)chart.Legend.Position, (object)-1), CultureInfo.InvariantCulture);
+            }
+            catch (Exception e) { decor["legendPositionError"] = Clean(e.Message); }
+        }
+        if (a.Flag("dataLabels", false))
+        {
+            bool done = false;
+            try { chart.ApplyDataLabels(2); done = true; } catch (Exception) { done = false; }
+            if (!done)
+            {
+                try
+                {
+                    int count = (int)chart.SeriesCollection().Count;
+                    for (int i = 1; i <= count; i++)
+                    {
+                        dynamic s = chart.SeriesCollection(i);
+                        s.HasDataLabels = true;
+                        try { s.DataLabels().ShowValue = true; } catch (Exception) { }
+                    }
+                    done = true;
+                }
+                catch (Exception e) { decor["dataLabelsError"] = Clean(e.Message); }
+            }
+            decor["dataLabels"] = done;
+        }
+        if (a.Flag("trendline", false))
+        {
+            List<object> lines = new List<object>();
+            try
+            {
+                int count = (int)chart.SeriesCollection().Count;
+                for (int i = 1; i <= count; i++)
+                {
+                    dynamic s = chart.SeriesCollection(i);
+                    dynamic made = null;
+                    try { made = s.Trendlines().Add(-4132, 1, 0, 0); }   // xlLinear, order 1
+                    catch (Exception) { try { made = s.Trendlines().Add(); } catch (Exception) { made = null; } }
+                    if (made == null) continue;
+                    Dictionary<string, object> one = new Dictionary<string, object>();
+                    one["series"] = i;
+                    try { made.DisplayEquation = true; } catch (Exception) { }
+                    try { made.DisplayRSquared = true; } catch (Exception) { }
+                    one["equationShown"] = Convert.ToBoolean(TryGet(() => (object)((int)made.DisplayEquation != 0), (object)false));
+                    one["rSquaredShown"] = Convert.ToBoolean(TryGet(() => (object)((int)made.DisplayRSquared != 0), (object)false));
+                    lines.Add(one);
+                }
+            }
+            catch (Exception e) { decor["trendlineError"] = Clean(e.Message); }
+            decor["trendlines"] = lines;
+            if (lines.Count == 0)
+                decor["trendlineNote"] = "WPS refused a trend line on this chart type; a trend line needs a series with numeric "
+                    + "categories (scatter or line), it cannot be drawn on pie/doughnut";
+        }
+        if (decor.Count > 0) LastChartDecor = decor;
     }
 
     // ---------------------------------------------------------------- list

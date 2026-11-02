@@ -9,7 +9,8 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('doctor', 'status', 'open', 'new', 'read', 'search', 'selection', 'write', 'fill', 'rows', 'cols', 'sheet', 'comment', 'render', 'chart', 'autofit', 'format',
-                 'snapshot', 'diff', 'restore', 'calc', 'save', 'close', 'quit', 'batch', 'finish', 'hint', 'serve')]
+                 'snapshot', 'diff', 'restore', 'calc', 'save', 'close', 'quit', 'batch', 'finish', 'hint', 'serve',
+                 'clean', 'fillblanks', 'dedupe', 'deletewhere', 'sort', 'filter', 'copy', 'addcol', 'pivot', 'freeze', 'cformat', 'validate', 'table')]
     [string]$Command,
 
     [string]$Doc,
@@ -67,6 +68,46 @@ param(
     [string]$RowHeight,
     [string]$Borders,
     [switch]$Wrap,
+    # ---- data work: clean / fillblanks / dedupe / deletewhere / sort / filter / copy / addcol
+    [string]$Column,
+    [string]$Columns,
+    [string]$To,
+    [string]$With,
+    [string]$Cond,
+    [string]$InValues,
+    [string]$By,
+    [string]$Order,
+    [string]$Criteria,
+    [string]$Criteria2,
+    [string]$Join,
+    [switch]$NoHeader,
+    [string]$Casing,
+    [string]$Remove,
+    [int]$Year = 0,
+    [string]$Map,
+    [switch]$NoSpaces,
+    [string]$Header,
+    [string]$After,
+    [switch]$Values,
+    # ---- pivot
+    [string]$Agg,
+    [string]$Rows,
+    [string]$Filters,
+    [string]$Group,
+    [string]$SortBy,
+    # ---- finished look + chart extras
+    [string]$Rule,
+    [string]$Value2,
+    [string]$List,
+    [string]$Style,
+    [string]$Y2Title,
+    [string]$Secondary,
+    [string]$Labels,
+    [string]$Legend,
+    [string]$AxisMin,
+    [string]$AxisMax,
+    # ---- render -Overview
+    [switch]$Overview,
     # render options
     [string]$Out,
     [string]$Width,
@@ -308,6 +349,15 @@ switch ($Command) {
             if ($Height) { $request['height'] = [int]$Height }
             if ($XTitle) { $request['xtitle'] = $XTitle }
             if ($YTitle) { $request['ytitle'] = $YTitle }
+            # v1.20: combo / secondary axis / labels / legend / axis scale, and a name to find it by later.
+            if ($Y2Title) { $request['y2title'] = $Y2Title }
+            if ($Secondary) { $request['secondary'] = @($Secondary -split ',') }
+            if ($Labels) { $request['labels'] = $Labels }
+            if ($Legend) { $request['legend'] = $Legend }
+            if ($NumberFormat) { $request['numberFormat'] = $NumberFormat }
+            if ($AxisMin) { $request['min'] = $AxisMin }
+            if ($AxisMax) { $request['max'] = $AxisMax }
+            if ($Name) { $request['name'] = $Name }
         }
         elseif ($request['action'] -eq 'list') {
             if ($All) { $request['all'] = $true }
@@ -321,6 +371,162 @@ switch ($Command) {
                 if ($Height) { $request['height'] = [int]$Height }
             }
         }
+    }
+    'clean' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'clean needs -Doc' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Column) { $request['column'] = $Column }
+        if ($Columns) { $request['columns'] = @($Columns -split ',') }
+        if ($To) { $request['to'] = $To.ToLowerInvariant() }
+        if ($Casing) { $request['case'] = $Casing.ToLowerInvariant() }
+        if ($Remove) { $request['remove'] = @($Remove -split ',') }
+        if ($Year -gt 0) { $request['year'] = $Year }
+        if ($NoSpaces) { $request['noSpaces'] = $true }
+        if ($Map) { $request['map'] = ($Map | ConvertFrom-Json) }
+        if ($NumberFormat) { $request['numberFormat'] = $NumberFormat }
+    }
+    'fillblanks' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'fillblanks needs -Doc' }
+        if (-not $With) { Write-Error-Json 'BAD_ARGS' 'fillblanks needs -With <value|above|mean|median|mode>' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Column) { $request['column'] = $Column }
+        if ($Columns) { $request['columns'] = @($Columns -split ',') }
+        $fillNumber = 0.0
+        if ([double]::TryParse($With, [ref]$fillNumber)) { $request['with'] = $fillNumber } else { $request['with'] = $With }
+    }
+    'dedupe' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'dedupe needs -Doc' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Column) { $request['column'] = $Column }
+        if ($Columns) { $request['columns'] = @($Columns -split ',') }
+    }
+    'deletewhere' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'deletewhere needs -Doc' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Column) { $request['column'] = $Column }
+        if ($Cond) { $request['is'] = $Cond }
+        if ($PSBoundParameters.ContainsKey('Value')) { $request['value'] = $Value }
+        if ($InValues) { $request['in'] = @($InValues -split ',') }
+    }
+    'sort' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'sort needs -Doc' }
+        if (-not $By -and -not $Column) { Write-Error-Json 'BAD_ARGS' 'sort needs -By "column[:desc],column2"' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Column) { $request['column'] = $Column }
+        if ($By) { $request['by'] = @($By -split ',') }
+        if ($Order) { $request['order'] = $Order.ToLowerInvariant() }
+        if ($NoHeader) { $request['header'] = $false }
+    }
+    'filter' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'filter needs -Doc' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        $act = if ($Action) { $Action.ToLowerInvariant() } else { 'apply' }
+        if ($act -ne 'apply' -and $act -ne 'on') { $request['action'] = $act }
+        if ($act -eq 'apply' -or $act -eq 'on') {
+            if (-not $Column) { Write-Error-Json 'BAD_ARGS' 'filter needs -Column <the column to filter on>' }
+            $request['column'] = $Column
+            if ($InValues) { $request['in'] = @($InValues -split ',') }
+            if ($Criteria) { $request['criteria'] = $Criteria }
+            if ($Criteria2) { $request['criteria2'] = $Criteria2 }
+            if ($Join) { $request['join'] = $Join.ToLowerInvariant() }
+            if (-not $InValues -and -not $Criteria) { Write-Error-Json 'BAD_ARGS' 'filter needs -InValues "a,b" or -Criteria "<100"' }
+        }
+    }
+    'copy' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'copy needs -Doc' }
+        if (-not $Range) { Write-Error-Json 'BAD_ARGS' 'copy needs -Range <source>' }
+        if (-not $To) { Write-Error-Json 'BAD_ARGS' 'copy needs -To <target cell or sheet!cell>' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        $request['range'] = $Range
+        $request['to'] = $To
+        if ($Values) { $request['values'] = $true }
+    }
+    'addcol' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'addcol needs -Doc' }
+        if (-not $Header) { Write-Error-Json 'BAD_ARGS' 'addcol needs -Header "<column name>"' }
+        if (-not $Formula -and -not $PSBoundParameters.ContainsKey('Value')) { Write-Error-Json 'BAD_ARGS' 'addcol needs -Formula "=..." or -Value <x>' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        $request['header'] = $Header
+        if ($PSBoundParameters.ContainsKey('Formula')) { $request['formula'] = $Formula } else { $request['value'] = $Value }
+        if ($After) { $request['after'] = $After }
+        if ($NumberFormat) { $request['numberFormat'] = $NumberFormat }
+        if ($Values) { $request['values'] = $true }
+    }
+    'pivot' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'pivot needs -Doc' }
+        if (-not $Agg) { Write-Error-Json 'BAD_ARGS' 'pivot needs -Agg "field:sum[:caption],field2:count"' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Rows) { $request['rows'] = @($Rows -split ',') }
+        if ($Columns) { $request['columns'] = @($Columns -split ',') }
+        if ($Filters) { $request['filters'] = @($Filters -split ',') }
+        $aggList = @()
+        foreach ($piece in ($Agg -split ',')) {
+            if (-not $piece.Trim()) { continue }
+            $bits = $piece -split ':'
+            $item = @{ field = $bits[0].Trim() }
+            if ($bits.Count -gt 1 -and $bits[1].Trim()) { $item['fn'] = $bits[1].Trim() }
+            if ($bits.Count -gt 2 -and $bits[2].Trim()) { $item['name'] = $bits[2].Trim() }
+            $aggList += $item
+        }
+        $request['values'] = $aggList
+        if ($Name) { $request['name'] = $Name }
+        if ($To) { $request['to'] = $To }
+        if ($Group) {
+            $bits = $Group -split ':'
+            $request['group'] = @{ field = $bits[0].Trim(); by = if ($bits.Count -gt 1 -and $bits[1].Trim()) { $bits[1].Trim() } else { 'month' } }
+        }
+        if ($SortBy) {
+            $bits = $SortBy -split ':'
+            $sortSpec = @{ field = $bits[0].Trim() }
+            if ($bits.Count -gt 1 -and $bits[1].Trim()) {
+                $tail = $bits[1].Trim()
+                if ($tail -match '^(a|d)') { $sortSpec['order'] = $tail.ToLowerInvariant() } else { $sortSpec['by'] = $tail }
+            }
+            $request['sort'] = $sortSpec
+        }
+    }
+    'freeze' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'freeze needs -Doc' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Action) { $request['action'] = $Action.ToLowerInvariant() }
+        if ($Cell) { $request['cell'] = $Cell }
+    }
+    'cformat' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'cformat needs -Doc' }
+        if (-not $Range) { Write-Error-Json 'BAD_ARGS' 'cformat needs -Range' }
+        if (-not $Rule) { Write-Error-Json 'BAD_ARGS' 'cformat needs -Rule (>, <, >=, <=, =, <>, between, top, bottom, duplicate, unique, blank, formula, colorscale, databar, clear)' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        $request['range'] = $Range
+        $request['rule'] = $Rule
+        if ($PSBoundParameters.ContainsKey('Value')) { $request['value'] = $Value }
+        if ($Value2) { $request['value2'] = $Value2 }
+        if ($FillColor) { $request['fillColor'] = $FillColor }
+        if ($Color) { $request['color'] = $Color }
+        if ($PSBoundParameters.ContainsKey('Bold')) { $request['bold'] = [bool]$Bold }
+    }
+    'validate' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'validate needs -Doc' }
+        if (-not $Range) { Write-Error-Json 'BAD_ARGS' 'validate needs -Range' }
+        if (-not $List -and -not $InValues) { Write-Error-Json 'BAD_ARGS' 'validate needs -List "a,b,c"' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        $request['range'] = $Range
+        $listText = if ($List) { $List } else { $InValues }
+        $request['list'] = @($listText -split ',')
+    }
+    'table' {
+        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'table needs -Doc' }
+        if ($Sheet) { $request['sheet'] = $Sheet }
+        if ($Range) { $request['range'] = $Range }
+        if ($Name) { $request['name'] = $Name }
+        if ($Style) { $request['style'] = $Style }
     }
     'open' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'open needs -Doc' }
@@ -401,6 +607,8 @@ switch ($Command) {
         $request['out'] = Resolve-FullPath $Out
         $request['width'] = if ($Width) { [int]$Width } else { 1100 }
         if ($IncludeCharts) { $request['includeCharts'] = $true }
+        # -Overview: every sheet of the workbook as one thumbnail sheet (a workbook read at a glance).
+        if ($Overview) { $request['overview'] = $true }
     }
     'autofit' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'autofit needs -Doc' }
@@ -505,6 +713,9 @@ switch ($Command) {
 $paramAliases = @{
     TextFile = 'text'; HintTag = 'tag'
     NoBold = 'bold'; NoItalic = 'italic'; NoUnderline = 'underline'; NoWrap = 'wrap'
+    # data work / finished look (v1.20): names that do not follow the "lower-case the first letter" rule
+    InValues = 'in'; Cond = 'is'; Casing = 'case'; NoHeader = 'header'; Agg = 'values'
+    SortBy = 'sort'; AxisMin = 'min'; AxisMax = 'max'
 }
 $paramCommandSkips = @{
     # write builds a nested item, so these never appear at the top level of the request

@@ -464,6 +464,8 @@ internal static partial class Program
             case "revise": return Revise(a);
             case "comment": return Comment(a);
             case "render": return RenderDoc(a);
+            case "formula": return FormulaDoc(a);
+            case "footnote": return FootnoteDoc(a);
             case "font": return SetFont(a);
             case "format": return FormatDoc(a);
             case "style": return StyleDoc(a);
@@ -491,7 +493,7 @@ internal static partial class Program
             case "quit": return QuitAll(a);
             case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|font|format|style|page|table|captions|caption|picture|toc|reference|view|fields|cell|insert|revisions|snapshot|diff|handoff|audit|save|close|quit|hint");
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|selection|undo|revise|comment|render|formula|footnote|font|format|style|page|table|captions|caption|picture|toc|reference|view|fields|cell|insert|revisions|snapshot|diff|handoff|audit|save|close|quit|hint");
         }
     }
 
@@ -1569,6 +1571,7 @@ internal static partial class Program
         if (total <= 0) throw new Fail("COM_ERROR", "WPS reports 0 pages. Open the document in print view (View.Type = 3) and try again.");
         if (page > total) throw new Fail("BAD_ARGS", "page " + page + " does not exist (the document has " + total + ").");
         last = Math.Min(last, total);
+        if (a.Flag("overview", false)) return RenderOverviewDoc(pane, dir, page, last, total, width);
 
         List<object> files = new List<object>();
         for (int p = page; p <= last; p++)
@@ -1592,27 +1595,116 @@ internal static partial class Program
 
     private static void SaveEmfAsPng(byte[] emf, string path, int width)
     {
+        using (Bitmap small = EmfToBitmap(emf, width)) small.Save(path, ImageFormat.Png);
+    }
+
+    /// <summary>
+    /// One page of EMF to a bitmap `width` pixels wide. Drawn oversized first and then reduced
+    /// (factor >= 2): a table border drawn straight at the target width falls between two pixel
+    /// rows and disappears.
+    /// </summary>
+    private static Bitmap EmfToBitmap(byte[] emf, int width)
+    {
         using (MemoryStream stream = new MemoryStream(emf))
         using (Metafile meta = new Metafile(stream))
         {
             int height = (int)Math.Round(width * (double)meta.Height / meta.Width);
             int factor = Math.Max(2, (int)Math.Ceiling(3000.0 / width));
             using (Bitmap large = new Bitmap(width * factor, height * factor))
-            using (Bitmap small = new Bitmap(width, height))
             {
                 using (Graphics g = Graphics.FromImage(large))
                 {
                     g.Clear(Color.White);
                     g.DrawImage(meta, 0, 0, large.Width, large.Height);
                 }
+                Bitmap small = new Bitmap(width, height);
                 using (Graphics g = Graphics.FromImage(small))
                 {
                     g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                     g.DrawImage(large, 0, 0, width, height);
                 }
-                small.Save(path, ImageFormat.Png);
+                return small;
             }
         }
+    }
+
+    /// <summary>
+    /// render -Overview: 6 pages per contact sheet, 3 columns, at most 18 pages per call.
+    /// One image instead of six is the whole point: "look at the whole document" costs one call
+    /// and ~0.6 MP per page instead of 1.7 MP. Suspect pages are then re-rendered at full width.
+    /// </summary>
+    private static object RenderOverviewDoc(dynamic pane, string dir, int first, int last, int total, int width)
+    {
+        const int PER_SHEET = 6, MAX_PAGES = 18, COLUMNS = 3;
+        bool capped = false;
+        if (last - first + 1 > MAX_PAGES)
+        {
+            last = first + MAX_PAGES - 1;
+            capped = true;
+        }
+        int cell = Math.Max(320, Math.Min(720, width));
+        List<object> sheets = new List<object>();
+        List<object> pageFiles = new List<object>();
+        for (int start = first; start <= last; start += PER_SHEET)
+        {
+            int end = Math.Min(last, start + PER_SHEET - 1);
+            List<Bitmap> cells = new List<Bitmap>();
+            List<int> indexes = new List<int>();
+            int cellH = 0;
+            for (int p = start; p <= end; p++)
+            {
+                byte[] bits = (byte[])pane.Pages.Item(p).EnhMetaFileBits;
+                Bitmap one = EmfToBitmap(bits, cell);
+                cells.Add(one);
+                indexes.Add(p);
+                if (one.Height > cellH) cellH = one.Height;
+            }
+            int gap = 14, label = 30;
+            int rows = (cells.Count + COLUMNS - 1) / COLUMNS;
+            int sheetW = COLUMNS * cell + (COLUMNS + 1) * gap;
+            int sheetH = rows * (cellH + label + gap) + gap;
+            string path = Path.Combine(dir, "overview-" + start.ToString(CultureInfo.InvariantCulture)
+                + "-" + end.ToString(CultureInfo.InvariantCulture) + ".png");
+            using (Bitmap sheet = new Bitmap(sheetW, sheetH))
+            using (Graphics g = Graphics.FromImage(sheet))
+            using (Font font = new Font("\u5fae\u8f6f\u96c5\u9ed1", 12f, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (SolidBrush txt = new SolidBrush(Color.FromArgb(60, 60, 60)))
+            using (Pen border = new Pen(Color.FromArgb(150, 150, 150)))
+            {
+                g.Clear(Color.FromArgb(232, 232, 236));
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                for (int k = 0; k < cells.Count; k++)
+                {
+                    int col = k % COLUMNS, row = k / COLUMNS;
+                    int x = gap + col * (cell + gap);
+                    int y = gap + row * (cellH + label + gap);
+                    g.DrawString("\u7b2c " + indexes[k].ToString(CultureInfo.InvariantCulture) + " \u9875", font, txt, x, y);
+                    g.DrawImage(cells[k], x, y + label, cell, cells[k].Height);
+                    g.DrawRectangle(border, x, y + label, cell - 1, cells[k].Height - 1);
+                }
+                sheet.Save(path, ImageFormat.Png);
+            }
+            foreach (Bitmap b in cells) b.Dispose();
+            sheets.Add(path);
+            Dictionary<string, object> sheetInfo = new Dictionary<string, object>();
+            sheetInfo["path"] = path;
+            sheetInfo["first"] = start;
+            sheetInfo["last"] = end;
+            sheetInfo["what"] = "pages " + start + "-" + end + " of " + total;
+            pageFiles.Add(sheetInfo);
+        }
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        r["overview"] = sheets;
+        r["sheets"] = pageFiles;
+        r["pages"] = total;
+        r["shown"] = last - first + 1;
+        r["capped"] = capped;
+        r["width"] = cell;
+        r["note"] = "One contact sheet per 6 pages with the page number above each page: this is a coarse "
+            + "screen (layout, overflow, blank pages), not a proofread. Re-render a suspect page at full width.";
+        if (capped) r["more"] = "Only the first " + MAX_PAGES + " pages were shown (the document has " + total
+            + "); page through with -Page/-To.";
+        return r;
     }
 
     /// <summary>Set the East Asian and Latin font of every story (body, headers, footers, text frames).</summary>

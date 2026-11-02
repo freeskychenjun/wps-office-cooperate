@@ -282,7 +282,7 @@ internal sealed class Bag
 
 // ---------------------------------------------------------------- helper
 
-internal static class Program
+internal static partial class Program
 {
     private const string WPS_ET = "KET.Application";
     private const string MS_EXCEL = "Excel.Application";
@@ -423,7 +423,21 @@ internal static class Program
             case "quit": return QuitAll(a);
             case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|new|read|search|selection|write|fill|rows|cols|sheet|comment|render|chart|autofit|format|snapshot|diff|restore|calc|save|close|quit|finish|hint");
+            // Data work and the "finished look" commands live in EtData.cs.
+            case "clean": return CmdClean(a);
+            case "fillblanks": return CmdFillBlanks(a);
+            case "dedupe": return CmdDedupe(a);
+            case "deletewhere": return CmdDeleteWhere(a);
+            case "sort": return CmdSort(a);
+            case "filter": return CmdFilter(a);
+            case "copy": return CmdCopy(a);
+            case "addcol": return CmdAddColumn(a);
+            case "pivot": return CmdPivot(a);
+            case "freeze": return CmdFreeze(a);
+            case "cformat": return CmdConditionalFormat(a);
+            case "validate": return CmdValidate(a);
+            case "table": return CmdTable(a);
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|new|read|search|selection|write|fill|rows|cols|sheet|comment|render|chart|autofit|format|snapshot|diff|restore|calc|save|close|quit|finish|hint|clean|fillblanks|dedupe|deletewhere|sort|filter|copy|addcol|pivot|freeze|cformat|validate|table");
         }
     }
 
@@ -720,6 +734,9 @@ internal static class Program
     private static object JsonCellValue(object v)
     {
         if (v == null) return "";
+        // An error cell comes back as a negative integer; left alone it reads "-2146826281".
+        string error = ErrorText(v);
+        if (error != null) return error;
         if (v is double) { double d = (double)v; if (d == Math.Floor(d) && Math.Abs(d) < 1e15) return (long)d; return d; }
         if (v is bool) return v;
         return Convert.ToString(v, CultureInfo.InvariantCulture);
@@ -953,26 +970,41 @@ internal static class Program
         bool forceProfile = a.Flag("profile", false);
         if (forceProfile || rows > 60 || cols > 15)
         {
-            r["profile"] = ProfileOf(address, values, rows, cols);
+            r["profile"] = ProfileOf(range, address, values, rows, cols);
             return r;
         }
 
+        // A date shown as a serial number is useless to a reader: send it as a date.
+        bool[] dated = DateColumnsOf(range, values, rows, cols);
         List<object> table = new List<object>();
         for (int i = 1; i <= rows; i++)
         {
             List<object> row = new List<object>();
             for (int j = 1; j <= cols; j++)
             {
+                object cellValue = values[i, j];
+                object shown = cellValue;
+                if (dated[j] && IsNum(cellValue))
+                {
+                    try
+                    {
+                        DateTime started = DateTime.FromOADate(Convert.ToDouble(cellValue, CultureInfo.InvariantCulture));
+                        shown = (started.Hour == 0 && started.Minute == 0 && started.Second == 0)
+                            ? started.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                            : started.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+                    }
+                    catch (Exception) { shown = cellValue; }
+                }
                 object f = formulas[i, j];
                 string fs = f == null ? null : Convert.ToString(f, CultureInfo.InvariantCulture);
                 if (fs != null && fs.StartsWith("=", StringComparison.Ordinal))
                 {
                     Dictionary<string, object> cell = new Dictionary<string, object>();
-                    cell["v"] = JsonCellValue(values[i, j]);
+                    cell["v"] = JsonCellValue(shown);
                     cell["f"] = fs;
                     row.Add(cell);
                 }
-                else row.Add(JsonCellValue(values[i, j]));
+                else row.Add(JsonCellValue(shown));
             }
             table.Add(row);
         }
@@ -980,6 +1012,9 @@ internal static class Program
         r["range"] = address;
         r["rows"] = rows;
         r["cols"] = cols;
+        List<object> dateCols = new List<object>();
+        for (int j = 1; j <= cols; j++) if (dated[j]) dateCols.Add(ColLetter((int)range.Column + j - 1));
+        if (dateCols.Count > 0) r["dateColumns"] = dateCols;
         r["values"] = table;
         return r;
     }
@@ -995,44 +1030,134 @@ internal static class Program
         return (object[,])raw;
     }
 
-    private static Dictionary<string, object> ProfileOf(string address, object[,] values, int rows, int cols)
+    /// <summary>
+    /// What is in each column of a block: the kinds of values, the range, the commonest texts and
+    /// what looks wrong ("LOOK"). This is how a long table is understood without reading every row.
+    /// A date is recognised by the column's display format, never by the value alone, and errors come
+    /// back as "#DIV/0!" rather than as a negative number.
+    /// </summary>
+    private static Dictionary<string, object> ProfileOf(dynamic range, string address, object[,] values, int rows, int cols)
     {
         Dictionary<string, object> p = new Dictionary<string, object>();
         p["range"] = address;
         p["rows"] = rows;
         p["cols"] = cols;
+        bool[] dated = DateColumnsOf(range, values, rows, cols);
+        int col0 = (int)range.Column;
+
+        // Row 1 is the header row; what is below it is data.
+        int emptyRows = 0, duplicateRows = 0;
+        Dictionary<string, int> whole = new Dictionary<string, int>();
+        for (int i = 2; i <= rows; i++)
+        {
+            StringBuilder key = new StringBuilder();
+            bool any = false;
+            for (int j = 1; j <= cols; j++)
+            {
+                if (!IsBlankValue(values[i, j])) any = true;
+                key.Append(TextOf(values[i, j])).Append('\u0001');
+            }
+            if (!any) { emptyRows++; continue; }
+            string k = key.ToString();
+            if (whole.ContainsKey(k)) duplicateRows++; else whole[k] = 1;
+        }
+        p["dataRows"] = Math.Max(0, rows - 1);
+        if (emptyRows > 0) p["emptyRows"] = emptyRows;
+        if (duplicateRows > 0) p["duplicateRows"] = duplicateRows;
+
         List<object> colList = new List<object>();
         for (int j = 1; j <= cols; j++)
         {
             Dictionary<string, object> c = new Dictionary<string, object>();
-            int numbers = 0, texts = 0, blanks = 0, others = 0;
+            int numbers = 0, texts = 0, blanks = 0, errors = 0, others = 0;
+            int spaced = 0, numberLike = 0, dateLike = 0, negative = 0;
+            double sum = 0, min = double.MaxValue, max = double.MinValue;
             List<double> nums = new List<double>();
             Dictionary<string, int> distinct = new Dictionary<string, int>();
             for (int i = 1; i <= rows; i++)
             {
                 object v = values[i, j];
                 if (v == null || (v is string && ((string)v).Length == 0)) { blanks++; continue; }
+                if (ErrorText(v) != null) { errors++; continue; }
                 if (v is double)
                 {
-                    numbers++; nums.Add((double)v);
+                    double d = (double)v;
+                    numbers++; nums.Add(d); sum += d;
+                    if (d < min) min = d;
+                    if (d > max) max = d;
+                    if (d < 0) negative++;
+                    int n;
+                    string shownNumber = Plain(d);
+                    distinct.TryGetValue(shownNumber, out n);
+                    distinct[shownNumber] = n + 1;
                 }
                 else if (v is string)
                 {
                     texts++;
                     string s = (string)v;
-                    if (s.StartsWith("=", StringComparison.Ordinal)) others++; // formula text: skip distinct
-                    else { int n; distinct.TryGetValue(s, out n); distinct[s] = n + 1; }
+                    if (s.StartsWith("=", StringComparison.Ordinal)) others++; // formula text: no distinct
+                    else
+                    {
+                        if (s != Tidy(s)) spaced++;
+                        double n2; DateTime d2;
+                        if (DateShaped.IsMatch(Tidy(s)) && ParseDate(s, DateTime.Now.Year, out d2)) dateLike++;
+                        else if (ParseNumber(s, out n2)) numberLike++;
+                        int n;
+                        distinct.TryGetValue(s, out n);
+                        distinct[s] = n + 1;
+                    }
                 }
                 else others++;
             }
             c["col"] = j;
+            c["letter"] = ColLetter(col0 + j - 1);
+            string header = TextOf(values[1, j]).Trim();
+            if (header.Length > 0) c["header"] = header;
             c["numbers"] = numbers; c["texts"] = texts; c["blanks"] = blanks; c["others"] = others;
+            if (errors > 0) c["errors"] = errors;
             if (nums.Count > 0)
             {
                 nums.Sort();
-                c["min"] = JsonCellValue(nums[0]);
-                c["median"] = JsonCellValue(nums[nums.Count / 2]);
-                c["max"] = JsonCellValue(nums[nums.Count - 1]);
+                if (dated[j])
+                {
+                    c["dates"] = numbers;
+                    try
+                    {
+                        c["dateFrom"] = DateTime.FromOADate(min).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                        c["dateTo"] = DateTime.FromOADate(max).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                    }
+                    catch (Exception) { }
+                    c["min"] = JsonCellValue(min);
+                    c["max"] = JsonCellValue(max);
+                }
+                else
+                {
+                    double median = nums[0];
+                    if (nums.Count % 2 == 1) median = nums[nums.Count / 2];
+                    else if (nums.Count > 1) median = (nums[nums.Count / 2 - 1] + nums[nums.Count / 2]) / 2;
+                    c["min"] = JsonCellValue(min);
+                    c["median"] = JsonCellValue(median);
+                    c["mean"] = Math.Round(sum / numbers, 2);
+                    c["max"] = JsonCellValue(max);
+                    c["sum"] = Math.Round(sum, 2);
+                    if (negative > 0) c["negative"] = negative;
+                    // Values far beyond the bulk of the column: more than three times the spread above
+                    // the upper quartile, and only when they are a handful (a real long tail is not a fault).
+                    if (nums.Count >= 20)
+                    {
+                        double q1 = nums[nums.Count / 4], q3 = nums[nums.Count * 3 / 4];
+                        double fence = q3 + 3 * Math.Max(q3 - q1, 1e-9);
+                        int far = 0;
+                        foreach (double n3 in nums) if (n3 > fence) far++;
+                        if (far > 0 && far <= nums.Count / 20)
+                        {
+                            Dictionary<string, object> outlier = new Dictionary<string, object>();
+                            outlier["count"] = far;
+                            outlier["over"] = Math.Round(fence, 2);
+                            c["farAbove"] = outlier;
+                        }
+                    }
+                }
             }
             if (distinct.Count > 0)
             {
@@ -1040,25 +1165,39 @@ internal static class Program
                     .Select(kv => (object)(kv.Key + " x" + kv.Value)).ToList();
                 c["topValues"] = top;
                 c["distinct"] = distinct.Count;
+                if (numbers + texts > distinct.Count) c["repeats"] = numbers + texts - distinct.Count;
             }
+            // LOOK: the few things worth fixing before working with this column.
+            List<object> look = new List<object>();
+            if (spaced > 0) look.Add(spaced.ToString(CultureInfo.InvariantCulture) + " with stray spaces");
+            if (numberLike > 0) look.Add(numberLike.ToString(CultureInfo.InvariantCulture) + " number(s) written as text");
+            if (dateLike > 0) look.Add(dateLike.ToString(CultureInfo.InvariantCulture) + " date(s) written as text");
+            if (numbers > 0 && texts > 0) look.Add("mixed numbers and text");
+            if (errors > 0) look.Add(errors.ToString(CultureInfo.InvariantCulture) + " error value(s)");
+            if (look.Count > 0) c["look"] = look;
             colList.Add(c);
         }
         p["columns"] = colList;
 
         // head and tail samples (5 rows each), same cell encoding as the small read
         int head = Math.Min(5, rows), tailRows = Math.Min(5, rows);
-        Func<int, int, int, object> cellAt = (i, j, rr) =>
+        Func<int, int, object> sampleCell = (i, j) =>
         {
             object v = values[i, j];
+            if (dated[j] && IsNum(v))
+            {
+                try { return DateText(Convert.ToDouble(v, CultureInfo.InvariantCulture), true); }
+                catch (Exception) { }
+            }
             return JsonCellValue(v);
         };
         List<object> headList = new List<object>();
-        for (int i = 1; i <= head; i++) { List<object> row = new List<object>(); for (int j = 1; j <= cols; j++) row.Add(cellAt(i, j, rows)); headList.Add(row); }
+        for (int i = 1; i <= head; i++) { List<object> row = new List<object>(); for (int j = 1; j <= cols; j++) row.Add(sampleCell(i, j)); headList.Add(row); }
         p["sampleHead"] = headList;
         if (rows > head + tailRows)
         {
             List<object> tailList = new List<object>();
-            for (int i = rows - tailRows + 1; i <= rows; i++) { List<object> row = new List<object>(); for (int j = 1; j <= cols; j++) row.Add(cellAt(i, j, rows)); tailList.Add(row); }
+            for (int i = rows - tailRows + 1; i <= rows; i++) { List<object> row = new List<object>(); for (int j = 1; j <= cols; j++) row.Add(sampleCell(i, j)); tailList.Add(row); }
             p["sampleTail"] = tailList;
         }
         p["note"] = "large range: column profiles + head/tail samples returned; use -Range to read a specific block in full";
@@ -1226,20 +1365,78 @@ internal static class Program
     {
         switch (t)
         {
-            case "column": return 51;        // xlColumnClustered
-            case "bar": return 57;           // xlBarClustered
-            case "line": return 4;           // xlLine
-            case "pie": return 5;            // xlPie
-            case "scatter": return -4169;    // xlXYScatter
-            case "area": return 76;          // xlArea
-            default: throw new Fail("BAD_ARGS", "chart type must be column|bar|line|pie|scatter|area, got \"" + t + "\"");
+            case "column": case "combo": return 51;   // xlColumnClustered (combo starts from columns)
+            case "bar": return 57;                    // xlBarClustered
+            case "stacked": case "stackedcolumn": return 52;
+            case "stackedbar": return 58;
+            case "line": return 4;                    // xlLine
+            case "smooth": case "smoothline": return 4;
+            case "pie": return 5;                     // xlPie
+            case "doughnut": case "donut": return -4120;
+            case "scatter": return -4169;             // xlXYScatter
+            case "scatterline": return 74;
+            case "area": return 76;                   // xlArea
+            case "radar": return -4151;
+            default: throw new Fail("BAD_ARGS", "chart type must be column|bar|stacked|stackedbar|line|smooth|pie|doughnut|scatter|scatterline|area|radar|combo, got \"" + t + "\"");
         }
     }
 
     private static string ChartTypeName(object t)
     {
-        if (t is double) { int v = (int)(double)t; if (v == 51) return "column"; if (v == 57) return "bar"; if (v == 4) return "line"; if (v == 5) return "pie"; if (v == -4169) return "scatter"; if (v == 76) return "area"; }
+        if (t is double)
+        {
+            int v = (int)(double)t;
+            if (v == 51) return "column";
+            if (v == 57) return "bar";
+            if (v == 52) return "stacked";
+            if (v == 58) return "stackedbar";
+            if (v == 4 || v == 65) return "line";
+            if (v == 5) return "pie";
+            if (v == -4120) return "doughnut";
+            if (v == -4169 || v == 74) return "scatter";
+            if (v == 76) return "area";
+            if (v == -4151) return "radar";
+        }
         return Convert.ToString(t, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// The title of a chart. WPS turns the call down while it is still laying out a chart whose series
+    /// were just moved to another type or axis: it is asked again, and then by the other way there is
+    /// to ask (SetElement). Same retry as dsh-office OfficeHelper.cs:4736-4753.
+    /// </summary>
+    private static void Titled(dynamic chart, string title)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                if (attempt == 2) chart.SetElement(2); else chart.HasTitle = true;
+                chart.ChartTitle.Text = title;
+                return;
+            }
+            catch (Exception)
+            {
+                if (attempt >= 3) throw;
+                System.Threading.Thread.Sleep(250);
+            }
+        }
+    }
+
+    /// <summary>The secondary value axis, asked for more than once: WPS returns null on the first ask.</summary>
+    private static dynamic SecondaryAxis(dynamic chart)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                dynamic axis = chart.Axes(2, 2);
+                if (axis != null) return axis;
+            }
+            catch (Exception) { }
+            System.Threading.Thread.Sleep(150);
+        }
+        return null;
     }
 
     // Geometry of one ChartObject, in sheet points. Shared by chart list / move / add so the
@@ -1380,26 +1577,167 @@ internal static class Program
                 if (sName.Length > 0) { try { ser.Name = sName; } catch (Exception) { } }
                 seriesNames.Add(sName);
             }
+            int nSeries = seriesNames.Count;
+
+            // Per-series type and axis, AFTER every series exists: moving them earlier makes WPS
+            // throw away the type it had worked out. combo = the last series becomes a line;
+            // -Secondary moves the named ones (name or 1-based position) to the right-hand axis.
+            List<object> secondary = a.List("secondary");
+            bool[] toSecondary = new bool[nSeries + 1];
+            List<object> secondaryApplied = new List<object>();
+            List<object> secondaryUnknown = new List<object>();
+            foreach (object raw in secondary)
+            {
+                string key = TextOf(raw).Trim();
+                int idx = 0;
+                bool found = false;
+                if (int.TryParse(key, NumberStyles.Integer, CultureInfo.InvariantCulture, out idx) && idx >= 1 && idx <= nSeries)
+                {
+                    toSecondary[idx] = true;
+                    found = true;
+                }
+                else
+                {
+                    for (int k = 1; k <= nSeries; k++)
+                    {
+                        if (string.Equals(TextOf(seriesNames[k - 1]), key, StringComparison.OrdinalIgnoreCase))
+                        {
+                            toSecondary[k] = true;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (found) secondaryApplied.Add(key); else secondaryUnknown.Add(key);
+            }
+            for (int k = 1; k <= nSeries; k++)
+            {
+                bool asLine = type == "combo" && (k == nSeries || toSecondary[k]);
+                if (!asLine && !toSecondary[k]) continue;
+                dynamic ser = chart.SeriesCollection(k);
+                if (asLine) { try { ser.ChartType = 65; } catch (Exception) { } }
+                if (toSecondary[k]) { try { ser.AxisGroup = 2; } catch (Exception) { } }
+            }
+
             try { chart.HasLegend = seriesNames.Count > 1; } catch (Exception) { }
             string title = a.Str("title", null);
             if (title != null)
             {
-                try { chart.HasTitle = true; chart.ChartTitle.Text = title; } catch (Exception) { }
+                try
+                {
+                    Titled(chart, title);
+                    try { chart.ChartTitle.Font.Size = 13; chart.ChartTitle.Font.Bold = true; } catch (Exception) { }
+                }
+                catch (Exception) { }
             }
-            string xTitle = a.Str("xtitle", null), yTitle = a.Str("ytitle", null);
-            if (xTitle != null) { try { chart.Axes(1).HasTitle = true; chart.Axes(1).AxisTitle.Text = xTitle; } catch (Exception) { } }
-            if (yTitle != null) { try { chart.Axes(2).HasTitle = true; chart.Axes(2).AxisTitle.Text = yTitle; } catch (Exception) { } }
-            try { co.Name = title != null ? title : ("AI-" + type + "-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture)); } catch (Exception) { }
+            bool round = type == "pie" || type == "doughnut" || type == "donut" || type == "radar";
+            string xTitle = a.Str("xtitle", null), yTitle = a.Str("ytitle", null), y2Title = a.Str("y2title", null);
+            if (xTitle != null && !round) { try { chart.Axes(1).HasTitle = true; chart.Axes(1).AxisTitle.Text = xTitle; } catch (Exception) { } }
+            if (yTitle != null && !round) { try { chart.Axes(2).HasTitle = true; chart.Axes(2).AxisTitle.Text = yTitle; } catch (Exception) { } }
+            bool y2 = false;
+            if (y2Title != null)
+            {
+                dynamic axis = SecondaryAxis(chart);
+                if (axis != null)
+                {
+                    try { axis.HasTitle = true; axis.AxisTitle.Text = y2Title; y2 = true; } catch (Exception) { }
+                }
+            }
+            string numberFormat = a.Str("numberFormat", a.Str("numformat", null));
+            if (numberFormat != null) { try { chart.Axes(2).TickLabels.NumberFormat = numberFormat; } catch (Exception) { } }
+            if (a.Has("min")) { double v; if (double.TryParse(a.Str("min", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out v)) { try { chart.Axes(2).MinimumScale = v; } catch (Exception) { } } }
+            if (a.Has("max")) { double v; if (double.TryParse(a.Str("max", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out v)) { try { chart.Axes(2).MaximumScale = v; } catch (Exception) { } } }
+
+            string labels = a.Str("labels", null);
+            bool wantLabels = labels != null && !labels.Equals("false", StringComparison.OrdinalIgnoreCase) && !labels.Equals("none", StringComparison.OrdinalIgnoreCase) && labels != "0";
+            if (labels == null && (type == "pie" || type == "doughnut" || type == "donut")) wantLabels = true;
+            if (wantLabels)
+            {
+                try
+                {
+                    for (int k = 1; k <= nSeries; k++)
+                    {
+                        dynamic ser = chart.SeriesCollection(k);
+                        ser.HasDataLabels = true;
+                        if (labels != null && labels.Equals("percent", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ser.DataLabels().ShowPercentage = true;
+                            ser.DataLabels().ShowValue = false;
+                            ser.DataLabels().ShowCategoryName = round && type != "radar";
+                        }
+                        try { ser.DataLabels().Font.Size = 9; } catch (Exception) { }
+                    }
+                }
+                catch (Exception) { }
+            }
+
+            string legend = a.Str("legend", null);
+            if (legend == null) legend = round ? "right" : nSeries > 1 ? "bottom" : "none";
+            if (legend != null)
+            {
+                try
+                {
+                    chart.HasLegend = !legend.Equals("none", StringComparison.OrdinalIgnoreCase) && !legend.Equals("false", StringComparison.OrdinalIgnoreCase);
+                    if (nSeries > 0 && legend.Length > 0) chart.Legend.Position = legend.StartsWith("r", StringComparison.OrdinalIgnoreCase) ? -4152
+                        : legend.StartsWith("t", StringComparison.OrdinalIgnoreCase) ? -4160
+                        : legend.StartsWith("l", StringComparison.OrdinalIgnoreCase) ? -4131 : -4107;
+                }
+                catch (Exception) { }
+            }
+
+            // A plain, readable look: one typeface, pale grid lines, bars that are not thin.
+            try { chart.ChartArea.Font.Name = "\u5fae\u8f6f\u96c5\u9ed1"; chart.ChartArea.Font.Size = 10; } catch (Exception) { }
+            try { chart.Axes(2).MajorGridlines.Format.Line.ForeColor.RGB = ColorFrom("#E4E6EA"); } catch (Exception) { }
+
+            string chartName = a.Str("name", null);
+            string resultName = chartName != null ? chartName : (title != null ? title : ("AI-" + type + "-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture)));
+            try { co.Name = resultName; } catch (Exception) { }
+
             Dictionary<string, object> r = new Dictionary<string, object>();
             r["sheet"] = Convert.ToString(TryGet(() => (object)ws.Name, ""), CultureInfo.InvariantCulture);
             r["type"] = type;
             r["range"] = dataRef;
             r["title"] = title == null ? "" : title;
             r["name"] = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
-            r["seriesCount"] = TryGet(() => (object)(int)chart.SeriesCollection().Count, 0);
+            r["seriesCount"] = nSeries;
             r["seriesNames"] = seriesNames;
+            r["secondary"] = secondaryApplied;
+            if (secondaryUnknown.Count > 0) r["secondaryUnknown"] = secondaryUnknown;
+            r["secondaryAxisTitle"] = y2;
             foreach (KeyValuePair<string, object> kv in ChartGeometry(co)) r[kv.Key] = kv.Value;
-            r["hint"] = "render -IncludeCharts shows the cells plus every chart in one image; no desktop screenshot needed";
+            // Where it sits on the sheet, so the next chart does not land on top of it.
+            string occupancy = "";
+            try { occupancy = Convert.ToString(co.TopLeftCell.Address[false, false], CultureInfo.InvariantCulture) + ":" + Convert.ToString(co.BottomRightCell.Address[false, false], CultureInfo.InvariantCulture); }
+            catch (Exception) { }
+            if (occupancy.Length > 0) r["occupancy"] = occupancy;
+            // Charts lying over one another is the commonest fault of a dashboard: say so at once.
+            List<object> overlaps = new List<object>();
+            try
+            {
+                double l = (double)co.Left, t = (double)co.Top, rr2 = l + (double)co.Width, bb = t + (double)co.Height;
+                int others = (int)ws.ChartObjects().Count;
+                string mine = Convert.ToString(TryGet(() => (object)co.Name, ""), CultureInfo.InvariantCulture);
+                for (int k = 1; k <= others; k++)
+                {
+                    dynamic other = null;
+                    try { other = ws.ChartObjects().Item(k); } catch (Exception) { continue; }
+                    string otherName = Convert.ToString(TryGet(() => (object)other.Name, ""), CultureInfo.InvariantCulture);
+                    if (string.Equals(otherName, mine, StringComparison.Ordinal)) continue;
+                    double ol = (double)other.Left, ot = (double)other.Top;
+                    double or2 = ol + (double)other.Width, ob = ot + (double)other.Height;
+                    if (l < or2 - 2 && ol < rr2 - 2 && t < ob - 2 && ot < bb - 2)
+                    {
+                        overlaps.Add(otherName + " (" + Convert.ToString(TryGet(() => (object)other.TopLeftCell.Address[false, false], ""), CultureInfo.InvariantCulture)
+                            + ":" + Convert.ToString(TryGet(() => (object)other.BottomRightCell.Address[false, false], ""), CultureInfo.InvariantCulture) + ")");
+                        break;
+                    }
+                }
+            }
+            catch (Exception) { }
+            if (overlaps.Count > 0) r["overlaps"] = overlaps;
+            if (nSeries == 0) r["note"] = "NOTHING is plotted: check the range";
+            else if (overlaps.Count > 0) r["hint"] = "this chart OVERLAPS another one: move it with chart -Action move -Index n -Anchor <cell>";
+            else r["hint"] = "render -IncludeCharts shows the cells plus every chart in one image; no desktop screenshot needed";
             return r;
         }
         throw new Fail("BAD_ARGS", "chart -Action must be add|list|delete|move");
@@ -1661,6 +1999,11 @@ internal static class Program
         object bottomAfter = TryGet(() => (object)range.Cells[rows, 1].Text, null);
         r["topAfter"] = topAfter == null ? "" : Convert.ToString(topAfter, CultureInfo.InvariantCulture);
         r["bottomAfter"] = bottomAfter == null ? "" : Convert.ToString(bottomAfter, CultureInfo.InvariantCulture);
+        // A formula that cannot compute shows an error straight away: say so instead of letting the
+        // caller discover it later (first up to 20 cells, with the error code).
+        List<object> errors = ErrorCells(range);
+        r["errors"] = errors;
+        if (errors.Count > 0) r["note"] = errors.Count.ToString(CultureInfo.InvariantCulture) + " cell(s) show an error: fix the formula or the data it reads";
         return r;
     }
 
@@ -1807,6 +2150,13 @@ internal static class Program
     private static object RenderBook(Bag a)
     {
         dynamic wb = RequireBook(a, true);
+        // -Overview: every sheet as a thumbnail in one picture (a workbook read at a glance).
+        if (a.Flag("overview", false))
+        {
+            string overviewDir = a.Need("out");
+            Directory.CreateDirectory(overviewDir);
+            return RenderOverviewSheets(wb, a, overviewDir, a.Int("width", 1100));
+        }
         dynamic ws = TargetSheet(wb, a);
         if (ws == null) throw new Fail("COM_ERROR", "No target sheet.");
         bool withCharts = a.Flag("includeCharts", false);

@@ -485,7 +485,13 @@ internal static partial class Program
             case "quit": return QuitAll(a);
             case "hint": return HintCmd(a);
             case "finish": return FinishCmd(a);
-            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|replace|selection|slide|split|merge|text|textbox|image|picture|comment|export|table|chart|shape|format|font|theme|master|audit|check|outline|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish|hint");
+            // v1.29 layout studio (see Studio.cs)
+            case "crop": return CropCmd(a);
+            case "smartart": return SmartArtCmd(a);
+            case "connect": return ConnectCmd(a);
+            case "bg": return BgCmd(a);
+            case "anim": return AnimCmd(a);
+            default: throw new Fail("BAD_ARGS", "unknown cmd \"" + cmd + "\"; use doctor|status|open|read|search|replace|selection|slide|split|merge|text|textbox|image|picture|comment|export|table|chart|shape|format|font|theme|master|audit|check|outline|align|zorder|notes|view|render|snapshot|diff|restore|save|close|quit|finish|hint|crop|smartart|connect|bg|anim");
         }
     }
 
@@ -1669,6 +1675,8 @@ internal static partial class Program
             shp.TextFrame.TextRange.Text = text.Replace("\\n", "\n");
             ApplyFont(shp.TextFrame.TextRange, a);
         }
+        string wantName = a.Str("name", null);
+        if (wantName != null && wantName.Length > 0) { try { shp.Name = wantName; } catch (Exception) { } }
         string addedName = Convert.ToString(TryGet(() => (object)shp.Name, ""), CultureInfo.InvariantCulture);
         return new Dictionary<string, object> { { "added", addedName }, { "slide", a.Int("slide", 0) }, { "type", type } };
     }

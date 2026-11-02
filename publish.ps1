@@ -17,6 +17,8 @@ $includes = @(
     'SKILL.md',
     'README.md',
     'reference\encryption.md',
+    'reference\changelog.md',
+    'reference\ppt-quirks.md',
     'reference\word-quirks.md',
     'reference\excel-quirks.md',
     'reference\workflows.md',
