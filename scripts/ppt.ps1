@@ -120,6 +120,8 @@ param(
     [switch]$NoHint,
     # resident tray indicator (opt-in)
     [switch]$Tray,
+    [switch]$SlideMark,
+    [switch]$NoSlideMark,
     [int]$TimeoutSec = 180
 )
 
@@ -669,6 +671,9 @@ switch ($Command) {
         if ($Quiet) { $request['quiet'] = $true }
         # -Tray: keep a resident indicator icon; the daemon restores via this same script.
         if ($Tray) { $request['tray'] = $true; $request['wrapper'] = $PSCommandPath }
+        # the on-slide takeover badge is ON by default (the WPS tab cannot show the OS title);
+        # -NoSlideMark opts out for decks that must not be touched at all.
+        $request['slideMark'] = -not [bool]$NoSlideMark
     }
     'finish' {
         if ($Note) { $request['note'] = $Note }
@@ -682,7 +687,7 @@ switch ($Command) {
 # Shared with the other two wrappers: any bound parameter this command did not copy into the
 # request warns on stderr instead of vanishing (see scripts\param-check.ps1).
 $paramAliases = @{
-    HintTag = 'tag'; KeepCrop = 'resetCrop'; FitInside = 'keepSize'
+    HintTag = 'tag'; KeepCrop = 'resetCrop'; FitInside = 'keepSize'; SlideMark = 'slideMark'; NoSlideMark = 'slideMark'
 }
 $paramCommandSkips = @{
     '*' = @('ExitCode')

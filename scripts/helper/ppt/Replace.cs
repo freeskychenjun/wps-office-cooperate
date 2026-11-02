@@ -396,6 +396,7 @@ internal static partial class Program
             try { sh = shapes.Item(i); } catch (Exception) { continue; }
             c.Shapes++;
             string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+            if (IsTakeoverMark(name)) continue;   // never rewrite the agent's own badge
             int type = 0;
             try { type = Convert.ToInt32(TryGet(() => (object)sh.Type, 0), CultureInfo.InvariantCulture); } catch (Exception) { }
 

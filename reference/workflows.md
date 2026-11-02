@@ -337,10 +337,13 @@ office.ps1 word unit -Doc $DOC -Apply -Units "s2"          # 追加真实使用�
 4. **要常驻进度就加 `-Tray`**（v1.12）—— `hint -Doc X -Text "正在核对第 3 节" -Quiet -Tray`：托盘出现橙色「AI」图标，悬停 `〔AI接管中〕 报告.docx · 正在核对第 3 节`，右键「结束协作：还原标题标记」。`finish`/`close`/`-Clear` 会自动移除，忘关也会 4 小时自灭。
    - 新图标默认在「^」溢出区（Windows 行为）：要告诉用户拖到任务栏一次；`hint` 返回里的 `tray.note` 就是这句话。
    - 用户中途关掉文档：图标约 10 s 内自己消失（RestartManager 判定文件已不被占用，实测 Word 9.6 s / Excel 8.6 s / PPT 7.4 s）；`save -As` 会重指路径。
-   - PPT 侧尤其值得开——它没有可写标题、没有状态栏，托盘是唯一常驻信号。
+   - PPT 侧尤其值得开——它没有可写标题、没有状态栏，托盘是常驻信号（v1.27 起还有每页的页面标记）。
 5. **收尾** —— `finish` / `close` 自动还原标题与状态栏并移除托盘图标；漏了就 `hint -Clear`。`status` 的 `caption` / `hinted` 可随时核对。
 
-- 三者全是**窗口状态**：不进修订、不写文件、不改变 `saved`；`tests/word/check_hint.py` 专门断言"段落数不变、无新增修订"。
-- **PPT 只给气泡**：WPS 演示没有可写的单文档标题（`ActiveWindow.Caption` 只读，`Application.Caption` 是应用级），响应带 `captionSupported:false` + `limitation`，别对用户谎称"标题已标记"。
+- Word / Excel 的标记全是**窗口状态**：不进修订、不写文件、不改变 `saved`；`tests/word/check_hint.py` 专门断言"段落数不变、无新增修订"。
+- **PPT 有两层标记（v1.26 / v1.27）**：① 窗口标题（Win32 `SetWindowText` 打在真实窗口框 `PP12FrameClass` 上）——**只有任务栏 / Alt+Tab 看得见**，因为 WPS 演示的标签页是自绘的；② **每页右上角的「〔AI接管中〕」橙色药丸**（形状名 `woc-ai-takeover-mark`，`hint` 默认贴，`-NoSlideMark` 关）——这是唯一"界面里看得见"的通道，编辑视图和放映都显示。页面标记是**内容**：用户自己 Ctrl+S 会存进文件，所以 `save`/`export` 会在落盘前剥离、写完补回；`hint -Clear`/`finish`/`close` 逐页删除。
+- **页面标记不能做在母版上**：实测母版形状在页面形状之下，封面那种满版大图会把它整片盖住（第一版踩过，渲染图上一个像素都看不见）⇒ 逐页贴、置顶。
+- **读侧必须跳过页面标记**：`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 全部按形状名排除，否则它会变成"正文新增文字"、"字号 10.9pt 过小"、"对比度 2.85:1"之类的假问题（实测未排除时 `check` 在 19 页稿上多报 37 条）。`read` 每页用 `takeoverBadge:true` 告知。
+- **PPT 的 COM 标题仍然不可写**：`ActiveWindow.Caption` 只读、`Application.Caption` 写了不重绘、`StatusBar` 不存在，响应带 `captionSupported:false`；`titleMarked:true` 指的是 Win32 那一层，别对用户谎称"标题已标记"。
 - 实测细节（哪个属性可写、Writer 的 `StatusBar` 只写不读且不渲染、表格侧 `ActiveWindow` 为 null）见 [word-quirks.md](word-quirks.md) 与 [excel-quirks.md](excel-quirks.md)。
 - 托盘实现的两个坑：① daemon 用 `--tray <state.json>` 重开自身，状态文件是唯一 IPC，菜单「还原」调本 skill 的 `hint -Clear`（daemon 不懂 COM）；② spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，`subprocess.communicate`/PowerShell 管道会被图标的 4 小时寿命卡死（2026-10-30 实测踩到）。

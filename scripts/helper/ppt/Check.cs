@@ -466,6 +466,8 @@ internal static partial class Program
         sp.Slide = slideNo;
         sp.Index = index;
         sp.Name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+        // the takeover badge is the agent's own UI, never a layout/typography finding
+        if (IsTakeoverMark(sp.Name)) return null;
         sp.Type = Convert.ToInt32(TryGet(() => (object)(int)sh.Type, (object)0), CultureInfo.InvariantCulture);
         sp.L = Convert.ToDouble(TryGet(() => (object)sh.Left, (object)0.0), CultureInfo.InvariantCulture);
         sp.T = Convert.ToDouble(TryGet(() => (object)sh.Top, (object)0.0), CultureInfo.InvariantCulture);

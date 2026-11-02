@@ -210,6 +210,8 @@ internal static partial class Program
         {
             dynamic sh = null;
             try { sh = slide.Shapes.Item(i); } catch (Exception) { continue; }
+            string shName = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+            if (IsTakeoverMark(shName)) continue;
             string text = ShapeText(sh);
             if (text != null && text.Trim().Length > 0) return Clean(text);
         }

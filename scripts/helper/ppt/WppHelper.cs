@@ -701,6 +701,14 @@ internal static partial class Program
         return "";
     }
 
+    /// <summary>True for the agent's own takeover badge (the pill stamped on every slide while a
+    /// takeover is active). Internal: read / search / snapshot / audit must never report it as deck
+    /// content, otherwise the badge shows up as a "text change" or a "font too small" issue.</summary>
+    private static bool IsTakeoverMark(string name)
+    {
+        return string.Equals(name, MarkShapeName, StringComparison.Ordinal);
+    }
+
     private static object ShapeInfo(dynamic sh, int i, int textLimit)
     {
         Dictionary<string, object> d = new Dictionary<string, object>();
@@ -1043,14 +1051,18 @@ internal static partial class Program
             int sc = 0;
             try { sc = (int)s.Shapes.Count; }
             catch (Exception) { }
+            bool badge = false;
             for (int j = 1; j <= sc; j++)
             {
                 dynamic sh = null;
                 try { sh = s.Shapes.Item(j); }
                 catch (Exception) { continue; }
+                string shName = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                if (IsTakeoverMark(shName)) { badge = true; continue; }
                 shapes.Add(ShapeInfo(sh, j, textLimit));
             }
             d["shapes"] = shapes;
+            if (badge) d["takeoverBadge"] = true;
             string notes = "";
             try { notes = (string)s.NotesPage.Shapes.Placeholders(2).TextFrame.TextRange.Text; }
             catch (Exception) { }
@@ -1090,6 +1102,8 @@ internal static partial class Program
                 dynamic sh = null;
                 try { sh = s.Shapes.Item(j); }
                 catch (Exception) { continue; }
+                string shName = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                if (IsTakeoverMark(shName)) continue;
                 string text = ShapeText(sh);
                 if (text.Length == 0) continue;
                 int pos = icase ? text.ToLowerInvariant().IndexOf(needle.ToLowerInvariant(), StringComparison.Ordinal)
@@ -1099,7 +1113,7 @@ internal static partial class Program
                 int len = Math.Min(text.Length - start, needle.Length + 60);
                 hits.Add(new Dictionary<string, object> {
                     { "slide", k },
-                    { "shape", Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture) },
+                    { "shape", shName },
                     { "snippet", text.Substring(start, len).Replace("\r", "\n") }
                 });
             }
@@ -2236,6 +2250,7 @@ internal static partial class Program
                 try { sh = s.Shapes.Item(j); }
                 catch (Exception) { continue; }
                 string name = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                if (IsTakeoverMark(name)) continue;   // the badge is ours, not a layout problem
                 int type = (int)TryGet(() => (object)(int)sh.Type, (object)0);
                 double l = Convert.ToDouble(TryGet(() => (object)sh.Left, (object)0.0), CultureInfo.InvariantCulture);
                 double t = Convert.ToDouble(TryGet(() => (object)sh.Top, (object)0.0), CultureInfo.InvariantCulture);
@@ -2317,6 +2332,7 @@ internal static partial class Program
     private static bool IsDecoration(string name)
     {
         if (name == null) return false;
+        if (IsTakeoverMark(name)) return true;
         string n = name.ToLowerInvariant();
         return n == "coverband" || n == "sectionband" || n == "endbackground" || n == "accentline" || n == "divider";
     }
@@ -2405,7 +2421,17 @@ internal static partial class Program
         catch (Exception) { }
         if (list == null || list.Trim().Length == 0 || list.Trim() == "*" || list.Trim().ToLowerInvariant() == "all")
         {
-            for (int k = 1; k <= count; k++) { try { result.Add(slide.Shapes.Item(k)); } catch (Exception) { } }
+            for (int k = 1; k <= count; k++)
+            {
+                try
+                {
+                    dynamic sh0 = slide.Shapes.Item(k);
+                    string nm0 = Convert.ToString(TryGet(() => (object)sh0.Name, ""), CultureInfo.InvariantCulture);
+                    if (IsTakeoverMark(nm0)) continue;   // "all shapes" never means our own badge
+                    result.Add(sh0);
+                }
+                catch (Exception) { }
+            }
             return result;
         }
         foreach (string raw in list.Split(','))
@@ -2539,8 +2565,10 @@ internal static partial class Program
                 dynamic sh = null;
                 try { sh = s.Shapes.Item(j); }
                 catch (Exception) { continue; }
+                string shName = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                if (IsTakeoverMark(shName)) continue;   // never part of the deck baseline
                 shapes.Add(new Dictionary<string, object> {
-                    { "name", Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture) },
+                    { "name", shName },
                     { "text", ShapeText(sh) }
                 });
             }
@@ -2671,6 +2699,24 @@ internal static partial class Program
     private static object SavePres(Bag a)
     {
         dynamic p = RequirePres(a, true);
+        // never write the takeover badge into the file: strip it, save, stamp it back
+        int markCount = 0;
+        try { markCount = ApplySlideMark(p, false); } catch (Exception) { }
+        try
+        {
+            return SavePresCore(a, p);
+        }
+        finally
+        {
+            if (markCount > 0)
+            {
+                try { ApplySlideMark(p, true); } catch (Exception) { }
+            }
+        }
+    }
+
+    private static object SavePresCore(Bag a, dynamic p)
+    {
         string asPath = a.Str("as", null);
         if (asPath == null)
         {
@@ -2702,6 +2748,10 @@ internal static partial class Program
         if (p == null) throw new Fail("NOT_OPEN", "The presentation is not open: " + full);
         bool save = a.Flag("save", false);
         bool saved = false;
+        // drop the takeover markers BEFORE saving, so `close -Save` never persists them
+        try { ApplyTitleMarker(p, false); } catch (Exception) { }
+        int markCount = 0;
+        try { markCount = ApplySlideMark(p, false); } catch (Exception) { }
         if (save)
         {
             bool dirty = true;
@@ -2711,11 +2761,11 @@ internal static partial class Program
                 try { ComRetry(() => { p.Save(); return 0; }); saved = true; }
                 catch (Exception e)
                 {
+                    if (markCount > 0) { try { ApplySlideMark(p, true); } catch (Exception) { } }
                     throw new Fail("COM_ERROR", "could not save before closing " + full + ": " + Clean(e.Message));
                 }
             }
         }
-        try { ApplyTitleMarker(p, false); } catch (Exception) { }
         try { TitleStateSet(full, false); } catch (Exception) { }
         p.Close();
         MarkerRemove(full);   // otherwise a later `open -Doc` of the same path is refused as DOC_CLOSED
@@ -2787,6 +2837,104 @@ internal static partial class Program
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool SetWindowText(IntPtr h, string s);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+
+    private const string MarkShapeName = "woc-ai-takeover-mark";
+
+    /// <summary>Delete every takeover badge (by name) from a shape collection.</summary>
+    private static void DeleteSlideMarks(dynamic shapes)
+    {
+        try
+        {
+            int n = (int)shapes.Count;
+            for (int k = n; k >= 1; k--)
+            {
+                dynamic sh = null;
+                try { sh = shapes.Item(k); } catch (Exception) { continue; }
+                string nm = Convert.ToString(TryGet(() => (object)sh.Name, ""), CultureInfo.InvariantCulture);
+                if (string.Equals(nm, MarkShapeName, StringComparison.Ordinal))
+                {
+                    try { sh.Delete(); } catch (Exception) { }
+                }
+            }
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>An in-deck takeover badge: a small pill drawn on EVERY slide, because the WPS tab is
+    /// custom-drawn from the file name and cannot show the OS title.
+    /// Measured 2026-11-02: a badge on the slide master is hidden by any full-bleed picture
+    /// (the deck's cover slide) since master shapes sit behind slide shapes - so the pill is
+    /// stamped per slide instead (topmost shape, visible in edit view and in the slide show).
+    /// Returns the number of slides carrying the badge.</summary>
+    private static int ApplySlideMark(dynamic p, bool on)
+    {
+        try
+        {
+            double slideW = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideWidth, (object)960.0), CultureInfo.InvariantCulture);
+            double slideH = Convert.ToDouble(TryGet(() => (object)p.PageSetup.SlideHeight, (object)540.0), CultureInfo.InvariantCulture);
+            double markW = Math.Round(slideW * 0.138, 2), markH = Math.Round(slideH * 0.048, 2);
+            if (markW < 90) markW = 90;
+            if (markH < 18) markH = 18;
+            double left = Math.Round(slideW - markW - slideW * 0.0125, 2);
+            if (left < 12) left = 12;
+            double top = Math.Round(slideH * 0.022, 2);
+            if (top < 8) top = 8;
+
+            // remember where the user is looking, so stamping never moves the view
+            // (View.CurrentShowPosition is empty on WPS 12; Selection.SlideRange reports the real slide)
+            int pos = 0;
+            try { pos = (int)p.Windows[1].Selection.SlideRange.SlideIndex; } catch (Exception) { }
+
+            dynamic master = null;
+            try { master = p.SlideMaster; } catch (Exception) { }
+            if (master != null) DeleteSlideMarks(master.Shapes);   // legacy master badge from the v1.27 draft
+
+            int slides = 0;
+            try { slides = (int)p.Slides.Count; } catch (Exception) { return 0; }
+            int marked = 0;
+            for (int i = 1; i <= slides; i++)
+            {
+                try
+                {
+                    dynamic sl = p.Slides[i];
+                    dynamic shapes = sl.Shapes;
+                    DeleteSlideMarks(shapes);
+                    if (!on) continue;
+                    dynamic shape = shapes.AddShape(5, left, top, markW, markH);   // msoShapeRoundedRectangle
+                    shape.Name = MarkShapeName;
+                    try { shape.Fill.ForeColor.RGB = 0x227EE6; } catch (Exception) { }   // BGR for orange
+                    try { shape.Line.Visible = 0; } catch (Exception) { }
+                    try { shape.Shadow.Visible = 0; } catch (Exception) { }
+                    dynamic tf = shape.TextFrame;
+                    try { tf.MarginLeft = 0; tf.MarginRight = 0; tf.MarginTop = 0; tf.MarginBottom = 0; } catch (Exception) { }
+                    try { tf.WordWrap = 0; } catch (Exception) { }
+                    try { tf.VerticalAnchor = 3; } catch (Exception) { }          // msoAnchorMiddle
+                    dynamic tr = tf.TextRange;
+                    tr.Text = TitleTag;
+                    try { tr.Font.Size = Math.Round(markH * 0.42, 1); } catch (Exception) { }
+                    tr.Font.Bold = -1;
+                    tr.Font.Color.RGB = 0xFFFFFF;
+                    try { tr.ParagraphFormat.Alignment = 2; } catch (Exception) { }   // msoAlignCenter
+                    marked++;
+                }
+                catch (Exception) { }
+            }
+
+            if (pos > 0)
+            {
+                try { p.Windows[1].View.GotoSlide(pos); } catch (Exception) { }
+            }
+            try
+            {
+                dynamic app = p.Application;
+                dynamic actWin = app.ActiveWindow;
+                if (actWin != null) actWin.Selection.Unselect();
+            }
+            catch (Exception) { }
+            return marked;
+        }
+        catch (Exception) { return 0; }
+    }
 
     private static IntPtr FrameFor(string presName)
     {
@@ -2917,10 +3065,25 @@ internal static partial class Program
         catch (Exception) { }
         r["captionSupported"] = false;   // COM caption stays read-only
         r["titleMarked"] = titleMarked;  // the real marker is a Win32 SetWindowText on the frame
+        bool wantSlideMark = !clear && a.Flag("slideMark", true);
+        int slideMarkCount = 0;
+        try
+        {
+            // false covers both -Clear and -NoSlideMark: either way no badge may stay behind
+            slideMarkCount = ApplySlideMark(p, wantSlideMark);
+        }
+        catch (Exception) { }
+        r["slideMarked"] = slideMarkCount > 0;
+        if (slideMarkCount > 0) r["slideMarkCount"] = slideMarkCount;
         r["limitation"] = titleMarked
             ? "the per-document caption is read-only in COM, so the marker is written on the real window frame"
               + " (class PP12FrameClass); WPS clears it when you switch to another tab and the next command re-applies it"
             : "no visible frame matched this deck (it may not be the active tab); the tray balloon is the only signal";
+        if (!clear && slideMarkCount == 0)
+            r["inAppHint"] = "no slide badge is showing on this deck (-NoSlideMark, or the deck refuses new shapes);"
+                + " the WPS Presentation tab is custom-drawn from the file name, so the OS title is only visible in the"
+                + " taskbar / Alt+Tab - the on-slide badge is the only in-app marker (hint -SlideMark stamps it,"
+                + " hint -Clear or finish removes it)";
 
         bool quiet = a.Flag("quiet", false);
         bool toast = !quiet && a.Flag("toast", !clear);
@@ -2948,18 +3111,27 @@ internal static partial class Program
         string note = a.Str("note", "");
         string timeText = DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
         string text = "\u2705 AI \u5df2\u5b8c\u6210 " + timeText + (note.Length > 0 ? " | " + note : "");
+        // clear the takeover markers on the deck this call is about - never on whatever tab
+        // happens to be active (that would strip another deck's badge / title prefix)
+        dynamic target = null;
         try
         {
-            dynamic app = App(false, false);
-            if (app != null)
+            dynamic app2 = App(false, false);
+            string docArg = a.Str("doc", null);
+            if (docArg != null && docArg.Length > 0)
             {
-                dynamic act = null;
-                try { act = app.ActivePresentation; } catch (Exception) { }
-                if (act != null)
-                {
-                    ApplyTitleMarker(act, false);
-                    TitleStateSet(Convert.ToString(TryGet(() => (object)act.FullName, ""), CultureInfo.InvariantCulture), false);
-                }
+                try { target = FindOpen(FullPathOf(docArg)); } catch (Exception) { }
+            }
+            if (target == null) { try { target = app2.ActivePresentation; } catch (Exception) { } }
+            if (target != null) ApplySlideMark(target, false);
+        }
+        catch (Exception) { }
+        try
+        {
+            if (target != null)
+            {
+                ApplyTitleMarker(target, false);
+                TitleStateSet(Convert.ToString(TryGet(() => (object)target.FullName, ""), CultureInfo.InvariantCulture), false);
             }
         }
         catch (Exception) { }

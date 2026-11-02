@@ -307,7 +307,25 @@ internal static partial class Program
 
     private static object ExportCmd(Bag a)
     {
+        // a delivered file must never carry the takeover badge: strip it, export, stamp it back
         dynamic p = RequirePres(a, true);
+        int markCount = 0;
+        try { markCount = ApplySlideMark(p, false); } catch (Exception) { }
+        try
+        {
+            return ExportCore(a, p);
+        }
+        finally
+        {
+            if (markCount > 0)
+            {
+                try { ApplySlideMark(p, true); } catch (Exception) { }
+            }
+        }
+    }
+
+    private static object ExportCore(Bag a, dynamic p)
+    {
         int n = 0;
         try { n = (int)p.Slides.Count; } catch (Exception) { }
         if (n == 0) throw new Fail("BAD_ARGS", "this presentation has no slides");
