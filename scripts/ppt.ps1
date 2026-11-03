@@ -113,6 +113,8 @@ param(
     [switch]$Overview,
     [switch]$Apply,
     [switch]$Reset,
+# theme -Probe: test whether this deck accepts Presentation.Tags (v1.32 theme mirror)
+    [switch]$Probe,
     [string]$Set,
     [string]$Mode,
     [string]$Shapes,
@@ -324,6 +326,16 @@ function Read-Items-Json([string]$path) {
     return ,@($parsed)
 }
 
+function Read-Items-Doc([string]$path) {
+    # v1.32: canvas / grid / reuse pass ONE document object (title + items/rows + edges +
+    # texts/images). Read-Items-Json unwraps an "items" key and would lose the rest, so the
+    # whole object travels as a one-element array and the helper picks the document out.
+    if (-not (Test-Path -LiteralPath $path)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $path) }
+    $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $path), [System.Text.Encoding]::UTF8)
+    $parsed = $raw | ConvertFrom-Json
+    return ,@($parsed)
+}
+
 switch ($Command) {
     'open' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'open needs -Doc' }
@@ -374,7 +386,19 @@ switch ($Command) {
         if ($Title) { $request['title'] = $Title }
         if ($Subtitle) { $request['subtitle'] = $Subtitle }
         if ($Number) { $request['number'] = $Number }
-        if ($Items) { $request['items'] = Read-Items-Json $Items }
+        if ($Items) {
+            # v1.32: canvas / grid / reuse take a whole document object, so it must not be
+            # unwrapped to its "items" array (that would drop title / rows / edges)
+            $lowerPreset = if ($Preset) { $Preset.ToLowerInvariant() } else { '' }
+            $lowerAction = if ($Action) { $Action.ToLowerInvariant() } else { 'add' }
+            if ($lowerPreset -eq 'canvas' -or $lowerPreset -eq 'grid' -or $lowerAction -eq 'reuse') {
+                $request['items'] = Read-Items-Doc $Items
+            } else {
+                $request['items'] = Read-Items-Json $Items
+            }
+        }
+        # slide -Action reuse: -From is the SOURCE page here (read/render/export use it as a range start)
+        if ($PSBoundParameters.ContainsKey('From')) { $request['from'] = $From }
         if ($Layout -gt 0) { $request['layout'] = $Layout }
         if ($At -gt 0) { $request['at'] = $At }
         if ($Index -gt 0) { $request['index'] = $Index }
@@ -604,6 +628,7 @@ switch ($Command) {
         if ($Set) { $request['set'] = Resolve-FullPath $Set }
         if ($Apply) { $request['apply'] = $true }
         if ($Reset) { $request['reset'] = $true }
+        if ($Probe) { $request['probe'] = $true }
     }
     'audit' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'audit needs -Doc' }

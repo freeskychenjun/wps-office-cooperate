@@ -348,3 +348,36 @@ office.ps1 word unit -Doc $DOC -Apply -Units "s2"          # 追加真实使用�
 - **PPT 的 COM 标题仍然不可写**：`ActiveWindow.Caption` 只读、`Application.Caption` 写了不重绘、`StatusBar` 不存在，响应带 `captionSupported:false`；`titleMarked:true` 指的是 Win32 那一层，别对用户谎称"标题已标记"。
 - 实测细节（哪个属性可写、Writer 的 `StatusBar` 只写不读且不渲染、表格侧 `ActiveWindow` 为 null）见 [word-quirks.md](word-quirks.md) 与 [excel-quirks.md](excel-quirks.md)。
 - 托盘实现的两个坑：① daemon 用 `--tray <state.json>` 重开自身，状态文件是唯一 IPC，菜单「还原」调本 skill 的 `hint -Clear`（daemon 不懂 COM）；② spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，`subprocess.communicate`/PowerShell 管道会被图标的 4 小时寿命卡死（2026-10-30 实测踩到）。
+
+## 15. 忙重试与剪贴板礼仪（v1.32 基础设施，用户看不见但会感觉到）
+
+这两件事都**不需要你调任何新参数**，行为变化只体现在"以前会失败 / 以前会丢东西"的地方。
+
+### 15.1 忙重试：`BUSY` 现在多半会自己过去
+
+三个 helper 的 `Main` 第一行都注册了 OLE 消息过滤器（`helper/shared/MessageFilter.cs`）：WPS 拒绝调用（用户在单元格里打字、开着模态对话框、正在重绘）时，OLE 会按 **150 ms 一次重试、最多 6 s**，仍不行才把异常抛出来变成 `BUSY`。
+
+对写命令的实际影响：
+
+- 以前：用户在打字 → 命令**立刻** `BUSY`（或干等到 `TIMEOUT`）→ 只能重试。
+- 现在：先自动等 ≤6 s；用户停手了就**直接成功**，返回里看不出区别。
+- 仍报 `BUSY` 说明真的忙了 6 s 以上：**先问用户 / 稍等再重试**，不要连发同一批（每次都会白等 6 s）。`batch` 里某条 op 等满 6 s 会让整批顺延——"等"仍比"整批失败"划算。
+- 码表补了 `0x800AC472`（Excel/ET 的忙变体）与 `0x80010001`（Word 侧原来缺），所以"忙"基本都归到 `BUSY`；`COM_ERROR` 现在更值得当"真的出错"看。
+
+自检：设 `WOC_MSGFLT_DEBUG=1` 跑任意命令，stderr 会多一行 `woc-msgfilter: CoRegisterMessageFilter -> 0x00000000 (replaced=no)`；`0` 就是注册成功。
+
+### 15.2 剪贴板：render 不再吃掉用户复制的东西
+
+Excel `render` / `render -Overview` / `render -IncludeCharts`、PPT `render` / `render -Overview` / `export -Format png|jpg` 全都经过剪贴板。以前它们画完会 `Clipboard.Clear()`，用户刚复制的文本或图片就没了；现在：
+
+- 进来先**整份存下**（所有格式 + 剪贴板序列号），画完**放回**；
+- 只有"这一轮之后没人再动过剪贴板"才放回——用户中途按了 Ctrl+C，**他的新内容留下**，我们不动；
+- 放回的数据标了"不进剪贴板历史 / 不上云 / 不参与监控"，所以**不会**把用户原来的内容推进 Win+V。
+
+三条纪律：
+
+1. **不要**为了"渲染后剪贴板空着"再补一次 `Clipboard.Clear()`——恢复是自动的，外面动剪刀反而会把刚放回的内容清掉。
+2. 恢复失败不会让 `render` 报错（只写 Trace，`WOC_CLIP_DEBUG=1` 可见）：真遇到时剪贴板上留的是渲染图，等于旧行为。
+3. 只保证"内容回来了"，**不保证跨应用的格式细节**（Excel 富文本粘到 Word 里样式仍按目标应用走）。验证就 `Get-Clipboard` 看内容，别对每种格式都作承诺。
+
+取舍说清（别对外承诺过头）：如果用户恰好在我们"复制 → 清空"那几百毫秒里复制，他的内容仍会丢（上游 dsh-office 同样如此）；这条窗口没有消除，只是从"每次渲染必丢"缩到"极窄竞态"。

@@ -300,6 +300,11 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // v1.32: install the OLE message filter before any COM call, so a rejected call while the
+        // user is typing or has a dialog open is retried for up to 6 s instead of failing at once
+        // (helper/shared/MessageFilter.cs). One registration covers every command: all requests run
+        // on this STA thread.
+        MessageFilter.Register();
         Console.OutputEncoding = new UTF8Encoding(false);
         // Detached tray daemon mode: same binary, message-loop instead of a COM request.
         if (args != null && args.Length >= 2 && args[0] == "--tray") return TrayDaemon.Run(args[1]);
@@ -408,6 +413,8 @@ internal static partial class Program
             string msg = Clean(e.Message);
             string low = msg.ToLowerInvariant();
             bool busy = e.HResult == unchecked((int)0x8001010A)
+                || e.HResult == unchecked((int)0x80010001)        // RPC_E_CALL_REJECTED
+                || e.HResult == unchecked((int)0x800AC472)        // the app is busy (a dialog, a repaint)
                 || low.IndexOf("busy", StringComparison.Ordinal) >= 0
                 || msg.IndexOf("\u5fd9", StringComparison.Ordinal) >= 0
                 || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0

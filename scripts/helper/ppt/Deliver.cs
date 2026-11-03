@@ -378,6 +378,10 @@ internal static partial class Program
         bool jpeg = format != "png";
         List<object> files = new List<object>();
         List<object> failed = new List<object>();
+        // v1.32: the clipboard route below overwrites the machine-wide clipboard; keep the user's
+        // content for the whole export and put it back at the end (helper/shared/ClipboardKeeper.cs).
+        using (ClipboardKeeper.Keep())
+        {
         for (int k = 1; k <= n; k++)
         {
             if (only != null && !only.Contains(k)) continue;
@@ -395,6 +399,7 @@ internal static partial class Program
                 failed.Add(new Dictionary<string, object> { { "slide", k }, { "reason", Clean(e.Message) } });
             }
         }
+        }
 
         Dictionary<string, object> result = new Dictionary<string, object>();
         result["format"] = jpeg ? "jpg" : "png";
@@ -411,9 +416,15 @@ internal static partial class Program
     private static Bitmap CaptureSlide(dynamic p, int slideNo, int width)
     {
         dynamic slide = p.Slides.Item(slideNo);
-        slide.Copy();
-        System.Threading.Thread.Sleep(250);
-        return ClipboardBitmap(width);
+        // Nested with the keeper the export loop already opened: free when it is, a safety net when
+        // this helper ever gets called on its own.
+        using (ClipboardKeeper.Keep())
+        {
+            slide.Copy();
+            ClipboardKeeper.Sync();
+            System.Threading.Thread.Sleep(250);
+            return ClipboardBitmap(width);
+        }
     }
 
     private static bool LooksLikePlainFile(string path)

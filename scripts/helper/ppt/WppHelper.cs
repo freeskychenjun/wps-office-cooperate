@@ -295,6 +295,9 @@ internal sealed class Bag
         if (l == null) throw new Fail("BAD_ARGS", "\"" + k + "\" must be an array");
         return l;
     }
+    /// <summary>The raw dictionary, for commands that take an open-ended map of values
+    /// (slide -Action reuse builds its text/picture swaps out of one).</summary>
+    public Dictionary<string, object> Items() { return d; }
 }
 
 // ---------------------------------------------------------------- helper
@@ -308,6 +311,11 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // v1.32: install the OLE message filter before any COM call, so a rejected call while the
+        // user is typing or has a dialog open is retried for up to 6 s instead of failing at once
+        // (helper/shared/MessageFilter.cs). One registration covers every command: all requests run
+        // on this STA thread.
+        MessageFilter.Register();
         Console.OutputEncoding = new UTF8Encoding(false);
         // Detached tray daemon mode: same binary, message-loop instead of a COM request.
         if (args != null && args.Length >= 2 && args[0] == "--tray") return TrayDaemon.Run(args[1]);
@@ -397,6 +405,7 @@ internal static partial class Program
             string msg = Clean(e.Message);
             bool busy = e.HResult == unchecked((int)0x8001010A)   // RPC_E_SERVERCALL_RETRYFLT
                 || e.HResult == unchecked((int)0x80010001)        // RPC_E_CALL_REJECTED
+                || e.HResult == unchecked((int)0x800AC472)        // the app is busy (a dialog, a repaint)
                 || msg.IndexOf("busy", StringComparison.OrdinalIgnoreCase) >= 0
                 || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0;
             response = Err(busy ? "BUSY" : "COM_ERROR", msg + " (0x" + e.HResult.ToString("X8", CultureInfo.InvariantCulture) + ")");
@@ -521,7 +530,8 @@ internal static partial class Program
             catch (COMException e)
             {
                 last = e;
-                bool busy = e.HResult == unchecked((int)0x80010001) || e.HResult == unchecked((int)0x8001010A);
+                bool busy = e.HResult == unchecked((int)0x80010001) || e.HResult == unchecked((int)0x8001010A)
+                    || e.HResult == unchecked((int)0x800AC472);
                 if (!busy) throw;
             }
             Thread.Sleep(400 + attempt * 300);
@@ -840,15 +850,40 @@ internal static partial class Program
 
         public static DeckTheme Load(dynamic pres)
         {
+            string source;
+            return LoadWithSource(pres, out source);
+        }
+
+        /// <summary>Read the theme: the local theme file first (it is the writable copy), then
+        /// the copy stored in the deck's own Tags (v1.32), then the built-in defaults.
+        /// <paramref name="source"/> says which one answered, so a command can report it.</summary>
+        public static DeckTheme LoadWithSource(dynamic pres, out string source)
+        {
             DeckTheme t = new DeckTheme();
             string path = ThemePath(pres);
-            if (!File.Exists(path)) return t;
-            try
+            if (File.Exists(path))
             {
-                Bag b = new Bag(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
-                return FromBag(b, t);
+                source = "file " + path;
+                try
+                {
+                    Bag b = new Bag(Json.Parse(File.ReadAllText(path, Encoding.UTF8)));
+                    return FromBag(b, t);
+                }
+                catch (Exception) { return t; }
             }
-            catch (Exception) { return t; }
+            string json = ThemeTagRead(pres);
+            if (json != null && json.Trim().Length > 1)
+            {
+                try
+                {
+                    Bag b = new Bag(Json.Parse(json));
+                    source = "pptx tags (no local theme file on this machine)";
+                    return FromBag(b, t);
+                }
+                catch (Exception) { }
+            }
+            source = "defaults (no theme file and no wocTheme tag)";
+            return t;
         }
 
         public static DeckTheme FromBag(Bag b, DeckTheme fallback)
@@ -934,6 +969,93 @@ internal static partial class Program
     private static string ThemePath(dynamic pres)
     {
         return Path.Combine(ThemeDir(), Sha16(DeckIdentity(pres)) + ".json");
+    }
+
+    /// <summary>The tag the theme is mirrored into, so a deck carried to another machine still
+    /// knows its own palette (v1.32).</summary>
+    private const string ThemeTagName = "wocTheme";
+
+    /// <summary>Read the theme out of the deck's own Tags.  WPS may refuse the whole Tags
+    /// collection; a throw here simply means "this deck carries no theme".</summary>
+    private static string ThemeTagRead(dynamic pres)
+    {
+        try
+        {
+            dynamic tags = pres.Tags;
+            if (tags == null) return null;
+            int c = (int)tags.Count;
+            for (int k = 1; k <= c; k++)
+            {
+                dynamic t = null;
+                try { t = tags.Item(k); } catch (Exception) { continue; }
+                string nm = Convert.ToString(TryGet(() => (object)t.Name, ""), CultureInfo.InvariantCulture);
+                if (nm == ThemeTagName)
+                    return Convert.ToString(TryGet(() => (object)t.Value, ""), CultureInfo.InvariantCulture);
+            }
+        }
+        catch (Exception) { }
+        return null;
+    }
+
+    /// <summary>Mirror the theme into the deck's Tags.  Returns {supported, readBack, exact} so
+    /// the caller can tell "stored in the file too" from "WPS refused it - the local file stays
+    /// the only copy" instead of pretending it worked.</summary>
+    private static Dictionary<string, object> ThemeTagWrite(dynamic pres, string json, bool dryRun)
+    {
+        Dictionary<string, object> r = new Dictionary<string, object>();
+        if (dryRun)
+        {
+            // a probe: can we even touch the Tags collection?  (add, read, delete)
+            bool ok = false;
+            string probe = "{\"probe\":1}";
+            try
+            {
+                dynamic tags = pres.Tags;
+                if (tags != null)
+                {
+                    try { tags.Add(ThemeTagName + "Probe", probe); } catch (Exception) { }
+                    int c = (int)tags.Count;
+                    for (int k = 1; k <= c; k++)
+                    {
+                        dynamic t = null;
+                        try { t = tags.Item(k); } catch (Exception) { continue; }
+                        string nm = Convert.ToString(TryGet(() => (object)t.Name, ""), CultureInfo.InvariantCulture);
+                        if (nm == ThemeTagName + "Probe")
+                            ok = Convert.ToString(TryGet(() => (object)t.Value, ""), CultureInfo.InvariantCulture) == probe;
+                    }
+                    try { tags.Delete(ThemeTagName + "Probe"); } catch (Exception) { }
+                }
+            }
+            catch (Exception) { ok = false; }
+            r["supported"] = ok;
+            r["dryRun"] = true;
+            return r;
+        }
+        bool wrote = false;
+        string back = null;
+        try
+        {
+            dynamic tags = pres.Tags;
+            if (tags != null)
+            {
+                try { tags.Add(ThemeTagName, json); wrote = true; }
+                catch (Exception)
+                {
+                    // some builds refuse a duplicate name: drop it, then add again
+                    try { tags.Delete(ThemeTagName); } catch (Exception) { }
+                    try { tags.Add(ThemeTagName, json); wrote = true; } catch (Exception) { wrote = false; }
+                }
+                back = ThemeTagRead(pres);
+            }
+        }
+        catch (Exception) { wrote = false; }
+        r["supported"] = wrote && back != null && back.Length > 0;
+        r["chars"] = back == null ? 0 : back.Length;
+        r["exact"] = back == json;
+        r["note"] = r["supported"].Equals(true)
+            ? "the theme is also stored in the deck (tag wocTheme); save the deck so it travels with it"
+            : "WPS refused Presentation.Tags on this build - the theme stays in the local file only";
+        return r;
     }
 
 
@@ -1246,7 +1368,16 @@ internal static partial class Program
             int index = a.Int("index", 0);
             if (index < 1 || index > n) throw new Fail("BAD_ARGS", "-Index " + index + " out of range (1.." + n + ")");
             int at = a.Int("at", n + 1);
-            dynamic s = p.Slides.Item(index).Duplicate();
+            // Slide.Duplicate() goes through the clipboard and leaves the slide there.  Without this
+            // the user's copied text/image is gone AND the next render's clipboard snapshot meets a
+            // slide format it must not read (that killed the helper process - 2026-11-03).  Keep the
+            // simple content, do the duplicate, then put the user's clipboard back.
+            dynamic s = null;
+            using (ClipboardKeeper.Keep())
+            {
+                s = p.Slides.Item(index).Duplicate();
+                ClipboardKeeper.Sync();
+            }
             int newIdx = (int)TryGet(() => (object)s.SlideIndex, n + 1);
             if (at != newIdx) { try { s.MoveTo(at); newIdx = at; } catch (Exception) { } }
             return new Dictionary<string, object> { { "duplicated", index }, { "added", newIdx }, { "slides", n + 1 } };
@@ -1267,7 +1398,8 @@ internal static partial class Program
             p.Slides.Item(index).Delete();
             return new Dictionary<string, object> { { "deleted", index }, { "slides", n - 1 } };
         }
-        throw new Fail("BAD_ARGS", "slide -Action must be add|dup|move|delete");
+        if (action == "reuse") return KReuse(a);
+        throw new Fail("BAD_ARGS", "slide -Action must be add|dup|move|delete|reuse");
     }
 
     /// <summary>Preset layouts.  The five original ones (title / section / bullets / two / end) keep
@@ -1298,7 +1430,8 @@ internal static partial class Program
     private static bool IsFinishedPreset(string p)
     {
         return p == "cards" || p == "stats" || p == "timeline" || p == "process"
-            || p == "compare" || p == "summary" || p == "gallery" || p == "split";
+            || p == "compare" || p == "summary" || p == "gallery" || p == "split"
+            || p == "canvas" || p == "grid";
     }
 
     /// <summary>Preset layouts (borrowed idea from dsh-office's ready-made slides, deliberately simple):
@@ -1952,27 +2085,33 @@ internal static partial class Program
         if (to - from + 1 > 4) throw new Fail("BAD_ARGS", "render at most 4 slides per call (got " + (to - from + 1) + "); use -Overview to see many slides at once, or page through with -From/-To");
 
         List<object> files = new List<object>();
-        for (int k = from; k <= to; k++)
+        // v1.32: Slide.Copy() overwrites the machine-wide clipboard, so the user's content is saved
+        // once for the whole call and put back at the end (helper/shared/ClipboardKeeper.cs).
+        using (ClipboardKeeper.Keep())
         {
-            dynamic slide = p.Slides.Item(k);
-            Bitmap bmp;
+            for (int k = from; k <= to; k++)
             {
-                IDisposable clip = WocLocks.Clipboard(20000);
-                if (clip == null) throw new Fail("BUSY", "the system clipboard is busy (another render is running); retry in a moment");
-                try
+                dynamic slide = p.Slides.Item(k);
+                Bitmap bmp;
                 {
-                    slide.Copy();
-                    Thread.Sleep(250);
-                    bmp = ClipboardBitmap(width);
+                    IDisposable clip = WocLocks.Clipboard(20000);
+                    if (clip == null) throw new Fail("BUSY", "the system clipboard is busy (another render is running); retry in a moment");
+                    try
+                    {
+                        slide.Copy();
+                        ClipboardKeeper.Sync();
+                        Thread.Sleep(250);
+                        bmp = ClipboardBitmap(width);
+                    }
+                    finally { clip.Dispose(); }
                 }
-                finally { clip.Dispose(); }
+                if (bmp == null)
+                    throw new Fail("COM_ERROR", "could not get slide " + k + " as an image from the clipboard (is WPS showing a dialog?)");
+                string png = Path.Combine(outDir, "slide-" + k.ToString(CultureInfo.InvariantCulture) + ".png");
+                bmp.Save(png, ImageFormat.Png);
+                bmp.Dispose();
+                files.Add(png);
             }
-            if (bmp == null)
-                throw new Fail("COM_ERROR", "could not get slide " + k + " as an image from the clipboard (is WPS showing a dialog?)");
-            string png = Path.Combine(outDir, "slide-" + k.ToString(CultureInfo.InvariantCulture) + ".png");
-            bmp.Save(png, ImageFormat.Png);
-            bmp.Dispose();
-            files.Add(png);
         }
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["slides"] = files;
@@ -1987,6 +2126,9 @@ internal static partial class Program
         int cellW = Math.Max(320, Math.Min(720, width / 2));
         List<object> sheets = new List<object>();
         const int perSheet = 6;
+        // v1.32: same clipboard etiquette as render - save the user's content once, put it back at the end.
+        using (ClipboardKeeper.Keep())
+        {
         for (int start = from; start <= to; start += perSheet)
         {
             int end = Math.Min(to, start + perSheet - 1);
@@ -2003,6 +2145,7 @@ internal static partial class Program
                 try
                 {
                     slide.Copy();
+                    ClipboardKeeper.Sync();
                     Thread.Sleep(220);
                     bmp = ClipboardBitmap(cellW);
                 }
@@ -2040,6 +2183,7 @@ internal static partial class Program
             }
             foreach (Bitmap b in cells) b.Dispose();
             sheets.Add(path);
+        }
         }
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["overview"] = sheets;
@@ -2148,6 +2292,12 @@ internal static partial class Program
         if (reset)
         {
             if (File.Exists(path)) File.Delete(path);
+            try
+            {
+                dynamic tags = p.Tags;
+                if (tags != null) tags.Delete(ThemeTagName);
+            }
+            catch (Exception) { }
             return new Dictionary<string, object> { { "reset", true }, { "theme", DeckTheme.Load(p).ToBag() } };
         }
         if (setPath != null)
@@ -2159,20 +2309,28 @@ internal static partial class Program
             Dictionary<string, object> r = new Dictionary<string, object>();
             r["set"] = path;
             r["theme"] = t.ToBag();
+            // v1.32: keep a copy inside the deck as well, so the palette survives a machine move
+            r["tags"] = ThemeTagWrite(p, Json.Write(t.ToBag()), false);
             if (a.Flag("apply", false)) r["applied"] = ApplyThemeAll(p, t);
             return r;
         }
         if (a.Flag("apply", false))
         {
-            DeckTheme t = DeckTheme.Load(p);
+            string src;
+            DeckTheme t = DeckTheme.LoadWithSource(p, out src);
             Dictionary<string, object> r = new Dictionary<string, object>();
             r["theme"] = t.ToBag();
+            r["themeSource"] = src;
             r["applied"] = ApplyThemeAll(p, t);
             return r;
         }
+        string source;
+        DeckTheme cur = DeckTheme.LoadWithSource(p, out source);
         return new Dictionary<string, object> {
             { "path", path },
-            { "theme", DeckTheme.Load(p).ToBag() },
+            { "theme", cur.ToBag() },
+            { "themeSource", source },
+            { "tags", a.Flag("probe", false) ? ThemeTagWrite(p, "", true) : (object)new Dictionary<string, object> { { "note", "run `theme -Probe` to test whether this deck accepts Presentation.Tags" } } },
             { "note", "theme is per deck; set it with -Set <json>, restyle existing slides with -Apply. Defaults: \u6c34\u5229\u6df1\u84dd #1F4E79 + \u91d1 #C99700 + \u5fae\u8f6f\u96c5\u9ed1" }
         };
     }

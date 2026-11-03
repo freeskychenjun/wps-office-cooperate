@@ -283,7 +283,7 @@ internal static partial class Program
                     + KClip(text, 24) + "\" needs about " + Math.Round(need, 0) + "pt in a "
                     + Math.Round(bh, 0) + "pt box even at " + Math.Round(chosen, 1) + "pt");
             }
-            if (chosen < size - 0.01)
+            if (chosen < size - 0.01 && name != null)
             {
                 Dictionary<string, object> d = new Dictionary<string, object>();
                 d["shape"] = name;
@@ -348,6 +348,16 @@ internal static partial class Program
             if (tb == null) return;
             try { tb.TextFrame.VerticalAnchor = anchor; } catch (Exception) { }
         }
+
+        /// <summary>Chart types the layouts painted with shapes (v1.32, canvas / grid).</summary>
+        public List<string> ChartTypes = new List<string>();
+
+        /// <summary>Connector records (v1.32): from / to / connected.begin / connected.end.</summary>
+        public List<object> Edges = new List<object>();
+
+        /// <summary>Where edge labels have been placed (design units), so two labels on the same
+        /// midpoint do not print on top of each other (v1.32).</summary>
+        public List<double[]> LabelSpots = new List<double[]>();
 
         // ---- pictures ----
 
@@ -1150,12 +1160,31 @@ internal static partial class Program
 
         string title = ItemText(a, "title", "");
         bool isSplit = preset == "split";
-        if (!isSplit)
+        bool freeForm = preset == "canvas" || preset == "grid";
+        Bag doc = null;
+        if (freeForm)
+        {
+            doc = KDoc(a);
+            if (doc != null)
+            {
+                string inner = doc.Str("title", null);
+                if (inner != null && inner.Trim().Length > 0) title = inner;
+            }
+        }
+        if (isSplit)
+        {
+            if (title.Length == 0) throw new Fail("BAD_ARGS", "preset \"split\" needs -Title (or \"title\" in the -Items object)");
+        }
+        else if (freeForm)
+        {
+            // canvas / grid may run without a title (a page that is one big diagram)
+            if (title.Trim().Length > 0) p.Head(title, null);
+        }
+        else
         {
             if (title.Length == 0) throw new Fail("BAD_ARGS", "preset \"" + preset + "\" needs -Title (or \"title\" in the -Items object)");
             p.Head(title, null);
         }
-        else if (title.Length == 0) throw new Fail("BAD_ARGS", "preset \"split\" needs -Title (or \"title\" in the -Items object)");
 
         if (preset == "cards") KCards(p, a, KindItems(a, "cards"), title);
         else if (preset == "stats") KStats(p, a, KindItems(a, "stats"), title);
@@ -1165,6 +1194,8 @@ internal static partial class Program
         else if (preset == "summary") KSummary(p, a, KindItems(a, "points"), title);
         else if (preset == "gallery") KGallery(p, a, KindItems(a, "images"), title);
         else if (preset == "split") KSplit(p, a, ItemBag(a), title);
+        else if (preset == "canvas") KCanvas(p, a, doc, title);
+        else if (preset == "grid") KGrid(p, a, doc, title);
         else throw new Fail("BAD_ARGS", "unknown preset: " + preset);
 
         // what actually landed on the slide (read back from WPS, not what we meant to draw)
@@ -1172,6 +1203,13 @@ internal static partial class Program
         r["fontSizeDrops"] = p.Drops;
         r["layout"] = p.Info;
         r["designCanvas"] = "960x540 scaled to " + Math.Round(W, 0) + "x" + Math.Round(H, 0);
+        if (freeForm)
+        {
+            r["chartTypes"] = p.ChartTypes;
+            r["edges"] = p.Edges;
+            r["bodyArea"] = "design units x " + KNum(p.Left, 0) + ".." + KNum(p.Right, 0)
+                + ", y " + KNum(p.BodyTop, 0) + ".." + KNum(p.BodyBottom, 0);
+        }
         if (preset == "gallery")
             r["fit"] = (a.Str("fit", "contain") ?? "contain").Trim().ToLowerInvariant()
                 + ": contain shows every picture whole and centred (nothing is cut); cover crops each picture to its cell";

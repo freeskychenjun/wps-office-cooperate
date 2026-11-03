@@ -292,6 +292,11 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // v1.32: install the OLE message filter before any COM call, so a rejected call while the
+        // user is typing in a cell is retried for up to 6 s instead of failing at once
+        // (helper/shared/MessageFilter.cs). One registration covers every command: all requests run
+        // on this STA thread.
+        MessageFilter.Register();
         Console.OutputEncoding = new UTF8Encoding(false);
         // Detached tray daemon mode: same binary, message-loop instead of a COM request.
         if (args != null && args.Length >= 2 && args[0] == "--tray") return TrayDaemon.Run(args[1]);
@@ -348,6 +353,7 @@ internal static partial class Program
             string msg = Clean(e.Message);
             bool busy = e.HResult == unchecked((int)0x8001010A)   // RPC_E_SERVERCALL_RETRYFLT
                 || e.HResult == unchecked((int)0x80010001)        // RPC_E_CALL_REJECTED
+                || e.HResult == unchecked((int)0x800AC472)        // the app is busy (typing in a cell)
                 || msg.IndexOf("busy", StringComparison.OrdinalIgnoreCase) >= 0
                 || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0;
             response = Err(busy ? "BUSY" : "COM_ERROR", msg + " (0x" + e.HResult.ToString("X8", CultureInfo.InvariantCulture) + ")");
@@ -2134,15 +2140,24 @@ internal static partial class Program
         if (clip == null) throw new Fail("BUSY", "the system clipboard is busy (another render is running); retry in a moment");
         try
         {
-            range.CopyPicture(1, 2); // xlScreen, xlBitmap
-            if (!Clipboard.ContainsImage()) return false;
-            using (Image img = Clipboard.GetImage())
+            // v1.32: the copy below overwrites the machine-wide clipboard, so keep the user's and put
+            // it back on the way out (helper/shared/ClipboardKeeper.cs). Sync() after each write of
+            // ours: it tells the keeper which state is "ours", so a clipboard the user repopulated
+            // meanwhile is left alone.
+            using (ClipboardKeeper.Keep())
             {
-                if (img == null) return false;
-                img.Save(pngPath, ImageFormat.Png);
+                range.CopyPicture(1, 2); // xlScreen, xlBitmap
+                ClipboardKeeper.Sync();
+                if (!Clipboard.ContainsImage()) return false;
+                using (Image img = Clipboard.GetImage())
+                {
+                    if (img == null) return false;
+                    img.Save(pngPath, ImageFormat.Png);
+                }
+                Clipboard.Clear();
+                ClipboardKeeper.Sync();
+                return true;
             }
-            Clipboard.Clear();
-            return true;
         }
         catch (Exception) { return false; }
         finally { clip.Dispose(); }
