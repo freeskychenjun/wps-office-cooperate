@@ -1,4 +1,4 @@
-﻿// v1.13 - paragraph texts from ONE WordOpenXML call.
+// v1.13 - paragraph texts from ONE WordOpenXML call.
 //
 // Field evidence (2026-11-01, a real 61-page / 7334-paragraph / 23-table report):
 //   * doc.Content.Text produced 7328 blocks, misaligned from paragraph 2 on -> the v1.7-v1.10
@@ -39,6 +39,10 @@ internal static partial class Program
     private static List<string> XmlDocTexts(dynamic doc, int total, out string why)
     {
         why = null;
+        // v1.34: long-lived daemon - clear the diagnostics of the previous run up front, otherwise a
+        // failed run would report the previous request's "risky=" note.
+        _xmlNote = null;
+        _xmlRisky = null;
         if (total <= 0) { why = "no paragraphs"; return null; }
 
         string xml;

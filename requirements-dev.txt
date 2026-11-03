@@ -1,0 +1,26 @@
+# Python dependencies of the wps-office-cooperate test suite.
+#
+#   pip install -r requirements-dev.txt
+#
+# The test layer is split in two (see tests/README.md):
+#
+#   fast  layer - pure Python + Windows PowerShell 5.1, no Office at all.
+#                 Needs python-docx (fixture builders + static docx assertions),
+#                 python-pptx (the independent ppt oracle) and openpyxl
+#                 (the Excel regression driver reads workbooks back).
+#                 This is what .github/workflows/tests.yml runs.
+#   wps   layer - drives WPS Office through the skill (`tests\**\run_*.ps1`,
+#                 `tests\**\check_tasks.ps1`). Needs:
+#                   * WPS Office 12.1 (tested: 12.1.0.x, Word/Writer + ET + WPP);
+#                     Microsoft Office is NOT required and is not what the skill targets;
+#                   * pywin32 (COM automation from the helper/daemon smoke tests);
+#                   * Pillow (renders are checked as PNGs);
+#                   * a decrypt tool if the machine encrypts documents transparently
+#                     (`tests\ppt\local.config.json`, see tests/README.md).
+#
+# Versions are floors, not pins: the repo has no lock file and CI only needs the fast layer.
+python-docx>=1.1.0
+python-pptx>=0.6.23
+openpyxl>=3.1.0
+Pillow>=10.0.0
+pywin32>=306; sys_platform == "win32"

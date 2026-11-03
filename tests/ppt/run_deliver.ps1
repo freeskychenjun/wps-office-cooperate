@@ -16,7 +16,7 @@
 param(
     [string]$PythonExe = 'python',
     [string]$OutDir = '',
-    # Left empty on purpose: this machine's FastDycrypt lives under "D:\DSH工作区\...", and
+    # Left empty on purpose: this machine's FastDycrypt lives under "D:\<workspace>\...", and
     # a Chinese literal inside this .ps1 would be read as ANSI and arrive as mojibake.
     # The path is read from local.config.json (UTF-8, gitignored) or passed in.
     [string]$DecryptEngine = '',

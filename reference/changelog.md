@@ -1,6 +1,17 @@
 # 版本历史（changelog）
 
+> **本文件是唯一的版本历史出处**（v1.34 起口径）：`SKILL.md` frontmatter 的 `version`、正文「当前版本」小节、本文件首条、`README.md` 的能力清单、commit message 是发版时需要同步的五处，checklist 见 `docs/release-checklist.md`。其余文档（quirks / acceptance / workflows）只记行为与实测，**不再各留一份全量版本记录**。
+>
 > 自 v1.29（2026-11-02）从 `SKILL.md` 拆出：原主文档前 74 行版本记录约 1.97 万字符，占整份 skill 的 25.5%，每次加载都白付一次上下文。查「某版改了什么 / 为什么这么设计」看这里；主文档只留当前版本的要点。
+
+**版本 v1.34（2026-11-04）**：**工程质量版**（无新功能，只堵已知的坑；起因=一次 4 路静态审查，结论与逐条证据见仓库根 `OPTIMIZATION-PLAN.md`）：
+- **三端包装层去重**：新增 `scripts\woc-app-common.ps1`，把管道客户端/守护进程探测、源码哈希+`csc` 编译、`batch`、daemon-first/one-shot 传输尾段、共享命令体收成一份；`word.ps1` 805→591、`excel.ps1` 792→587、`ppt.ps1` 877→669 行（净 −738/+120）。顺手消掉两处漂移：ppt 的 csc 漏 `-r:Microsoft.CSharp.dll`（靠 csc.rsp 默认项没炸，非有意）、`Start-Daemon` 轮询 40/50 不一致。
+- **挂死类修复**：daemon 管道读加超时（默认取 `-TimeoutSec`；超时返回 `TIMEOUT` + exit 2，不再永久挂起），并加 `serve -Action reset`（按**完整 exe 路径**杀本版本 helper 作恢复通道，绝不按映像名）；**Excel `sheet -Action delete` 删非空表**会触发 WPS 模态确认框、COM 永久阻塞（实测 180 s 超时）——现在只在该次调用临时关 `DisplayAlerts`，返回里给 `usedCells` 提示丢了多少数据（实测 1.2 s 返回，用新增回归用例固定住）；`tasks-*.ps1` 的 split 子进程 `WaitForExit` 加 180 s 上限。
+- **错误判定与可见性**：`exit 2` 改为先解析 JSON 信封再判（文档正文里出现字面 `"ok": false` 不再误判）；`batch` 整批失败时顶层 `ok:false` + 退出码 2，并新增 `okCount/failedCount`；`woc.ps1` 对 PowerShell 参数绑定失败补一段 ASCII `BAD_ARGS` JSON（stderr 仍原样转发）；ppt `check -ExitCode` 在**热 daemon 路径**也生效（旧代码管道命中时直接 exit 0，门禁形同虚设）。
+- **发布安全**：`publish.ps1` 目标必须是 `…\skills\<name>`（否则拒绝，`-Force` 显式放行）、先 staging 再整体切换、新增 `-WhatIf` 干跑；新登记分发文件 `reference\ppt-presets.md`。
+- **编码与 C# 漂移**：`scripts\*.ps1` 全部纯 ASCII（中文字面量/注释改 ASCII 写法），`tests\check_encoding.ps1` 进 fast 层当门禁（PS 5.1 按 ANSI 解析无 BOM 的 .ps1 是既有坑）；Excel/PPT 的 busy 判定补齐中文「忙」/dialog（与 Word 一致）；Excel `chart -Action list` 的 `type` 与 `add` 统一成名字（WPS 返回 int，旧实现只映射 double）；`PipeServer` 的 JSON 转义补全控制字符；Word 侧 `_chunkStats`/`_xmlNote` 静态残留改为每请求重置。
+- **测试**：统一 `tests\run_all.ps1`（fast / wps 两层，逐项 PASS/FAIL/SKIP + 耗时 + 汇总 + 非零退出，`-Only`/`-List`/`-SkipWps`）；GitHub Actions 只跑 fast 层（windows-latest，无需 Office）；`check_normalize` **夹具自给**（新增 `make_normalize_fixture.py` 现场生成 14 表 fixture，不再依赖仓库外乐平语料，克隆即可跑）；新增 **Excel 数据层回归驱动器** `tests\excel\run_data.ps1`（16 组用例 / 228 条断言全过 / 约 7.7 min，oracle 用 openpyxl 独立读回，含 `.xls` 往返与选择性回滚）；修掉 `run_acceptance.ps1` 里早已改名的 `wps.ps1` 引用；新增 `requirements-dev.txt` 与 `tests\README.md`；清理被跟踪的运行时产物与死夹具（`validate-report.json`、`_selftest-revised.docx`、`tests\excel\work\` 9 个死文件）。
+- **文档**：版本单源化（frontmatter `version:` + 当前版本小节 + 本文件唯一历史；修掉 v1.32→v1.33 头条漏更；新增 `docs\release-checklist.md` 五处同步清单）；主文档 **90366 → 82294 字符（−8.0%）**——8 档 preset 契约与示例下沉 `reference\ppt-presets.md`、两条超长速查行拆成「摘要 + 指针」并把实测细节搬进 quirks、参考列表粘连修好（补 changelog/ppt-quirks/ppt-presets 链接）、纯版本注记 146→1；`docs\borrow` 加冻结头、5 个已消费补丁移入 `archive\`、删除失效的 `tools\build_guide.py`；README 补齐 v1.29+ 能力与测试/发布说明。
 
 **版本 v1.33（2026-11-03）**：**Word 表格一键整备：`table -Action plan` + `table -Action normalize` + `render -Table`**。起因是同日中午的会话 `session-a305706b`：一份 29 页 / 14 表的水利自检报告做「题注编号修正 + 表名外提 + 全表加粗边框」，三类小事用了 **127 次工具调用 / 88.6 分钟**。本次把探索/返工压成 1–2 条命令，并把两个真实缺陷在命令内部修掉。
 - **取证（会话日志 token 级归因）**：第 2 轮墙钟 88.57 min → **模型 79.68 min（89.96%）**、工具 8.84 min（9.98%）；其中 **TTFT 57.79 min（65%）**，每步 prompt 均值 21.8 万 token、末步 34.8 万；TTFT 与 prompt 大小相关系数 **0.834**（<150k 均值 4.6 s，>300k 均值 60 s，峰值 94 s）。127 次调用里 **56 次（42.2 min）是试错绕路**，66 次（44.1 min）本可被 plan/normalize/render 吸收；反事实推算 **127 次→6 次、88.6 min→约 3.5 min（25–28×）**，前提是同时守住上下文纪律。⇒ 瓶颈不是 COM 慢，而是「步数 × 每步上下文」。
@@ -119,4 +130,4 @@
 
 **版本 v1.2（2026-10-25）**：PPT 侧补齐"能交付"这一层——`theme`（主色/字体/页脚/页码，一套 JSON 打底）、预设版式重做（封面色带、章节页色块+大数字、真项目符号、**深色底自动白字**、正文框留白给表格/图片）、`render -Overview`（6 页拼一张图并带页码）、`audit`（文字溢出/字号过小/越界/重叠/图过小/空页机械体检）、`align`/`zorder`/`restore`。
 
-**版本 v1.1（2026-10-25）**：新增 **PPT（WPS 演示，`KWPP.Application`）** 支持——预设版式建页、形状级锚定改文字、表格/图片/文本框、演讲备注、逐页渲染核对、文本快照对比。v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）合并而成。版本历史见 [reference/word-acceptance.md](reference/word-acceptance.md)、[reference/excel-acceptance.md](reference/excel-acceptance.md)。
+**版本 v1.1（2026-10-25）**：新增 **PPT（WPS 演示，`KWPP.Application`）** 支持——预设版式建页、形状级锚定改文字、表格/图片/文本框、演讲备注、逐页渲染核对、文本快照对比。v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）合并而成。版本历史见 [word-acceptance.md](word-acceptance.md)、[excel-acceptance.md](excel-acceptance.md)（各版本验收记录；全量历史即本文件）。

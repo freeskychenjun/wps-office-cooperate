@@ -157,149 +157,24 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
-function Write-Error-Json([string]$code, [string]$message) {
-    $payload = @{ ok = $false; error = @{ code = $code; message = $message } }
-    [Console]::Out.Write(($payload | ConvertTo-Json -Depth 6 -Compress))
-    exit 1
-}
-
-function Resolve-FullPath([string]$p) {
-    try { return [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $p)) } catch { return $p }
-}
+# Everything shared with word.ps1 / excel.ps1 lives in woc-app-common.ps1: the JSON error
+# envelope, path resolution, the items-file reader, the resident-daemon client and probe, the
+# source hash + csc build, the batch command and the daemon-first / one-shot transport tail.
+# Dot-sourced (not imported) so its functions and $script:daemonPipe land in THIS script scope.
+. "$PSScriptRoot\woc-app-common.ps1"
 
 # ---------------------------------------------------------------- helper binary
-
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$sourceDir = Join-Path $scriptRoot 'helper\ppt'
-if (-not (Test-Path -LiteralPath $sourceDir)) { Write-Error-Json 'NO_HELPER' ("Helper folder not found: " + $sourceDir) }
-$helperSources = @(Get-ChildItem -LiteralPath $sourceDir -Filter *.cs | Sort-Object Name)
-if ($helperSources.Count -eq 0) { Write-Error-Json 'NO_HELPER' ('No .cs in ' + $sourceDir) }
-# Shared sources (the tray daemon / hint plumbing) compile into every helper.
-$sharedDir = Join-Path $scriptRoot 'helper\shared'
-if (Test-Path -LiteralPath $sharedDir) { $helperSources += @(Get-ChildItem -LiteralPath $sharedDir -Filter *.cs | Sort-Object Name) }
-
-# ---------------------------------------------------------------- resident daemon (v1.15)
-# Same transport as the Word wrapper: a warm helper keeps the COM application and answers request
-# JSON over a named pipe, so a command no longer pays "start exe + attach to WPS + find document".
-$daemonPipe = $null
-
-function Get-DaemonPipeName([string]$shaGen12) { return ('woc-ppt-' + $shaGen12) }
-
-function Invoke-Daemon([string]$payload, [int]$connectMs) {
-    if ($script:daemonPipe -eq $null) { return $null }
-    $pipe = $null
-    try {
-        $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $script:daemonPipe, [System.IO.Pipes.PipeDirection]::InOut)
-        $pipe.Connect($connectMs)
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-        $len = [System.BitConverter]::GetBytes([int]$bytes.Length)
-        $pipe.Write($len, 0, 4)
-        $pipe.Write($bytes, 0, $bytes.Length)
-        $pipe.Flush()
-        $hdr = New-Object byte[] 4
-        $got = 0
-        while ($got -lt 4) {
-            $n = $pipe.Read($hdr, $got, 4 - $got)
-            if ($n -le 0) { return $null }
-            $got += $n
-        }
-        $total = [System.BitConverter]::ToInt32($hdr, 0)
-        if ($total -le 0 -or $total -gt 33554432) { return $null }
-        $buf = New-Object byte[] $total
-        $got = 0
-        while ($got -lt $total) {
-            $n = $pipe.Read($buf, $got, $total - $got)
-            if ($n -le 0) { return $null }
-            $got += $n
-        }
-        return [System.Text.Encoding]::UTF8.GetString($buf)
-    } catch {
-        return $null
-    } finally {
-        if ($pipe) { try { $pipe.Dispose() } catch { } }
-    }
-}
-
-function Start-Daemon([string]$exePath2) {
-    if ($env:WOC_NO_DAEMON -eq '1') { return $false }
-    $probe = '{"cmd":"ping"}'
-    if ($null -ne (Invoke-Daemon $probe 300)) { return $true }
-    try {
-        Start-Process -FilePath $exePath2 -ArgumentList @('--serve', $script:daemonPipe) -WindowStyle Hidden | Out-Null
-    } catch {
-        return $false
-    }
-    for ($i = 0; $i -lt 40; $i++) {
-        Start-Sleep -Milliseconds 100
-        if ($null -ne (Invoke-Daemon $probe 300)) { return $true }
-    }
-    return $false
-}
-
-
-# The cache key covers every source file, so editing any of them rebuilds.
-# Hash of the helper sources -> compile cache dir + daemon pipe name. Get-FileHash over every
-# .cs file costs ~50 ms on each command (measured 2026-11-02), so the shared helper caches it
-# keyed on file count + sizes + newest mtime (any real edit changes one of them).
-$wocCommonPath = Join-Path $PSScriptRoot 'woc-common.ps1'
-if (Test-Path -LiteralPath $wocCommonPath) { . $wocCommonPath }
-if (Get-Command Get-CachedSourceHash -ErrorAction SilentlyContinue) {
-    $sha = Get-CachedSourceHash -App 'ppt' -Sources $helperSources
-} else {
-    
-$hashInput = ($helperSources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
-    
-$shaGen = [System.Security.Cryptography.SHA256]::Create()
-    
-$sha = ([System.BitConverter]::ToString($shaGen.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($hashInput))) -replace '-', '').ToLowerInvariant().Substring(0, 12)
-}
-$cacheDir = Join-Path $env:LOCALAPPDATA ('wps-office-cooperate\ppt-helper-' + $sha)
-$script:daemonPipe = Get-DaemonPipeName $sha
-$exePath = Join-Path $cacheDir 'WppHelper.exe'
-
-
-if (-not (Test-Path -LiteralPath $exePath)) {
-    $csc = $null
-    foreach ($arch in @('Framework64', 'Framework')) {
-        $candidate = Join-Path $env:SystemRoot ("Microsoft.NET\" + $arch + "\v4.0.30319\csc.exe")
-        if (Test-Path -LiteralPath $candidate) { $csc = $candidate; break }
-    }
-    if (-not $csc) { Write-Error-Json 'NO_COMPILER' 'The .NET Framework C# compiler (csc.exe) was not found. Enable ".NET Framework 4.8" in Windows Features.' }
-    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
-    $tempExe = Join-Path $cacheDir ('build-' + $PID + '.exe')
-    $refs = @('-r:System.dll', '-r:System.Core.dll', '-r:System.Drawing.dll', '-r:System.Windows.Forms.dll', '/codepage:65001')
-    $compileLog = & $csc -nologo -optimize+ -target:exe ("-out:" + $tempExe) $refs ($helperSources | ForEach-Object { $_.FullName }) 2>&1 | Out-String
-    if (-not (Test-Path -LiteralPath $tempExe)) {
-        Write-Error-Json 'COMPILE_FAILED' ("csc failed: " + $compileLog.Trim())
-    }
-    Move-Item -LiteralPath $tempExe -Destination $exePath -Force
-}
+# Collect helper\ppt\*.cs + helper\shared\*.cs, hash them, compile on first use; returns the
+# exe path and sets $script:daemonPipe. Why the hash is cached and why the pipe name follows it
+# is documented in woc-app-common.ps1.
+$exePath = Initialize-WocHelper -App 'ppt' -ScriptRoot $PSScriptRoot -ExeName 'WppHelper.exe'
 
 # ---------------------------------------------------------------- request
 
 # ---------------------------------------------------------------- batch (v1.19)
-# Run many requests over ONE pipe connection from a single process start. The CLI path pays a
-# PowerShell start + wrapper parse (~220 ms) per command, while a pipe round trip is 1-15 ms
-# (measured 2026-11-02), so "one page = 15 commands" becomes one tool call instead of fifteen.
-#   woc.ps1 ppt batch -Ops ops.json
-#   ops.json: {"ops":[{"cmd":"...","doc":"...","sheet":"..."}, ...]}
-if ($Command -eq 'batch') {
-    if (-not $Ops) { Write-Error-Json 'BAD_ARGS' 'batch needs -Ops <ops.json> (an object with an ops array)' }
-    $opsPath = Resolve-FullPath $Ops
-    if (-not (Test-Path -LiteralPath $opsPath)) { Write-Error-Json 'BAD_ARGS' ('ops file not found: ' + $opsPath) }
-    $rawOps = [System.IO.File]::ReadAllText($opsPath, [System.Text.Encoding]::UTF8)
-    try { $parsedOps = $rawOps | ConvertFrom-Json }
-    catch { Write-Error-Json 'BAD_ARGS' ('ops file is not valid JSON: ' + $_.Exception.Message) }
-    if ($parsedOps.PSObject.Properties.Name -contains 'ops') { $opList = @($parsedOps.ops) } else { $opList = @($parsedOps) }
-    if ($opList.Count -eq 0) { Write-Error-Json 'BAD_ARGS' 'batch ops is empty' }
-    if (-not (Get-Command Invoke-WocBatch -ErrorAction SilentlyContinue)) {
-        $wocCommonPath2 = Join-Path $PSScriptRoot 'woc-common.ps1'
-        if (Test-Path -LiteralPath $wocCommonPath2) { . $wocCommonPath2 }
-    }
-    $batchResult = Invoke-WocBatch -PipeName $script:daemonPipe -ExePath $exePath -Ops $opList
-    [Console]::Out.Write(($batchResult | ConvertTo-Json -Depth 12 -Compress))
-    exit 0
-}
+# One process start for N requests: see Invoke-WocBatchCli in woc-app-common.ps1 for the why,
+# the ops-file shape ({"ops":[...]}) and the ok/failed envelope rule.
+if ($Command -eq 'batch') { Invoke-WocBatchCli -Ops $Ops -ExePath $exePath }
 
 $request = @{}
 $request['cmd'] = $Command
@@ -309,22 +184,7 @@ $formatFields = @{
     Font = 'font'; Size = 'size'; Bold = 'bold'; Italic = 'italic';
     Color = 'color'; Align = 'align'; Fill = 'fill'
 }
-function Add-Format-Fields($bound) {
-    foreach ($key in $formatFields.Keys) {
-        if (-not $bound.ContainsKey($key)) { continue }
-        $value = $bound[$key]
-        if ($value -is [System.Management.Automation.SwitchParameter]) { $value = [bool]$value }
-        if ($null -ne $value -and "$value" -ne '') { $request[$formatFields[$key]] = $value }
-    }
-}
-
-function Read-Items-Json([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $path) }
-    $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $path), [System.Text.Encoding]::UTF8)
-    $parsed = $raw | ConvertFrom-Json
-    if ($parsed.PSObject.Properties.Name -contains 'items') { return ,@($parsed.items) }
-    return ,@($parsed)
-}
+function Add-Format-Fields($bound) { Add-WocMappedFields -Bound $bound -Request $request -Map $formatFields }
 
 function Read-Items-Doc([string]$path) {
     # v1.32: canvas / grid / reuse pass ONE document object (title + items/rows + edges +
@@ -338,14 +198,7 @@ function Read-Items-Doc([string]$path) {
 
 switch ($Command) {
     'open' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'open needs -Doc' }
-        # A takeover must be visible: default to showing the window (an earlier hidden open left the
-        # user staring at nothing while the helper edited a window they could not see). Pass -Show:$false
-        # explicitly if a hidden session is really what you want.
-        $request['show'] = $true
-        if ($PSBoundParameters.ContainsKey('Show')) { $request['show'] = [bool]$Show }
-        $request['readOnly'] = [bool]$ReadOnly
-        if ($NoHint) { $request['noHint'] = $true }
+        Add-WocOpenFields -Request $request -Bound $PSBoundParameters -Doc $Doc -ReadOnly:$ReadOnly -NoHint:$NoHint
     }
     'read' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'read needs -Doc' }
@@ -449,7 +302,7 @@ switch ($Command) {
         if ($H -gt 0) { $request['h'] = $H }
     }
     'split' {
-        # 拆成分册：每个 chunk 存成一个独立文稿，源稿不动
+        # split into volumes: each chunk becomes its own deck, the source deck is left untouched
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'split needs -Doc' }
         if (-not $Chunks) { Write-Error-Json 'BAD_ARGS' 'split needs -Chunks "1-20,21-45,46-80"' }
         if (-not $Out) { Write-Error-Json 'BAD_ARGS' 'split needs -Out <folder>' }
@@ -459,7 +312,7 @@ switch ($Command) {
         if ($DryRun) { $request['dryRun'] = $true }
     }
     'merge' {
-        # 合并多稿：把 -Sources 的页依次插到目标稿（-After 之后，默认追加到末尾）
+        # merge decks: insert the -Sources slides into the target after -After (default: append)
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'merge needs -Doc <target deck>' }
         if ($Items) {
             # a JSON file may hold either {"sources":[...]} or {"items":[{...}]}
@@ -690,51 +543,18 @@ switch ($Command) {
         if ($Since) { $request['since'] = $Since } else { $request['since'] = 'last' }
     }
     'save' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'save needs -Doc' }
-        if ($As) { $request['as'] = Resolve-FullPath $As }
+        Add-WocSaveFields -Request $request -Doc $Doc -As $As
     }
     'serve' {
-        $act = if ($Action) { $Action.ToLowerInvariant() } else { 'start' }
-        if ($act -eq 'stop') {
-            $null = Invoke-Daemon '{"cmd":"daemon-stop"}' 800
-            $serveOut = @{ ok = $true; cmd = 'serve'; result = @{ action = 'stop'; pipe = $script:daemonPipe; note = 'stop requested; the daemon exits after answering' } }
-            [Console]::Out.Write(($serveOut | ConvertTo-Json -Depth 6 -Compress))
-            exit 0
-        }
-        if ($act -eq 'status') {
-            $alive = ($null -ne (Invoke-Daemon '{"cmd":"ping"}' 300))
-            $serveOut = @{ ok = $true; cmd = 'serve'; result = @{ action = 'status'; running = $alive; pipe = $script:daemonPipe } }
-            [Console]::Out.Write(($serveOut | ConvertTo-Json -Depth 6 -Compress))
-            exit 0
-        }
-        $okStart = Start-Daemon $exePath
-        if ($okStart) {
-            $serveOut = @{ ok = $true; cmd = 'serve'; result = @{ action = 'start'; started = $true; pipe = $script:daemonPipe } }
-        } else {
-            $serveOut = @{ ok = $false; error = @{ code = 'DAEMON_FAILED'; message = 'the resident helper did not come up; commands still work through the one-shot path' } }
-        }
-        [Console]::Out.Write(($serveOut | ConvertTo-Json -Depth 6 -Compress))
-        exit 0
+        # Resident helper control: -Action start|stop|status (default start). Shared body.
+        Invoke-WocServe -Action $Action -ExePath $exePath
     }
     'close' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'close needs -Doc' }
-        $request['save'] = [bool]$Save
+        Add-WocCloseFields -Request $request -Doc $Doc -Save:$Save
     }
     'hint' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'hint needs -Doc' }
-        if ($HintTag) { $request['tag'] = $HintTag }
-        if ($Bar) { $request['bar'] = $Bar }
-        if ($Text) { $request['text'] = $Text }
-        if ($Clear) { $request['clear'] = $true }
-        if ($Toast) { $request['toast'] = $true }
-        if ($Sound) { $request['sound'] = $true }
-        if ($Quiet) { $request['quiet'] = $true }
-        # -Tray: keep a resident indicator icon; the daemon restores via this same script.
-        if ($Tray) { $request['tray'] = $true; $request['wrapper'] = $PSCommandPath }
-        # v1.28: the on-slide badge is deck CONTENT (a manual Ctrl+S would save it), so it is
-        # OPT-IN here; -NoSlideMark explicitly removes one that is already showing.
-        if ($SlideMark) { $request['slideMark'] = $true }
-        elseif ($NoSlideMark) { $request['slideMark'] = $false }
+        # Shared body (woc-app-common.ps1); ppt adds the opt-in on-slide badge.
+        Add-WocHintFields -Request $request -Doc $Doc -HintTag $HintTag -Bar $Bar -Text $Text -Wrapper $PSCommandPath -Clear:$Clear -Toast:$Toast -Sound:$Sound -Quiet:$Quiet -Tray:$Tray -SlideMark:$SlideMark -NoSlideMark:$NoSlideMark
     }
     'finish' {
         if ($Note) { $request['note'] = $Note }
@@ -831,47 +651,19 @@ $paramCommandSkips = @{
     '*' = @('ExitCode')
     'text' = @('Expect', 'Text', 'TextFile', 'Shape', 'ShapeIdx', 'Slide')
 }
-$paramCheckPath = Join-Path $PSScriptRoot 'param-check.ps1'
-if (Test-Path -LiteralPath $paramCheckPath) {
-    . $paramCheckPath
-    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Slide = 0; ShapeIdx = 0; L = -1; T = -1; W = 0; H = 0 }
-Test-ParamConsumption -Command $Command -Bound $PSBoundParameters -Request $request `
-        -Aliases $paramAliases -FormatFields $formatFields -CommandSkips $paramCommandSkips -DefaultValues $paramDefaultValues
-}
+Invoke-WocParamCheck -ScriptRoot $PSScriptRoot -Command $Command -Bound $PSBoundParameters -Request $request `
+    -Aliases $paramAliases -FormatFields $formatFields -CommandSkips $paramCommandSkips -DefaultValues @{ From = 1; Count = 0; Index = 0; Max = 200; Slide = 0; ShapeIdx = 0; L = -1; T = -1; W = 0; H = 0 }
 $json = $request | ConvertTo-Json -Depth 12 -Compress
 
-if ($Command -ne 'serve' -and $env:WOC_NO_DAEMON -ne '1') {
-    $daemonText = Invoke-Daemon $json 900
-    if ($null -ne $daemonText) {
-        [Console]::Out.Write($daemonText)
-        if ($daemonText -match '"ok"\s*:\s*false') { exit 2 }
-        exit 0
-    }
-}
-$work = Join-Path $env:TEMP ('wps-office-cooperate-ppt-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $work | Out-Null
-$requestPath = Join-Path $work 'request.json'
-$responsePath = Join-Path $work 'response.json'
-[System.IO.File]::WriteAllText($requestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-
-# ---------------------------------------------------------------- run
-
-$p = Start-Process -FilePath $exePath -ArgumentList @($requestPath, $responsePath) -PassThru -NoNewWindow
-if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-    try { $p.Kill() } catch { }
-    Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
-    Write-Error-Json 'TIMEOUT' ('The helper did not answer within ' + $TimeoutSec + ' s. WPS may be showing a dialog; close it and try again.')
-}
-if (-not (Test-Path -LiteralPath $responsePath)) {
-    Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
-    Write-Error-Json 'INTERNAL' ('The helper exited (code ' + $p.ExitCode + ') without writing a response.')
-}
-$text = [System.IO.File]::ReadAllText($responsePath, [System.Text.Encoding]::UTF8)
-Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
-[Console]::Out.Write($text)
-if ($text -match '"ok"\s*:\s*false') { exit 2 }
-if ($Command -eq 'open') { $null = Start-Daemon $exePath }
-# -ExitCode turns `check` into a gate: a non-zero blocker count fails the call, so a
-# script (or CI) can refuse to ship the deck without parsing the JSON.
-if ($ExitCode -and $text -match '"blocker"\s*:\s*[1-9]') { exit 3 }
+# Transport: resident daemon first, then one-shot - both live in woc-app-common.ps1 and both hand
+# back the response text, so the exit-code rules below cover both transports.
+# NOTE: this variable must NOT be called $text - PowerShell variable names are case-insensitive, so
+# $text IS the [string]$Text parameter and assigning $null to it stores '' instead, which makes the
+# $null test below false and silently skips the one-shot fallback.
+$responseText = Invoke-WocDaemonFirst -Command $Command -Json $json -TimeoutSec $TimeoutSec
+if ($null -eq $responseText) { $responseText = Invoke-WocOneShot -App 'ppt' -Command $Command -ExePath $exePath -Json $json -TimeoutSec $TimeoutSec }
+# -ExitCode turns `check` into a gate: a non-zero blocker count fails the call, so a script (or
+# CI) can refuse to ship the deck without parsing the JSON. Applying it AFTER the transport merge
+# is the point: on the warm-daemon path the old code exited 0 before this line was ever reached.
+if ($ExitCode -and $responseText -match '"blocker"\s*:\s*[1-9]') { exit 3 }
 exit 0

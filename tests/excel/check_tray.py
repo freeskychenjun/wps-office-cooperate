@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -15,6 +16,24 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(__file__).resolve().parents[2]
 EXCEL = ROOT / "scripts" / "excel.ps1"
 SRC = ROOT / "tests" / "excel" / "work" / "test.xlsx"
+
+FIXTURE_NOTE = (
+    "The old tracked fixture tests/excel/work/test.xlsx was removed (dead residue cleanup): "
+    "make_workbook.py builds the regression fixture instead, so this acceptance check still "
+    "runs from a clean clone."
+)
+
+
+def ensure_fixture():
+    if SRC.exists():
+        return SRC
+    out = Path(tempfile.gettempdir()) / "woc-excel-check-fixture.xlsx"
+    if not out.exists():
+        builder = ROOT / "tests" / "excel" / "make_workbook.py"
+        subprocess.run([sys.executable, str(builder), "--out", str(out)], check=True)
+    return out
+
+
 WORK = ROOT / ".tmp"
 COPY = WORK / "tray-check.xlsx"
 STATE = Path(os.environ["LOCALAPPDATA"]) / "wps-office-cooperate" / "tray-excel.json"
@@ -69,7 +88,9 @@ def external_close(progid, path):
     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
                     "-ProgId", progid, "-Path", str(path)], capture_output=True, timeout=120)
 def main():
+    global SRC
     WORK.mkdir(exist_ok=True)
+    SRC = ensure_fixture()
     try:
         shutil.copyfile(SRC, COPY)
     except PermissionError:

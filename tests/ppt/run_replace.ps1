@@ -21,7 +21,7 @@ param(
     # so python-pptx cannot read what WPS saved.  FastDycrypt (offline algorithm, ~9 s
     # per file, any format) is the default way out; point -DecryptEngine elsewhere if
     # this machine does not have it.  The old disguise-reader route is the fallback.
-    # Left empty on purpose: this machine's FastDycrypt lives under "D:\DSH工作区\...", and a
+    # Left empty on purpose: this machine's FastDycrypt lives under "D:\<workspace>\...", and a
     # Chinese literal inside this .ps1 would be read as ANSI and arrive as mojibake.
     [string]$DecryptEngine = '',
     [string]$DecryptScript = "$env:USERPROFILE\.agents\skills\decrypt-office-pdf\decrypt-files.ps1",
@@ -46,7 +46,7 @@ $Utf8 = New-Object System.Text.UTF8Encoding($false)
 if (-not $OutDir) { $OutDir = Join-Path $Root 'out' }
 
 # Machine-local tool paths come from tests/ppt/local.config.json (UTF-8, gitignored):
-# this machine's FastDycrypt lives under "D:\DSH工作区\...", and a Chinese literal inside
+# this machine's FastDycrypt lives under "D:\<workspace>\...", and a Chinese literal inside
 # this .ps1 would be read as ANSI and arrive as mojibake.
 if (-not $DecryptEngine) {
     $cfgPath = Join-Path $Root 'local.config.json'
@@ -128,8 +128,11 @@ function Publish-DeckForCheck {
             -InPlace -DeleteBackupAfterSuccess -NoPause -NoLog | Out-Null
     }
     elseif (Test-Path -LiteralPath $DecryptScript) {
+        # The disguised reader's folder is a Chinese name on this machine; build the wildcard
+        # from code points so this file stays pure ASCII (PS 5.1 reads BOM-less .ps1 as ANSI).
+        $disguise = [string][char]0x53F3 + [char]0x952E + [char]0x89E3 + [char]0x5BC6
         Get-Process powerpnt -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -like '*右键解密*' } |
+            Where-Object { $_.Path -like ('*' + $disguise + '*') } |
             ForEach-Object { Write-Host '    killing a stray disguised powerpnt'; Stop-Process -Id $_.Id -Force }
         & powershell -NoProfile -ExecutionPolicy Bypass -File $DecryptScript $plain | Out-Null
     }

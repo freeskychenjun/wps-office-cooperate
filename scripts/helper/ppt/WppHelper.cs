@@ -407,7 +407,9 @@ internal static partial class Program
                 || e.HResult == unchecked((int)0x80010001)        // RPC_E_CALL_REJECTED
                 || e.HResult == unchecked((int)0x800AC472)        // the app is busy (a dialog, a repaint)
                 || msg.IndexOf("busy", StringComparison.OrdinalIgnoreCase) >= 0
-                || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0;
+                || msg.IndexOf("dialog", StringComparison.OrdinalIgnoreCase) >= 0
+                || msg.IndexOf("\u5fd9", StringComparison.Ordinal) >= 0            // busy, in Chinese
+                || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0; // dialog, in Chinese
             response = Err(busy ? "BUSY" : "COM_ERROR", msg + " (0x" + e.HResult.ToString("X8", CultureInfo.InvariantCulture) + ")");
             if (!busy) { try { _app = null; } catch (Exception) { } }
         }

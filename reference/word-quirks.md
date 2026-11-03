@@ -77,3 +77,20 @@
 | **`fillgaps` 原语全可用** | `Range.Information(3)`=页码、`(6)`=页内纵向 pt、`(12)`=是否在表内；`Paragraph.OutlineLevel`（10=正文）；`Section.PageSetup.PageHeight/BottomMargin/TopMargin`；`doc.Repaginate()`；`doc.ComputeStatistics(2)`=页数；`Range.FormattedText` 可赋值搬运 | 判据：块前段 `OutlineLevel==10` 且 块首行页码 > 前段页码 且 `gap=(PageHeight-BottomMargin)-前段Information(6)-20 ≥ max(90, 文本高度*12%)`；块后首段非空/正文/无图/非题注/不在表内 |
 | **`-DryRun` 的 moves 是预测** | 同一份 4 页文档：dryRun 报 2 处（gap 124.2 / 210.7），实跑搬了 2 段但表格那处 gap 变成 268.3（先搬的一段改变了后面分页） | dryRun 每个块只报**第一段**；实跑按 `maxMoves` 连搬并重新测量。报告里别承诺"dryRun 几条就搬几条" |
 | **搬完段落数可能 ±1** | 被搬的那段如果是**文档最后一段**，删除时段末标记被 Word 保留 → 段数 +1、末尾多一个空段 | 属正常（文档必须以段落标记结尾）；`result.paragraphs` 会 +1，别据此判断"搬坏了" |
+
+## 2026-11-03 · v1.33 表格整备（`table -Action plan` / `normalize` / `render -Table`）
+
+> v1.34 从 `SKILL.md` 的 `table` 速查行下沉（该行 1.9 千字符，曾是"changelog 第二现场"）。主文档现在只留参数与一句话坑位，实测事实全部收在这里。
+
+| 事实 | 实测表现 | 用法 / 判据 |
+|---|---|---|
+| **`-Action plan` 的完整返回** | 每表 `pages/rows/columns`、题注 `pos`（`above`/`in-table`/`below`）`para/page/text`、`borders[outer,inner]`、`tblStyle`、`tblW`、`gridCols`（pt）、`fontSize`；`risks[]` = `captionInFirstRow`/`bordersNotThick`/`breakBefore`/`noStyle`/`noBorders`/`pctWidths`/`gridOverflow`/`multipageWithoutHeaderRepeat`/`captionMoveRisk`/`layoutRisk`；`captions[]`/`references[]`/`issues[]` 与 `captions` 命令**同一解析器**（两处结论永不打架）；`renumber` 只给**候选**映射 `items{from,to,unique,basis}`/`refs{to,ambiguous}` | 一条只读命令给全（fixture 4069 段 / 14 表：plan 3.5–6.9 s），**可在只读文档上跑**。这些字段以前只能自己解 XML 才看得到 |
+| **`normalize` 的固定管线** | 题注外提 → 题注空白规范化（`-Gap 2`，**只统一「编号与题名」之间**，不动「标签与编号」间距）→ 可选重编号（需 `-Plan <file>` 且 `approved:true`）→ 加粗边框（WordOpenXML 列宽快照/恢复）→ 跨页表头 → 自检。逐表隔离（单表失败只回滚该表）、整条命令**一个撤销单元**、**绝不隐式 save** | 开关：`-DryRun` / `-Table n` / `-NoCaptions` / `-NoBorders` / `-NoHeaderRepeat` / `-Gap` / `-Borders thick` / `-Fit keep\|window\|content` / `-Plan` / `-Verify` / `-CutPaste` |
+| **先 plan 再 normalize，别逐条小命令拼** | 2026-11-03 实测：同一份 14 表报告用旧做法 **127 次调用 / 88.6 min**，其中 43 步是勘探与返工；新流程 7 条命令 ≈44 s | 单表小活（只提一个题名）才用 `-Action caption -Table n -Borders thick` / `-Action header-repeat` / `-Action rows` |
+| **表名外提：不承诺** | 只在 `before-para`（表前一段段末标记**前**插 CR）上做，**回读「题注页码 == 表起始页」**才接受；普通段落后 / 手动分页符前的表通常可提（实测 T1/T7 成功）。`table-para` / `range-insert` / `table-start` 三种写法实测会把题注插进上一节或表格第一格 | 表前是**分节符**（横向节首等）时 WPS 没有可用原语 → `needsHuman{captionMoved:"wps-section-start"}`，**不重试、不再研究**；彻底解决靠人工把分节符剪到题注之后，或用微软 Word |
+| **「删表 + `InsertXML` 放回」会把 Writer 转死** | cut-paste 在 WPS 12.1 上实测 100% CPU、COM 全挂、只能杀进程（用户当时已改用 Word，其文档未受影响） | 默认**禁用**，只在真 Word 或显式 `-CutPaste` 时尝试 |
+| **缺 `w:tblBorders` = 写边框就重排布局** | 触发条件不是"没样式"也不是"宽度是百分比"（磁盘上 `tblW/tcW` 本来就是 pct），而是该表 XML 里**没有 `<w:tblBorders>` 元素**：第一次写边框迫使 WPS 重建整表布局、按当前渲染宽度重推 `w:gridCol`（fixture 里 T3 18 列 fixed 肉眼变宽 16%、T9 漂 −30 dxa；有 `tblBorders` 的 12 张纹丝不动）。破坏力量级由「有无 `tblStyle`」+「宽度 pct/dxa」决定 | `normalize` 写前快照、写后比对（`gridCol` 漂移 >2% 即恢复：`PreferredWidth` + 逐列 `Width = dxa/20`，再读 XML 复核）；**已达标的表跳过**（实测 14 张里 8 张跳过、6 张真写） |
+| **`Column.Width` 读不出真实列宽** | WPS 对 autofit 列返回 `9999999`（`wdUndefined`），`table -Action format` 因此全是 9999999 | 列宽只能从 `doc.Content.WordOpenXML` 取（整篇约 0.16 s）；`plan` 的 `gridCols` 就是这条路 |
+| **`Rows.Item(r).Range.ParagraphFormat` 抛 `0x800A1767`** | 老实现走它、异常被 `catch {}` 吞掉 ⇒ 报成功但一行没落上 | 逐行走选区：`Cell(r,1).Range.Select()` + `Selection.MoveEnd(10,1)`，串 `Selection` 写 `KeepWithNext`/`AllowBreakAcrossPages` 并**逐行回读**；不接受则整条命令 `ok:false`（`KEEPTOGETHER_FAILED` + `error.detail` 点名行号） |
+| **`render -Table n`** | 用 `PageSpanOf` 自动渲该表所跨页（含题注页），不再整页翻 | 一次一张图看完，别把同一页读 7 次（见 SKILL.md「Word 长任务的上下文纪律」） |
+| **验收数字（fixture 副本 / WPS 12.1 / 4069 段 / 14 表）** | plan 6.9 s、dry-run 4.8 s、全量 normalize 17.3 s、plan-after 6.7 s、`render -Table`×4 各 3.2 s；`captionsMoved 2`（T1/T7，method=before-para）、`captionsMovedFailed 2`（T3/T9 → needsHuman）、`spacesNormalized 12`、`bordersApplied 6 / skipped 8`、`widthsRestored 1`、`headerRepeated 1`；`verification`：`bordersNotThick 0`、`multipageWithoutHeaderRepeat 0`、`captionPageMismatch 0` | `paragraphDelta -2` 属正常（WPS 把表行也算段落：删 2 个题名行 −4、插 2 个题注段 +2）；列宽门禁可用 `cmp_dump.py --max-drift-pct 2`（负向对照 0.275% 能拦下） |

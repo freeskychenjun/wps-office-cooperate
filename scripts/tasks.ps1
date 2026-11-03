@@ -458,7 +458,7 @@ function Invoke-Plan {
 # ---------------------------------------------------------------- ranges
 
 # Build ranges.json from the heading paragraphs of a read.json.
-#   -Styles "标题 1"        : comma list of style names, highest level first (chapter level = first)
+#   -Styles "Heading 1"     : comma list of style names, highest level first (chapter level = first)
 #   -Pattern "<regex>"      : fallback for documents without heading styles (matches the whole title)
 #   -SkipIfContains "..."   : comma list of substrings that mark a table-of-contents line (skip it)
 function Invoke-Ranges {
@@ -468,7 +468,7 @@ function Invoke-Ranges {
     $items = @($readJson.result.items)
     $styleList = @()
     if ($Styles) { $styleList = @($Styles.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-    if ($styleList.Count -eq 0 -and -not $Pattern) { throw 'ranges needs -Styles "标题 1" or -Pattern "<regex>"' }
+    if ($styleList.Count -eq 0 -and -not $Pattern) { throw 'ranges needs -Styles "<style name>" or -Pattern "<regex>"' }
     $skip = @()
     if ($SkipIfContains) { $skip = @($SkipIfContains.Split('|') | Where-Object { $_ }) }
 
@@ -506,7 +506,7 @@ function Invoke-Ranges {
         [void]$rangeOut.Add([ordered]@{ id = ('ch' + ($k + 1)); title = [string]$chapters[$k].text; from = $from; to = $to })
     }
     Write-Json $Out @($rangeOut)
-    Write-Output ('ranges: ' + $out.Count + ' chapter(s) -> ' + $Out)
+    Write-Output ('ranges: ' + $rangeOut.Count + ' chapter(s) -> ' + $Out)
     foreach ($r in $rangeOut) { Write-Output ('  ' + $r.id + ' ' + $r.from + '..' + $r.to + '  ' + $r.title) }
 }
 # ---------------------------------------------------------------- selftest
@@ -534,7 +534,6 @@ function Invoke-Selftest {
     $orig = [string]$byPara[1]
     $cur = $orig.Replace('abc', 'abcX').Replace('def', 'defY')
     $span = Get-MinimalReplace $orig $cur
-    $round = $cur.Substring(0, $span.find.Length)
     if (-not ($orig.Substring(0, $orig.IndexOf($span.find)) + $span.replace + $orig.Substring($orig.IndexOf($span.find) + $span.find.Length) -eq $cur)) {
         [void]$fails.Add('minimal replace does not round-trip')
     }

@@ -1,4 +1,4 @@
-﻿# wps-office-cooperate shell-free entry point (v1.16).
+# wps-office-cooperate shell-free entry point (v1.16, error envelope v1.34).
 #
 #   woc.ps1 <word|excel|ppt> <command> [flags...]
 #
@@ -15,6 +15,13 @@
 #
 # It still spawns the real wrapper with -Mta, because the ~2 s tax measured on this machine is
 # STA apartment initialization, not PowerShell itself (see woc.cmd and SKILL.md for the numbers).
+#
+# v1.34: the child's stderr is staged to a temp file and replayed after it exits. PowerShell
+# parameter-binding failures (bad command name / unknown flag / bad ValidateSet value) happen
+# BEFORE the wrapper's own error handling, so they normally leave stdout empty and print host text
+# to stderr - the one common misuse that used to break the "stdout is always one JSON object"
+# contract. For that class we now also emit an ASCII BAD_ARGS envelope, so a caller can always
+# parse stdout. Everything else (JSON responses, warnings, exit codes) is passed through unchanged.
 
 $app = $args[0]
 if (-not $app) {
@@ -32,5 +39,24 @@ if ($rest.Count -eq 0) {
     exit 1
 }
 
-& powershell -Mta -NoProfile -ExecutionPolicy Bypass -File $target @rest
-exit $LASTEXITCODE
+$errFile = Join-Path $env:TEMP ('woc-err-' + [guid]::NewGuid().ToString('N') + '.txt')
+$code = 0
+$errText = ''
+try {
+    & powershell -Mta -NoProfile -ExecutionPolicy Bypass -File $target @rest 2> $errFile
+    $code = $LASTEXITCODE
+} finally {
+    if (Test-Path -LiteralPath $errFile) {
+        # PS 5.1 writes redirected native stderr in the console/ANSI code page, hence Default here.
+        try { $errText = [System.IO.File]::ReadAllText($errFile, [System.Text.Encoding]::Default) } catch { }
+        try { Remove-Item -Force -LiteralPath $errFile } catch { }
+    }
+}
+if ($errText) { [Console]::Error.Write($errText) }
+
+$bindingFailure = ($errText -match 'ParameterArgumentValidationError|Cannot validate argument|Missing an argument for parameter|AmbiguousParameter|A parameter cannot be found')
+if ($code -ne 0 -and $bindingFailure) {
+    $msg = 'invalid command or parameter for the ' + $app + ' wrapper (see stderr for the PowerShell binding detail)'
+    [Console]::Out.Write('{"ok":false,"error":{"code":"BAD_ARGS","message":"' + $msg + '"}}')
+}
+exit $code

@@ -1,0 +1,34 @@
+name: tests
+
+# Only the offline (fast) layer runs in CI: it needs no Office installation.
+# The WPS layer is end-to-end COM automation and is started by hand
+# (`powershell -File tests\run_all.ps1 -Layer wps`, see tests/README.md).
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    name: fast layer (no WPS)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Run fast layer
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run_all.ps1 -Layer fast

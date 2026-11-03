@@ -1,5 +1,9 @@
 # dsh-office 借鉴清单：研究结论与落地状态
 
+> **已冻结（2026-11-04）**：本目录是 2026-11-02 对上游 `dsh-office` **v1.2.0** 的一次性研究快照，借鉴项已于 v1.29–v1.32 全部落地。**此后不再更新、不再作为技术依据**——上游一演进，这里必然过期，需要新结论请重新研究（新报告另开目录），不要在本目录续写。
+> `w00–w04` 五份域报告保留可查（31 万字符原始产出）；已消费完的 `skill-*-v13x.md` 补丁片段已移入 [`archive/`](archive/)（历史留档，不再维护）。
+> 版本事实以 [reference/changelog.md](../../reference/changelog.md) 为准，WPS 行为以 `reference/*-quirks.md` 为准，交付流程以 `SKILL.md` 为准。
+
 > 研究日期 2026-11-02 ｜ 对象 [`copylee711/dsh-office`](https://github.com/copylee711/dsh-office) v1.2.0（MIT，C# helper + TS 插件，同时支持微软 Office 与 WPS）
 > 本机 skill：`wps-office-cooperate` v1.28 → v1.29 ｜ 环境：Windows + WPS 12.0/12.1.0.29161（`KWPS`/`KET`/`KWPP`）
 > 本目录下五份域报告是本次研究的原始产出（约 31 万字符），本文是**结论层**：抄什么、不抄什么、WPS 实测结论、落地到哪一步。
@@ -120,7 +124,7 @@ dsh-office 与我们做的是**同一件事的两条路线**：它是「DSH 插�
 | PPT | `crop`（focus 套版）、`connect`（框图连线）、`smartart`、`bg`（纹理/背景）、`anim`（切换/入场）、`chart` 趋势线/雷达/标签/图例 | `AddConnector`+`BeginConnect/EndConnect` 可用；`AddSmartArt` 可建**但节点写不进**（`AllNodes` E_FAIL）；裁切 `CropLeft` **单位是点**（比例会被存下但不渲染）、裁完改 W/H 会洗掉裁切；`OneColorGradient` 回读不可信 | SmartArt 节点文字、`radar` 真渲染（名义支持）、`-Arrow both` 起始箭头未生效——三项都是 WPS 硬限制，已如实标注而非假称成功 |
 | 基础设施 | v1.1–v1.28 changelog 拆出（主文档少读 1.93 万字符）、`publish.ps1` 白名单补 `changelog.md`/`ppt-quirks.md`、新增"daemon 握死引用"故障排查条目 | 杀掉 WPS 进程后 daemon 会握着死 COM 引用 ⇒ 每条命令报 `RPC 服务器不可用`，`serve -Action stop` 后自愈 | MessageFilter 忙重试（~30 行，P0 未做）、参数忽略写进 JSON 返回值、孤儿隐藏实例清扫、Excel render 后恢复用户剪贴板、Word `fill_gaps`/`insert_diagram`、PPT 成品版式层（22 kind + 主题 token，最大差距，估 4–6 人日） |
 
-**下一步（按价值/成本排序，均已在各域报告 §3 里给过依据）**：① ~~Word `fill_gaps` + 两处实现缺陷~~ → **v1.30 已完成**（`fillgaps` 新命令 + `noSplitWords` 极性修正 + `table -KeepTogether` 逐行回读；细节见 `docs/borrow/skill-word-v130.md`）；~~② Excel `replace` + `pivot` 日期分组~~ → **v1.31 已完成**；~~③ PPT 成品版式层~~ → **v1.31 完成 phase 1**（8 档 + 主题 token，grid/canvas/形状图表留 phase 2）；④ ~~基础设施 MessageFilter + render 剪贴板恢复~~ → **v1.32 已完成**；⑤ PPT phase 2（canvas/grid/形状图表/reuse）→ **v1.32 已完成**；剩余：主题写进 pptx（WPS 拒绝 `Presentation.Tags`，保持文件方案）、真实忙场景端到端验证。
+**下一步（按价值/成本排序，均已在各域报告 §3 里给过依据）**：① ~~Word `fill_gaps` + 两处实现缺陷~~ → **v1.30 已完成**（`fillgaps` 新命令 + `noSplitWords` 极性修正 + `table -KeepTogether` 逐行回读；细节见 `docs/borrow/archive/skill-word-v130.md`）；~~② Excel `replace` + `pivot` 日期分组~~ → **v1.31 已完成**；~~③ PPT 成品版式层~~ → **v1.31 完成 phase 1**（8 档 + 主题 token，grid/canvas/形状图表留 phase 2）；④ ~~基础设施 MessageFilter + render 剪贴板恢复~~ → **v1.32 已完成**；⑤ PPT phase 2（canvas/grid/形状图表/reuse）→ **v1.32 已完成**；剩余：主题写进 pptx（WPS 拒绝 `Presentation.Tags`，保持文件方案）、真实忙场景端到端验证。
 
 ---
 

@@ -101,7 +101,10 @@ function Invoke-Split {
         $count = $to - $from + 1
         $readOut = Join-Path $work ([string]$r.id + '.json')
         $pa = Start-Process -FilePath 'powershell' -ArgumentList @('-Mta', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ppt, 'read', '-Doc', $d, '-From', $from, '-Count', $count) -PassThru -NoNewWindow -RedirectStandardOutput $readOut
-        $pa.WaitForExit()
+        if (-not $pa.WaitForExit(180000)) {
+            try { $pa.Kill() } catch { }
+            throw ('read timed out after 180 s for range ' + $r.id + ' - WPS may be showing a dialog; close it and retry')
+        }
         $res = Read-Json $readOut
         if (-not $res.ok) { throw ('read failed for ' + $r.id + ': ' + $res.error.code + ' ' + $res.error.message) }
         $slice = [pscustomobject]@{ id = [string]$r.id; from = $from; to = $to; slides = @($res.result.items) }

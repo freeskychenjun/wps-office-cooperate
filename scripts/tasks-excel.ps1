@@ -109,7 +109,10 @@ function Read-RangeChunked([string]$excel, [string]$docPath, [string]$sheet, [st
         $sub = $c1 + $row + ':' + $c2 + $last
         $f = Join-Path $outDir ('chunk-' + $row + '.json')
         $pa = Start-Process -FilePath 'powershell' -ArgumentList @('-Mta', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $excel, 'read', '-Doc', $docPath, '-Range', ($sheet + '!' + $sub)) -PassThru -NoNewWindow -RedirectStandardOutput $f
-        $pa.WaitForExit()
+        if (-not $pa.WaitForExit(180000)) {
+            try { $pa.Kill() } catch { }
+            throw ('read timed out after 180 s for ' + $sheet + '!' + $sub + ' - WPS may be showing a dialog; close it and retry')
+        }
         $res = Read-Json $f
         if (-not $res.ok) { throw ('read failed for ' + $sheet + '!' + $sub + ': ' + $res.error.code + ' ' + $res.error.message) }
         if ($res.result.PSObject.Properties.Name -contains 'values' -and $res.result.values) {

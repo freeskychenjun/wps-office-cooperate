@@ -130,10 +130,19 @@ function Invoke-WocBatch {
         [void]$results.Add($entry)
     }
     $totalMs = 0
-    foreach ($r in $results) { $totalMs += [int]$r.ms }
+    $okCount = 0
+    foreach ($r in $results) {
+        $totalMs += [int]$r['ms']
+        if ($r['ok']) { $okCount++ }
+    }
+    $failedCount = $results.Count - $okCount
+    # Top-level ok means "the batch as a whole worked", i.e. at least one op succeeded. It used to
+    # be a constant $true, which made a batch in which EVERY op failed (daemon gone, documents
+    # missing, bad arguments) look like success to anyone who only checks the envelope. The
+    # wrappers exit 2 on ok:false; okCount/failedCount tell a mixed batch apart.
     return [ordered]@{
-        ok = $true
+        ok = ($okCount -gt 0)
         cmd = 'batch'
-        result = [ordered]@{ count = $results.Count; totalMs = $totalMs; ops = @($results) }
+        result = [ordered]@{ count = $results.Count; okCount = $okCount; failedCount = $failedCount; totalMs = $totalMs; ops = @($results) }
     }
 }

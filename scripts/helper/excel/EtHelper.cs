@@ -355,7 +355,9 @@ internal static partial class Program
                 || e.HResult == unchecked((int)0x80010001)        // RPC_E_CALL_REJECTED
                 || e.HResult == unchecked((int)0x800AC472)        // the app is busy (typing in a cell)
                 || msg.IndexOf("busy", StringComparison.OrdinalIgnoreCase) >= 0
-                || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0;
+                || msg.IndexOf("dialog", StringComparison.OrdinalIgnoreCase) >= 0
+                || msg.IndexOf("\u5fd9", StringComparison.Ordinal) >= 0            // busy, in Chinese
+                || msg.IndexOf("\u5bf9\u8bdd\u6846", StringComparison.Ordinal) >= 0; // dialog, in Chinese
             response = Err(busy ? "BUSY" : "COM_ERROR", msg + " (0x" + e.HResult.ToString("X8", CultureInfo.InvariantCulture) + ")");
             if (!busy) { try { _app = null; } catch (Exception) { } }
         }
@@ -1390,9 +1392,14 @@ internal static partial class Program
 
     private static string ChartTypeName(object t)
     {
-        if (t is double)
+        // WPS hands back the chart type as int (some builds as double), so accept any numeric
+        // IConvertible: only the double branch used to be mapped, which made `chart -Action list`
+        // report raw codes ("4", "51") while `chart -Action add` reported names ("line", "column").
+        int v;
+        if (t != null && !(t is string) && t is IConvertible)
         {
-            int v = (int)(double)t;
+            try { v = Convert.ToInt32(t, CultureInfo.InvariantCulture); }
+            catch (Exception) { return Convert.ToString(t, CultureInfo.InvariantCulture); }
             if (v == 51) return "column";
             if (v == 57) return "bar";
             if (v == 52) return "stacked";
@@ -1403,6 +1410,8 @@ internal static partial class Program
             if (v == -4169 || v == 74) return "scatter";
             if (v == 76) return "area";
             if (v == -4151) return "radar";
+            if (v == -4098) return "unknown";
+            return Convert.ToString(v, CultureInfo.InvariantCulture);
         }
         return Convert.ToString(t, CultureInfo.InvariantCulture);
     }
@@ -2038,8 +2047,48 @@ internal static partial class Program
         {
             string name = a.Need("name");
             if ((int)wb.Worksheets.Count <= 1) throw new Fail("BAD_ARGS", "cannot delete the last sheet of a workbook");
-            SheetByName(wb, name).Delete();
-            return new Dictionary<string, object> { { "deleted", name }, { "sheets", SheetsBrief(wb) } };
+            dynamic ws = SheetByName(wb, name);
+            // Deleting a NON-EMPTY sheet makes WPS raise a modal "are you sure" alert. A COM caller
+            // cannot answer it, so the call blocks forever (found 2026-11-04: `sheet -Action delete`
+            // on a non-empty sheet hung > 90 s until the test process was killed). Suppress alerts
+            // for the duration of the delete only, and report how much content was discarded so the
+            // caller can tell "deleted an empty scratch sheet" from "threw data away".
+            long usedCells = 0;
+            try
+            {
+                object cnt = TryGet(() => (object)ws.UsedRange.CountLarge, null);
+                if (cnt == null) cnt = TryGet(() => (object)ws.UsedRange.Count, null);
+                if (cnt != null) usedCells = Convert.ToInt64(cnt, CultureInfo.InvariantCulture);
+            }
+            catch (Exception) { }
+            dynamic app = null;
+            try { app = wb.Application; } catch (Exception) { }
+            // Fall back to the cached application object: some WPS builds refuse .Application.
+            if (app == null) { try { app = _app; } catch (Exception) { } }
+            bool alertsSaved = false;
+            bool alertsPrev = true;
+            try
+            {
+                if (app != null)
+                {
+                    alertsPrev = (bool)app.DisplayAlerts;
+                    app.DisplayAlerts = false;
+                    alertsSaved = true;
+                }
+            }
+            catch (Exception) { }
+            try { ws.Delete(); }
+            finally
+            {
+                if (alertsSaved) { try { app.DisplayAlerts = alertsPrev; } catch (Exception) { } }
+            }
+            return new Dictionary<string, object>
+            {
+                { "deleted", name },
+                { "usedCells", usedCells },
+                { "note", "the sheet is gone; a non-empty sheet is discarded without the WPS confirmation alert (alerts are suppressed for this one call)" },
+                { "sheets", SheetsBrief(wb) }
+            };
         }
         if (action == "activate")
         {

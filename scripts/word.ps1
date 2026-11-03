@@ -150,151 +150,24 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
-function Write-Error-Json([string]$code, [string]$message) {
-    $payload = @{ ok = $false; error = @{ code = $code; message = $message } }
-    [Console]::Out.Write(($payload | ConvertTo-Json -Depth 6 -Compress))
-    exit 1
-}
-
-function Resolve-FullPath([string]$p) {
-    try { return [System.IO.Path]::GetFullPath($p) } catch { return $p }
-}
+# Everything shared with excel.ps1 / ppt.ps1 lives in woc-app-common.ps1: the JSON error
+# envelope, path resolution, the items-file reader, the resident-daemon client and probe, the
+# source hash + csc build, the batch command and the daemon-first / one-shot transport tail.
+# Dot-sourced (not imported) so its functions and $script:daemonPipe land in THIS script scope.
+. "$PSScriptRoot\woc-app-common.ps1"
 
 # ---------------------------------------------------------------- helper binary
-
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$sourceDir = Join-Path $scriptRoot 'helper\word'
-if (-not (Test-Path -LiteralPath $sourceDir)) { Write-Error-Json 'NO_HELPER' ("Helper folder not found: " + $sourceDir) }
-$sources = @(Get-ChildItem -LiteralPath $sourceDir -Filter *.cs | Sort-Object Name)
-if ($sources.Count -eq 0) { Write-Error-Json 'NO_HELPER' ('No .cs in ' + $sourceDir) }
-# Shared sources (the tray daemon / hint plumbing) compile into every helper.
-$sharedDir = Join-Path $scriptRoot 'helper\shared'
-if (Test-Path -LiteralPath $sharedDir) { $sources += @(Get-ChildItem -LiteralPath $sharedDir -Filter *.cs | Sort-Object Name) }
-
-# ---------------------------------------------------------------- resident daemon (v1.14)
-# A warm helper process holds the COM application and answers request JSON over a named pipe, so a
-# command no longer pays "start exe + attach to WPS + find document" (measured ~2.5 s per command
-# on this machine). The pipe name is derived from the compiled binary's hash, so a rebuilt helper
-# simply gets a new pipe and the old daemon is left alone (it exits on idle).
-$daemonPipe = $null   # filled in once $sha is known
-
-function Get-DaemonPipeName([string]$shaGen12) { return ('woc-word-' + $shaGen12) }
-
-function Invoke-Daemon([string]$payload, [int]$connectMs) {
-    if ($script:daemonPipe -eq $null) { return $null }
-    $pipe = $null
-    try {
-        $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $script:daemonPipe, [System.IO.Pipes.PipeDirection]::InOut)
-        $pipe.Connect($connectMs)
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-        $len = [System.BitConverter]::GetBytes([int]$bytes.Length)
-        $pipe.Write($len, 0, 4)
-        $pipe.Write($bytes, 0, $bytes.Length)
-        $pipe.Flush()
-        $hdr = New-Object byte[] 4
-        $got = 0
-        while ($got -lt 4) {
-            $n = $pipe.Read($hdr, $got, 4 - $got)
-            if ($n -le 0) { return $null }
-            $got += $n
-        }
-        $total = [System.BitConverter]::ToInt32($hdr, 0)
-        if ($total -le 0 -or $total -gt 33554432) { return $null }
-        $buf = New-Object byte[] $total
-        $got = 0
-        while ($got -lt $total) {
-            $n = $pipe.Read($buf, $got, $total - $got)
-            if ($n -le 0) { return $null }
-            $got += $n
-        }
-        return [System.Text.Encoding]::UTF8.GetString($buf)
-    } catch {
-        return $null
-    } finally {
-        if ($pipe) { try { $pipe.Dispose() } catch { } }
-    }
-}
-
-function Start-Daemon([string]$exePath2) {
-    if ($env:WOC_NO_DAEMON -eq '1') { return $false }
-    $probe = '{"cmd":"ping"}'
-    if ($null -ne (Invoke-Daemon $probe 300)) { return $true }
-    try {
-        Start-Process -FilePath $exePath2 -ArgumentList @('--serve', $script:daemonPipe) -WindowStyle Hidden | Out-Null
-    } catch {
-        return $false
-    }
-    for ($i = 0; $i -lt 40; $i++) {
-        Start-Sleep -Milliseconds 100
-        if ($null -ne (Invoke-Daemon $probe 300)) { return $true }
-    }
-    return $false
-}
-
-
-# The cache key covers every source file, so editing any of them rebuilds.
-# Hash of the helper sources -> compile cache dir + daemon pipe name. Get-FileHash over every
-# .cs file costs ~50 ms on each command (measured 2026-11-02), so the shared helper caches it
-# keyed on file count + sizes + newest mtime (any real edit changes one of them).
-$wocCommonPath = Join-Path $PSScriptRoot 'woc-common.ps1'
-if (Test-Path -LiteralPath $wocCommonPath) { . $wocCommonPath }
-if (Get-Command Get-CachedSourceHash -ErrorAction SilentlyContinue) {
-    $sha = Get-CachedSourceHash -App 'word' -Sources $sources
-} else {
-    
-$hashInput = ($sources | ForEach-Object { $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join ';'
-    
-$shaGen = [System.Security.Cryptography.SHA256]::Create()
-    
-$sha = ([System.BitConverter]::ToString($shaGen.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($hashInput))) -replace '-', '').ToLowerInvariant().Substring(0, 12)
-}
-$cacheDir = Join-Path $env:LOCALAPPDATA ('wps-office-cooperate\word-helper-' + $sha)
-$script:daemonPipe = Get-DaemonPipeName $sha
-$exePath = Join-Path $cacheDir 'WpsHelper.exe'
-
-
-if (-not (Test-Path -LiteralPath $exePath)) {
-    $csc = $null
-    foreach ($arch in @('Framework64', 'Framework')) {
-        $candidate = Join-Path $env:SystemRoot ("Microsoft.NET\" + $arch + "\v4.0.30319\csc.exe")
-        if (Test-Path -LiteralPath $candidate) { $csc = $candidate; break }
-    }
-    if (-not $csc) { Write-Error-Json 'NO_COMPILER' 'The .NET Framework C# compiler (csc.exe) was not found. Enable ".NET Framework 4.8" in Windows Features.' }
-    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
-    $tempExe = Join-Path $cacheDir ('build-' + $PID + '.exe')
-    $refs = @('-r:System.dll', '-r:System.Core.dll', '-r:System.Drawing.dll', '-r:System.Windows.Forms.dll', '-r:Microsoft.CSharp.dll', '/codepage:65001')
-    $compileLog = & $csc -nologo -optimize+ -target:exe ("-out:" + $tempExe) $refs ($sources | ForEach-Object { $_.FullName }) 2>&1 | Out-String
-    if (-not (Test-Path -LiteralPath $tempExe)) {
-        Write-Error-Json 'COMPILE_FAILED' ("csc failed: " + $compileLog.Trim())
-    }
-    Move-Item -LiteralPath $tempExe -Destination $exePath -Force
-}
+# Collect helper\word\*.cs + helper\shared\*.cs, hash them, compile on first use; returns the
+# exe path and sets $script:daemonPipe. Why the hash is cached and why the pipe name follows it
+# is documented in woc-app-common.ps1.
+$exePath = Initialize-WocHelper -App 'word' -ScriptRoot $PSScriptRoot -ExeName 'WpsHelper.exe'
 
 # ---------------------------------------------------------------- request
 
 # ---------------------------------------------------------------- batch (v1.19)
-# Run many requests over ONE pipe connection from a single process start. The CLI path pays a
-# PowerShell start + wrapper parse (~220 ms) per command, while a pipe round trip is 1-15 ms
-# (measured 2026-11-02), so "one page = 15 commands" becomes one tool call instead of fifteen.
-#   woc.ps1 word batch -Ops ops.json
-#   ops.json: {"ops":[{"cmd":"...","doc":"...","sheet":"..."}, ...]}
-if ($Command -eq 'batch') {
-    if (-not $Ops) { Write-Error-Json 'BAD_ARGS' 'batch needs -Ops <ops.json> (an object with an ops array)' }
-    $opsPath = Resolve-FullPath $Ops
-    if (-not (Test-Path -LiteralPath $opsPath)) { Write-Error-Json 'BAD_ARGS' ('ops file not found: ' + $opsPath) }
-    $rawOps = [System.IO.File]::ReadAllText($opsPath, [System.Text.Encoding]::UTF8)
-    try { $parsedOps = $rawOps | ConvertFrom-Json }
-    catch { Write-Error-Json 'BAD_ARGS' ('ops file is not valid JSON: ' + $_.Exception.Message) }
-    if ($parsedOps.PSObject.Properties.Name -contains 'ops') { $opList = @($parsedOps.ops) } else { $opList = @($parsedOps) }
-    if ($opList.Count -eq 0) { Write-Error-Json 'BAD_ARGS' 'batch ops is empty' }
-    if (-not (Get-Command Invoke-WocBatch -ErrorAction SilentlyContinue)) {
-        $wocCommonPath2 = Join-Path $PSScriptRoot 'woc-common.ps1'
-        if (Test-Path -LiteralPath $wocCommonPath2) { . $wocCommonPath2 }
-    }
-    $batchResult = Invoke-WocBatch -PipeName $script:daemonPipe -ExePath $exePath -Ops $opList
-    [Console]::Out.Write(($batchResult | ConvertTo-Json -Depth 12 -Compress))
-    exit 0
-}
+# One process start for N requests: see Invoke-WocBatchCli in woc-app-common.ps1 for the why,
+# the ops-file shape ({"ops":[...]}) and the ok/failed envelope rule.
+if ($Command -eq 'batch') { Invoke-WocBatchCli -Ops $Ops -ExePath $exePath }
 
 $request = @{}
 $request['cmd'] = $Command
@@ -321,16 +194,14 @@ function Add-Format-Fields($bound) {
     if ($bound.ContainsKey('SplitWords')) { $request['noSplitWords'] = -not [bool]$bound['SplitWords'] }
 }
 
-switch ($Command) {
+# 'units' is an alias of 'unit'. The two cases used to be byte-identical copies; they now share
+# one body. (A comma-separated switch label - 'unit', 'units' { } - is NOT valid in Windows
+# PowerShell 5.1: Parser gives "missing statement block in switch clause", so the alias is mapped
+# here instead. The request still carries the command exactly as the caller wrote it.)
+$commandKey = if ($Command -eq 'units') { 'unit' } else { $Command }
+switch ($commandKey) {
     'open' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'open needs -Doc' }
-        # A takeover must be visible: default to showing the window (an earlier hidden open left the
-        # user staring at nothing while the helper edited a window they could not see). Pass -Show:$false
-        # explicitly if a hidden session is really what you want.
-        $request['show'] = $true
-        if ($PSBoundParameters.ContainsKey('Show')) { $request['show'] = [bool]$Show }
-        $request['readOnly'] = [bool]$ReadOnly
-        if ($NoHint) { $request['noHint'] = $true }
+        Add-WocOpenFields -Request $request -Bound $PSBoundParameters -Doc $Doc -ReadOnly:$ReadOnly -NoHint:$NoHint
     }
     'read' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'read needs -Doc' }
@@ -364,19 +235,14 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'revise needs -Doc' }
         if (-not $Items) { Write-Error-Json 'BAD_ARGS' 'revise needs -Items <json file>' }
         if (-not (Test-Path -LiteralPath $Items)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $Items) }
-        $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $Items), [System.Text.Encoding]::UTF8)
-        $parsed = $raw | ConvertFrom-Json
-        if ($parsed.PSObject.Properties.Name -contains 'items') { $request['items'] = @($parsed.items) }
-        else { $request['items'] = @($parsed) }
+        $request['items'] = Read-Items-Json $Items
     }
     'comment' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'comment needs -Doc' }
         if ($Action -and $Action.ToLowerInvariant() -eq 'list') { $request['action'] = 'list' }
         elseif ($Items) {
             if (-not (Test-Path -LiteralPath $Items)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $Items) }
-            $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $Items), [System.Text.Encoding]::UTF8)
-            $parsed = $raw | ConvertFrom-Json
-            if ($parsed.PSObject.Properties.Name -contains 'items') { $request['items'] = @($parsed.items) } else { $request['items'] = @($parsed) }
+            $request['items'] = Read-Items-Json $Items
         }
         elseif ($Delete) {
             $request['delete'] = $true
@@ -417,9 +283,7 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'formula needs -Doc' }
         if ($Items) {
             if (-not (Test-Path -LiteralPath $Items)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $Items) }
-            $rawF = [System.IO.File]::ReadAllText((Resolve-FullPath $Items), [System.Text.Encoding]::UTF8)
-            $parsedF = $rawF | ConvertFrom-Json
-            if ($parsedF.PSObject.Properties.Name -contains 'items') { $request['items'] = @($parsedF.items) } else { $request['items'] = @($parsedF) }
+            $request['items'] = Read-Items-Json $Items
         }
         else {
             if ($Para -lt 1) { Write-Error-Json 'BAD_ARGS' 'formula needs -Para <n> (the paragraph the equation goes in), or -Items <json>' }
@@ -478,7 +342,7 @@ switch ($Command) {
     }
     'font' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'font needs -Doc' }
-        if (-not $Name) { Write-Error-Json 'BAD_ARGS' 'font needs -Name <font name, e.g. 仿宋 or FangSong>' }
+        if (-not $Name) { Write-Error-Json 'BAD_ARGS' 'font needs -Name <font name, e.g. FangSong or SimSun>' }
         $request['name'] = $Name
         if ($Track) { $request['track'] = $true }
     }
@@ -494,7 +358,7 @@ switch ($Command) {
     }
     'style' {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'style needs -Doc' }
-        if (-not $Style) { Write-Error-Json 'BAD_ARGS' 'style needs -Style <style name, e.g. 正文>' }
+        if (-not $Style) { Write-Error-Json 'BAD_ARGS' 'style needs -Style <style name as WPS shows it, e.g. Normal>' }
         $request['style'] = $Style
         Add-Format-Fields $PSBoundParameters
         if ($NoNumbering) { $request['numbering'] = $false }
@@ -519,11 +383,7 @@ switch ($Command) {
         if ($Force) { $request['force'] = $true }
         if ($Data) {
             if (-not (Test-Path -LiteralPath $Data)) { Write-Error-Json 'BAD_ARGS' ('Data file not found: ' + $Data) }
-            $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $Data), [System.Text.Encoding]::UTF8)
-            $parsed = $raw | ConvertFrom-Json
-            if ($parsed.PSObject.Properties.Name -contains 'data') { $request['data'] = $parsed.data }
-            elseif ($parsed.PSObject.Properties.Name -contains 'rows') { $request['data'] = $parsed.rows }
-            else { $request['data'] = $parsed }
+            $request['data'] = Read-Items-Json $Data -Keys @('data', 'rows') -NoArrayWrap
         }
         if ($Borders) { $request['borders'] = $Borders }
         if ($Widths) { $request['widths'] = $Widths }
@@ -596,9 +456,7 @@ switch ($Command) {
         else {
             if (-not $Items) { Write-Error-Json 'BAD_ARGS' 'reference -Action list needs -Items <json file of strings>' }
             if (-not (Test-Path -LiteralPath $Items)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $Items) }
-            $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $Items), [System.Text.Encoding]::UTF8)
-            $parsed = $raw | ConvertFrom-Json
-            if ($parsed.PSObject.Properties.Name -contains 'items') { $request['items'] = @($parsed.items) } else { $request['items'] = @($parsed) }
+            $request['items'] = Read-Items-Json $Items
             if ($AtPara -gt 0) { $request['para'] = $AtPara }
             if ($Heading) { $request['heading'] = $Heading }
         }
@@ -629,9 +487,7 @@ switch ($Command) {
         if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'insert needs -Doc' }
         if ($Items) {
             if (-not (Test-Path -LiteralPath $Items)) { Write-Error-Json 'BAD_ARGS' ('Items file not found: ' + $Items) }
-            $raw = [System.IO.File]::ReadAllText((Resolve-FullPath $Items), [System.Text.Encoding]::UTF8)
-            $parsed = $raw | ConvertFrom-Json
-            if ($parsed.PSObject.Properties.Name -contains 'items') { $request['items'] = @($parsed.items) } else { $request['items'] = @($parsed) }
+            $request['items'] = Read-Items-Json $Items
         }
         elseif ($PSBoundParameters.ContainsKey('Text')) { $request['items'] = @(@{ text = $Text }) }
         else { Write-Error-Json 'BAD_ARGS' 'insert needs -Items <json file> or -Text' }
@@ -689,24 +545,9 @@ switch ($Command) {
         if ($Units) { $request['units'] = $Units }
         if ($Track) { $request['track'] = $true }
     }
-    'units' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'units needs -Doc' }
-        if ($Apply) { $request['apply'] = $true }
-        if ($Normalize) { $request['normalize'] = $true }
-        if ($Units) { $request['units'] = $Units }
-        if ($Track) { $request['track'] = $true }
-    }
     'hint' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'hint needs -Doc' }
-        if ($HintTag) { $request['tag'] = $HintTag }
-        if ($Bar) { $request['bar'] = $Bar }
-        if ($Text) { $request['text'] = $Text }
-        if ($Clear) { $request['clear'] = $true }
-        if ($Toast) { $request['toast'] = $true }
-        if ($Sound) { $request['sound'] = $true }
-        if ($Quiet) { $request['quiet'] = $true }
-        # -Tray: keep a resident indicator icon; the daemon restores via this same script.
-        if ($Tray) { $request['tray'] = $true; $request['wrapper'] = $PSCommandPath }
+        # Shared body (woc-app-common.ps1); -Tray tells the daemon which wrapper to re-run.
+        Add-WocHintFields -Request $request -Doc $Doc -HintTag $HintTag -Bar $Bar -Text $Text -Wrapper $PSCommandPath -Clear:$Clear -Toast:$Toast -Sound:$Sound -Quiet:$Quiet -Tray:$Tray
     }
     'finish' {
         if ($Note) { $request['note'] = $Note }
@@ -715,33 +556,14 @@ switch ($Command) {
         if ($Quiet) { $request['quiet'] = $true }
     }
     'save' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'save needs -Doc' }
-        if ($As) { $request['as'] = Resolve-FullPath $As }
+        Add-WocSaveFields -Request $request -Doc $Doc -As $As
     }
     'serve' {
-        # Resident helper control: -Action start|stop|status (default start).
-        $act = if ($Action) { $Action.ToLowerInvariant() } else { 'start' }
-        if ($act -eq 'stop') {
-            $null = Invoke-Daemon '{"cmd":"daemon-stop"}' 800
-            $payload = @{ ok = $true; cmd = 'serve'; result = @{ action = 'stop'; pipe = $script:daemonPipe; note = 'stop requested; the daemon exits after answering' } }
-            [Console]::Out.Write(($payload | ConvertTo-Json -Depth 6 -Compress))
-            exit 0
-        }
-        if ($act -eq 'status') {
-            $alive = ($null -ne (Invoke-Daemon '{"cmd":"ping"}' 300))
-            $payload = @{ ok = $true; cmd = 'serve'; result = @{ action = 'status'; running = $alive; pipe = $script:daemonPipe } }
-            [Console]::Out.Write(($payload | ConvertTo-Json -Depth 6 -Compress))
-            exit 0
-        }
-        $okStart = Start-Daemon $exePath
-        $payload = @{ ok = $okStart; cmd = 'serve'; result = @{ action = 'start'; started = $okStart; pipe = $script:daemonPipe } }
-        if (-not $okStart) { $payload = @{ ok = $false; error = @{ code = 'DAEMON_FAILED'; message = 'the resident helper did not come up; commands still work through the one-shot path' } } }
-        [Console]::Out.Write(($payload | ConvertTo-Json -Depth 6 -Compress))
-        exit 0
+        # Resident helper control: -Action start|stop|status (default start). Shared body.
+        Invoke-WocServe -Action $Action -ExePath $exePath
     }
     'close' {
-        if (-not $Doc) { Write-Error-Json 'BAD_ARGS' 'close needs -Doc' }
-        $request['save'] = [bool]$Save
+        Add-WocCloseFields -Request $request -Doc $Doc -Save:$Save
     }
 }
 
@@ -754,52 +576,16 @@ $paramAliases = @{
     HeaderText = 'header'; FooterText = 'footer'; PageNumber = 'pageNumber'
     SplitWords = 'noSplitWords'
 }
-$paramCommandSkips = @{
 
-}
-$paramCheckPath = Join-Path $PSScriptRoot 'param-check.ps1'
-if (Test-Path -LiteralPath $paramCheckPath) {
-    . $paramCheckPath
-    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Para = 0; To = 0; Row = 0; Col = 0; Table = 0; AtPara = 0; Passes = 0; Slide = 0; MaxMoves = 8; MinGapPt = 0; Gap = -1; FailTable = 0 }
-Test-ParamConsumption -Command $Command -Bound $PSBoundParameters -Request $request `
-        -Aliases $paramAliases -FormatFields $formatFields -CommandSkips $paramCommandSkips -DefaultValues $paramDefaultValues
-}
+Invoke-WocParamCheck -ScriptRoot $PSScriptRoot -Command $Command -Bound $PSBoundParameters -Request $request `
+    -Aliases $paramAliases -FormatFields $formatFields -DefaultValues @{ From = 1; Count = 0; Index = 0; Max = 200; Para = 0; To = 0; Row = 0; Col = 0; Table = 0; AtPara = 0; Passes = 0; MaxMoves = 8; MinGapPt = 0; Gap = -1; FailTable = 0 }
 $json = $request | ConvertTo-Json -Depth 12 -Compress
 
-# Resident path first: same request JSON, same response JSON, just no process start and no COM
-# attach. Anything unexpected (daemon gone, pipe error) falls through to the one-shot path below.
-if ($Command -ne 'serve' -and $env:WOC_NO_DAEMON -ne '1') {
-    $daemonText = Invoke-Daemon $json 900
-    if ($null -ne $daemonText) {
-        [Console]::Out.Write($daemonText)
-        if ($daemonText -match '"ok"\s*:\s*false') { exit 2 }
-        exit 0
-    }
-}
-
-$work = Join-Path $env:TEMP ('wps-office-cooperate-word-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $work | Out-Null
-$requestPath = Join-Path $work 'request.json'
-$responsePath = Join-Path $work 'response.json'
-[System.IO.File]::WriteAllText($requestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-
-# ---------------------------------------------------------------- run
-
-$p = Start-Process -FilePath $exePath -ArgumentList @($requestPath, $responsePath) -PassThru -NoNewWindow
-if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-    try { $p.Kill() } catch { }
-    Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
-    Write-Error-Json 'TIMEOUT' ('The helper did not answer within ' + $TimeoutSec + ' s. WPS may be showing a dialog; close it and try again.')
-}
-if (-not (Test-Path -LiteralPath $responsePath)) {
-    Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
-    Write-Error-Json 'INTERNAL' ('The helper exited (code ' + $p.ExitCode + ') without writing a response.')
-}
-$text = [System.IO.File]::ReadAllText($responsePath, [System.Text.Encoding]::UTF8)
-Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
-[Console]::Out.Write($text)
-if ($text -match '"ok"\s*:\s*false') { exit 2 }
-# First contact warms the resident helper for the commands that follow (open is always first in a
-# real session; it is also the cheapest place to pay the one-time start).
-if ($Command -eq 'open') { $null = Start-Daemon $exePath }
+# Transport: resident daemon first, then one-shot - both live in woc-app-common.ps1 and both hand
+# back the response text, so any wrapper-level exit-code rule covers both transports.
+# NOTE: this variable must NOT be called $text - PowerShell variable names are case-insensitive, so
+# $text IS the [string]$Text parameter and assigning $null to it stores '' instead, which makes the
+# $null test below false and silently skips the one-shot fallback.
+$responseText = Invoke-WocDaemonFirst -Command $Command -Json $json -TimeoutSec $TimeoutSec
+if ($null -eq $responseText) { $responseText = Invoke-WocOneShot -App 'word' -Command $Command -ExePath $exePath -Json $json -TimeoutSec $TimeoutSec }
 exit 0

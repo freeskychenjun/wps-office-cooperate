@@ -25,10 +25,7 @@ if ($args.Count -lt 2) {
 $app = [string]$args[0]
 $entry = Join-Path $PSScriptRoot ($app + '.ps1')
 if ($app -notin @('word', 'excel', 'ppt') -or -not (Test-Path -LiteralPath $entry)) {
-    if ($app -eq 'ppt') {
-        Write-Error-Json 'APP_NOT_SUPPORTED' "PPT (WPS Presentation) is not implemented yet. Available: word, excel."
-    }
-    Write-Error-Json 'BAD_APP' ("Unknown app: " + $app + ". Available: word, excel.")
+    Write-Error-Json 'BAD_APP' ("Unknown app: " + $app + ". Available: word, excel, ppt.")
 }
 
 $rest = @()

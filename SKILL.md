@@ -1,27 +1,30 @@
 ---
 name: wps-office-cooperate
 description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式改写+批注+LaTeX 原生公式+脚注+版式核对+总览图）、Excel（.xlsx/.xls/.csv，批量写值公式+锚点校验+快照回滚+批注+数据清洗/透视表/条件格式/图表次轴）、PowerPoint（.pptx，预设版式建页+形状级改文字+表格图片+套版裁切+框图连线+SmartArt+逐页渲染核对），改动当场出现在用户正开着的 WPS 窗口里。当用户要求：在 WPS 里改这个文档/表格/演示文稿/PPT、在 WPS 里做修订、实时改 Word/Excel/PPT、一边看着一边改、做汇报 PPT、加批注、写公式/脚注、清洗表格/做透视表、核对排版/版式/表格格式，或提到 wps word、wps excel、wps ppt、live edit word/excel/ppt 时使用。不适用：纯离线批量处理（改副本、不要求用户在场，Word 用 docx-paragraph-polish，Excel 用 openpyxl/minimax-xlsx，PPT 用 pptx-generator 等离线方案）、用户明确不要动原文件（只出旁挂报告）、微软 Office 窗口里的文档（本 skill 只走 WPS）。
+version: 1.34
 ---
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
+## 当前版本
 
-**版本 v1.32（2026-11-03）**：**基础设施两项（忙重试 + 剪贴板不再被吞）＋ PPT 成品版式层 phase 2**。① **OLE MessageFilter**：三端 helper 的 `[STAThread] Main` 首行注册 `MessageFilter.Register()`——WPS 拒绝调用时以 **150 ms 间隔自动重试、最多 6 s**（仍忙才抛成 `BUSY`），以前是立刻失败或等到 180 s 超时；公寓级注册，一次性/常驻模式都覆盖；忙码补 `0x800AC472`（Word 另补原来缺的 `0x80010001`）。真机取证 `CoRegisterMessageFilter -> 0x00000000`，策略值用同源探针逐项验证；**真实忙场景未能在本机构造**（F2 编辑态、模态保存提示下 COM 仍 4 ms 返回），"拒绝→重试→BUSY"属"机制已装、未实弹"。② **ClipboardKeeper**：Excel `render`、PPT `render`/`render -Overview`/`export png|jpg` 前后保存并恢复用户剪贴板（序列号判据：期间用户又复制了新东西就不覆盖；恢复内容打"不进 Win+V/云剪贴板"标记；失败只 Trace 不影响出图）。Lead 复跑：设置文本 → `excel render`/`ppt render` → 剪贴板原文不变且 PNG 正常。③ **PPT phase 2**：`slide -Preset canvas`（自由版面，`items[{type,box}]` + `edges` **用 `AddConnector` 真连到形状边**，`connected.begin/end` 回读，越界夹取并报）、`-Preset grid`（`rows` + `span`，宽度按 span 均分、行高按内容估、`stack` 竖叠，**不用给坐标**）、**形状绘制图表**（`chart` item：scatter 带 OLS 拟合线+方程+R²、curve 末端标系列名、pie/doughnut 真扇区，刻度 1/2/5×10^k 取整）、`slide -Action reuse`（复制整页按形状名换字换图，页码自动改成新页号）。④ **修掉两条真问题**：`reuse`/`dup` 内部 `Duplicate()` 把幻灯片留在剪贴板，v1.32 的剪贴板快照去读这个 OLE 格式会**直接把 helper 进程带崩**（`INTERNAL: helper exited without writing a response`）——改为只快照简单格式 + `Duplicate` 包在 Keep 里，修后 `reuse` → `render` 不用再手动清剪贴板；另实测 **WPS 拒绝 `Presentation.Tags`**（`Add` 不报错但 `Count` 恒 0）⇒ 主题仍存本机文件，`theme -Probe` 可复核，返回 `tags.supported:false` 如实说明。⑤ **回归**：`tests/word/check_daemon.py` **40/40 全过**（三端 daemon 与一次性逐字节一致、daemon 仍更快、`serve start/stop` 与回退正常）——消息过滤器与剪贴板改动没有破坏传输层。
+**版本 v1.34（2026-11-04）**：**工程质量版**（无新功能，只堵已知的坑；逐条证据见仓库根 `OPTIMIZATION-PLAN.md`）：
 
-**版本 v1.31（2026-11-02）**：**Excel 补"文字更正/日期分组"，PPT 补"成品版式层"**。① **Excel `replace`（内存块替换）**：`-Find/[-Replace]/-Sheet/-Range/-Column/-Whole/-MatchCase/-Regex/-DryRun/-Max/-All`；**绝不走 `Range.Replace`**（WPS 会在刚写进去的文本上二次替换，`P→P-` 得 `P--`）——我们一次块读 → 本地单遍替换（游标移到插入串之后）→ 只写真正变化的格，实测 `PP→P-P-`；返回 `scanned/changed/byColumn/samples/formulaCellsSkipped/numericMatchesLeftAlone/truncated` + `preSnapshot`（可 `diff -Since`/`restore -Since`），**公式格永不写**、**数字/日期格不改成文本**、`-DryRun` 与实跑同一套判据、不自匹配的规则幂等（实测 5→0）。② **Excel `pivot -Group` 定案**：WPS 12.1 **原生支持**按日期分月/季/年（24 行实测月 `110…1320` 总计 8580、季 `660/1650/2640/3630`、年 `780/7800`，全与手算一致），返回 `groupMode`（`none\|native\|failed`）并**回读 `RowRange` 行项数**校验（不再"没报错就算成功"）；文本日期抛「选定区域不能分组。」→ `failed` + 辅助列降级配方。③ **PPT 成品版式层 phase 1**：`slide -Preset` 新增 **8 档**（`cards`/`stats`/`timeline`/`process`/`compare`/`summary`/`gallery`/`split`，数据走 `-Items <json>`，960×540 设计画布按实际页尺寸缩放，标题/色杠/页脚/页码统一，字号阶梯自动回退并返回 `overflowWarnings`/`fontSizeDrops`）；`theme` 新增 `accent2`/`surface`/`cardFill`/`cardRadius`/`sectionStyle`（旧主题文件缺字段取默认）。④ **修掉图片裁切的错误路线**：WPS 的 `PictureFormat.Crop*` 按**点**解释、且改宽高会把裁切洗掉（实测 1200×600 进 480×540 变成 **552×540、x=-36 出页**，`check` 报 blocker）——改为 **GDI+ 预裁临时副本再按框精确插入**，`split`/`gallery` 的 cover 都走这条，实测回读精确 480×540、`check -MinSeverity blocker` = 0。
+- **包装层去重**：三端共用 `scripts\woc-app-common.ps1`（守护进程/编译/batch/传输尾段/共享命令体），三个 wrapper 合计 −738 行；顺手消除 ppt csc 漏 refs、Start-Daemon 轮询次数两处漂移。
+- **挂死类修复**：daemon 管道读加超时（超时 → `TIMEOUT` + exit 2，不再永久挂起）+ `serve -Action reset` 恢复通道；**Excel 删非空工作表**不再被 WPS 确认框卡死（临时关 `DisplayAlerts`，返回 `usedCells`）；tasks split 子进程加 180 s 上限。
+- **错误判定与门禁**：`exit 2` 改为解析 JSON 信封再判；`batch` 整批失败顶层 `ok:false` + `okCount/failedCount`；`woc.ps1` 对参数绑定失败补 `BAD_ARGS` JSON（见上文「调用错误的两种形态」）；ppt `check -ExitCode` 在热 daemon 路径也生效。
+- **发布与测试**：`publish.ps1` 目标必须是 `…\skills\<name>`（`-Force` 放行）+ staging 切换 + `-WhatIf`；统一 `tests\run_all.ps1`（fast / wps 两层）+ CI 只跑 fast 层 + 自带 normalize fixture + 新增 Excel 数据层回归驱动器（16 组 / 228 断言）。
+- **其它**：脚本全纯 ASCII + 编码门禁；Excel/PPT busy 判定补齐中文「忙」/dialog；主文档瘦身 −8.0%（预设版式契约下沉 [reference/ppt-presets.md](reference/ppt-presets.md)）；版本单源化（历史只在 [reference/changelog.md](reference/changelog.md)）。
 
-**版本 v1.30（2026-11-02）**：**Word 排版收尾三件 + 两处"报成功其实没落上"的修正**。① **新命令 `fillgaps`**：图/表放不下整块跳到下一页时，把图/表后面的正文段提到前面填掉上一页底部的留白（照 dsh-office 的 `fill_gaps` 移植；`-DryRun` 只报不动、只读文档可跑，`-MaxMoves`/`-MinGapPt` 可调；不越过标题、冒号引导句连带搬、题注/图段/表内段不搬；表格块搬运会在表前留一个空段——实现代价已记 quirks）。实测自造 3 页稿：`-DryRun` 报 figure gap 124.2pt / table gap 210.7pt，实跑 `moved:2`，`render` 前后对照可见空白被正文填上、图表原地不动、标题未被越过。② **`noSplitWords` 极性修正**：`ParagraphFormat.WordWrap` 是**反直觉**的——实测 `-1` 才是整词、`0` 是允许拆词（页宽 240pt/边距 90pt/20pt Arial/"aa 3700000"：`-1` → 首行只有 `aa`，`0` → 首行 `aa 37`）。我方 v1.29 及更早写成 `v ? 0 : -1`，即**传 `-NoSplitWords` 反而把拆词打开**；现已改正并**回读**（`noSplitWords=true (readBack=-1)`，不符即报错），且 `insert` 新段/`table` 单元格/`caption` 题注**默认整词**；新增 `-SplitWords` 反向开关（`-NoSplitWords:$false` 过不了 `woc.ps1` 的参数往返）。③ **`table -KeepTogether` 真落上**：旧实现走 `Rows.Item(r).Range.ParagraphFormat`（WPS 上半实现对象，会抛 `0x800A1767`）且异常被吞 ⇒ 报成功但可能一行没落上；现在逐行 `Select()`+`MoveEnd(10,1)` 走 `Selection` 写 `KeepWithNext`/`AllowBreakAcrossPages` 并**逐行回读**，失败则整条命令 `ok:false`（`KEEPTOGETHER_FAILED` + `error.detail` 点名行号）。实测 9 行跨页表：改前第 3 行被页底劈开，改后 `rowsSet 8/8`、`allowBreak 9/9`、`readBackFailures []`，每页一行完整。
-
-**版本 v1.29（2026-11-02）**：**对标开源项目 [dsh-office](https://github.com/copylee711/dsh-office) 补齐三处能力缺口**（研究结论与实测台账在仓库 `docs/borrow/`，不随包分发）。① **Word 原生公式**：`formula` 把 LaTeX 写成真 OMML（`Flat OPC 包 + Range.InsertXML`，WPS 只认这个形状；裸 OMML 片段无效），插后校验 `OMaths.Count` 增长否则回滚，子集外命令点名 `MATH_UNSUPPORTED`。② **Word 原生脚注**：`footnote` list/insert/edit/delete/numbering（`Document.Footnotes`；`Document.Footnotes.NumberingRule` 在 WPS 可读可写）。③ **Word/Excel `render -Overview`**：联系表总览图（Word 6 页/张、≤18 页；Excel 整簿每表一张缩略图），交付前一次看完不用逐页要图。④ **Excel 数据操作层**（最大空白）：`clean`（`¥1,299`/`89元`/`10%`→数字、七种日期写法→日期）、`fillblanks`、`dedupe`、`deletewhere`、`sort`、`filter`、`copy`、`addcol`、`pivot`（结果直接回读）、`freeze`、`cformat`、`validate`、`table`；`read -Profile` 加 **LOOK 段/日期识别/错误码**，`fill` 回报错误格，`chart` 加 **组合图+次坐标轴**/数据标签/图例/占地区域与重叠提示。⑤ **PPT 套版能力**：`crop`（满版/人像裁切，focus 保头）、`connect`（形状间连接线，框图）、`smartart`、`bg`（纹理/渐变/图片背景）、`anim`（切换/入场），`chart` 加趋势线/数据标签/图例位置。⑥ **上下文瘦身**：v1.1–v1.28 版本记录拆到 [reference/changelog.md](reference/changelog.md)，主文档每次加载少读 1.93 万字符。**全部新增命令均在 WPS 12.1.0.29161 上实测**；WPS 硬限制（SmartArt 节点不可写、`radar` 名义支持、裁切单位是点、组合图标题重试等）如实写进各端 quirk 文档与下方坑表。
-
-> **版本历史 v1.1–v1.28 → [reference/changelog.md](reference/changelog.md)**（2026-11-02 起从主文档拆出，避免每次加载都读 2 万字历史）。本节只保留**当前版本要点**。
+> **版本历史 v1.1–v1.33 → [reference/changelog.md](reference/changelog.md)**（唯一出处；2026-11-02 起从主文档拆出）。本节只留当前版本要点——**发布旧版内容不要再回到主文档**。
 
 **能力边界（一句话）**：只走 **WPS**（Word=Writer `KWPS.Application`，Excel=表格 `KET.Application`，PPT=演示 `KWPP.Application`，没装微软 Office 也照跑）。Word 侧所有文字改动都是**修订（track changes）**，用户能逐条接受/拒绝；Excel 与 PPT 侧改动**直写**，靠**锚点校验 + 快照**保证可核对（**这两个 app 的 Ctrl+Z 撤不回 Agent 的改动**，外部 COM 修改不进撤销栈）。
 
 > 下文 `<skill>` = 本 skill 的安装目录。命令一律按**完整可跑**形式给出：
-> `powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\office.ps1 <word|excel|ppt> <命令> [参数]`
-> （`word.ps1` / `excel.ps1` / `ppt.ps1` 也可直接调用，参数完全一样。装有 PowerShell 7 的机器可把 `powershell` 换成 `pwsh`。）
+> `powershell -NoProfile -ExecutionPolicy Bypass -File <skill>\scripts\woc.ps1 <word|excel|ppt> <命令> [参数]`
+> （`woc.ps1` 会自动给子进程加 `-Mta`；`word.ps1` / `excel.ps1` / `ppt.ps1` 也可直接调用，参数完全一样；`office.ps1` 只是转发到这三个脚本的遗留别名，能用但不再推荐。装有 PowerShell 7 的机器可把 `powershell` 换成 `pwsh`。）
 > 输出只有一段 JSON：`{"ok":true,"result":{...}}` 或 `{"ok":false,"error":{"code":"...","message":"..."}}`。
+> - **调用错误的两种形态（v1.34）**：① 命令名/参数名打错（ValidateSet 拒绝、未知参数）时 PowerShell 在脚本正文之前就失败：**stdout 为空**、stderr 是宿主文本（含 `ParameterArgumentValidationError` / `Cannot validate argument`）、退出码 1；走 `woc.ps1` 时现在会**额外补一段 JSON** `{"ok":false,"error":{"code":"BAD_ARGS",...}}`，但走 `woc.cmd` 或直接调 `*.ps1` 仍只有 stderr。**判据**：stdout 空 + stderr 含上述关键字 ⇒ 按"调用错误"处理（改命令/参数），别当文档问题查。② 其余错误一律是 stdout 的 JSON 信封：`ok:false` + 退出码 2（`check*` 门禁为 3）。
 > 环境：Windows + WPS；首次调用会用系统自带 `csc.exe` 编译 helper（约 1 秒，之后按源码哈希缓存，不再编译）。
 
 ## 铁律（三个 app 通用，一条都不能省）
@@ -56,7 +59,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
    - `snapshot`/`diff`/`handoff` 都走 COM 读活文档，不依赖 save，不构成提前落盘的理由。
 7. **先分清"只连接"和"要动手"，别把连接做成体检。** 用户只说"连上 / 接管 / 打开这份文档 / 先看看有什么"时，本轮做到 **`status` → `open` → 报一句摘要**（文件名 / 页数或段落数 / 纸张或尺寸 / `readOnly` / 有无未保存改动）**就停下等指令**：不 `read` 全稿、不 `render`、不 `audit`、不 `snapshot`、不 `close`（文档留给用户继续用，等他下一次给出任务时再按铁律 4 收尾）。这些动作只在用户给出具体任务时才做，且只做该任务需要的那一部分——大文档 `read` 一次吐上万字符、`audit` 一次吐上百条（人工老稿误报居多），对"只是连上"的用户是纯等待成本。
    反过来同样成立：用户给了"改"的任务，别在没改完、没 `render` 复核之前就宣布完成。
-8. **公式与脚注是"原生对象"，不是文字（v1.29）。** `formula` 写的是真 OMML 公式、`footnote` 写的是真脚注——它们**不随 `revise` 的 `replace` 改字**（公式内部文字不能用 find/replace 改，脚注正文也不在正文段落里）。要改公式就重插（`formula` 无删除命令，用 `undo` 或让用户手工删）；要改脚注一律 `footnote -Action edit`。同理，**含脚注的段落不要整段 `set_text`**——旧实现会把脚注一起删掉；改成段内 `replace` 并且不跨过引用标记。
+8. **公式与脚注是"原生对象"，不是文字。** `formula` 写的是真 OMML 公式、`footnote` 写的是真脚注——它们**不随 `revise` 的 `replace` 改字**（公式内部文字不能用 find/replace 改，脚注正文也不在正文段落里）。要改公式就重插（`formula` 无删除命令，用 `undo` 或让用户手工删）；要改脚注一律 `footnote -Action edit`。同理，**含脚注的段落不要整段 `set_text`**——旧实现会把脚注一起删掉；改成段内 `replace` 并且不跨过引用标记。
 
 ### 接管提示（`hint`，v1.11）
 
@@ -65,7 +68,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 - **`open` 自动打标签**：窗口标签/标题变成 `〔AI接管中〕 报告.docx`（Writer / 表格都有；WPS 12 的标签页从右截断，所以标记放前面，长文件名也不会被吃掉）。这是纯窗口状态：不进修订、不写文件、不改 `saved`，`-NoHint` 可关。
 - **`hint` 补一句人话**：默认弹 6 s 托盘气泡——"已接管《报告.docx》：我会把改动做成修订或批注，你随时可以接受或拒绝。"`-Text` 换说法，`-HintTag` 换标题里的标签文字，`-Bar` 单独控制状态栏那行（表格会显示，Writer 不渲染），`-Quiet` 静默（不弹气泡，适合刷新标题/状态栏）。
 - **还原**：`hint -Clear`、`finish`、`close` 都会把标题恢复成文件名、把状态栏交还 WPS；`status` 每份文档带 `caption` 与 `hinted`，随时可核对当前有没有挂着标记。
-- **PPT 的标题标记（v1.26）**：COM 的 `ActiveWindow.Caption` 只读、`Application.Caption` 不重绘标题栏、`StatusBar` 属性不存在，但窗口框（`PP12FrameClass`）接受 `SetWindowText`——`open`/`hint` 给标题加「〔AI接管中〕」前缀，`hint -Clear`/`finish`/`close` 去掉；用户切标签页时 WPS 自己重置（不会挂错文档），下一条命令自动补回。返回里 `captionSupported:false` 仍表示"COM 标题不可写"，`titleMarked:true` 表示 Win32 标记已生效；气泡照旧（`-Toast`）。
+- **PPT 的标题标记**：COM 的 `ActiveWindow.Caption` 只读、`Application.Caption` 不重绘标题栏、`StatusBar` 属性不存在，但窗口框（`PP12FrameClass`）接受 `SetWindowText`——`open`/`hint` 给标题加「〔AI接管中〕」前缀，`hint -Clear`/`finish`/`close` 去掉；用户切标签页时 WPS 自己重置（不会挂错文档），下一条命令自动补回。返回里 `captionSupported:false` 仍表示"COM 标题不可写"，`titleMarked:true` 表示 Win32 标记已生效；气泡照旧（`-Toast`）。
 - **PPT 的页面标记（v1.27 起，v1.28 改为按需开启）**：WPS 演示的标签页是自绘的（从文件名画），改窗口标题只有任务栏 / Alt+Tab 看得见；唯一"界面里看得见"的通道是在**每一页右上角**贴一枚「〔AI接管中〕」橙色药丸（形状名 `woc-ai-takeover-mark`，最上层，放映时也在）。**它是内容不是窗口状态**，所以：默认**不贴**（`hint` 零改动，响应里 `inAppHint` 提示要加 `-SlideMark`）；`-SlideMark` 显式开启时返回 `slideMarkWarning`；`save`/`export` 落盘前剥离、写完补回；`hint -Clear`/`finish`/`close` 逐页删除；**用户手动 Ctrl+S 造成的污染会自动修复**（下一条命令：剥离→重存→贴回，返回 `badgeRepaired:true`）。读侧零干扰：`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 都跳过它（`read` 每页给 `takeoverBadge:true`）。
 - **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI接管中〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
 - **不做悬浮窗（用户明确决策，2026-10-30）**：不加置顶悬浮条/浮层——它会遮正文、抢焦点，而且要常驻 daemon 跟随 WPS 窗口（移动/最小化/切标签/异常退出都得收拾）。常驻信息由「标签页前缀标记 + 托盘图标」承担；**不要再向用户推荐，也不要把它做成"可选模式"偷偷加回来**。
@@ -113,15 +116,16 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `selection` | `-Doc <路径>` | **读用户当前选中/光标**：返回选中文本与覆盖的段落号（`fromPara/toPara`）；在表格里时再给 `table`（表号，直通 `table -Table n`/`cell -Table n`）与 `row`/`col`；覆盖**图片**时给 `images`（图号，直通 `picture -Image n`）——只读不改 |
 | `revise` | `-Doc <路径> -Items <json文件>` | **修订模式**批量改写（见下），返回改动与修订计数 |
 | `comment` | 列表：`-Action list`；单条：`-Para N [-Anchor "文字"] (-TextFile <txt文件> \| -Text "短文本")`；**批量：`-Items <json>`**；删除：`-Delete -Index N \| -All` | 加批注（中文正文走文件，避开引号转义）；`list` 返回每条的编号/作者/锚文/内容——编号就是 `-Delete -Index` 用的 |
-| `render` | `-Doc <路径> -Page 1 [-To 4] -Out <目录> [-Width 1100]`；**总览：`-Overview [-Page 1] [-To 18]`** | 页面 EMF → PNG（宽 320–2400），返回每页路径与尺寸。**`-Overview`（v1.29）= 联系表总览**：一张图 **6 页、3 列**、格宽 **640**、浅灰底 + 每格上方「第 N 页」，**一次最多 18 页**（超出返回 `capped:true` + `more`）；一次调用看清半空页/图表出框/表格断裂，可疑页再用 `-Page n -Width 1100` 放大复核 |
+| `render` | `-Doc <路径> -Page 1 [-To 4] -Out <目录> [-Width 1100]`；**总览：`-Overview [-Page 1] [-To 18]`** | 页面 EMF → PNG（宽 320–2400），返回每页路径与尺寸。**`-Overview`= 联系表总览**：一张图 **6 页、3 列**、格宽 **640**、浅灰底 + 每格上方「第 N 页」，**一次最多 18 页**（超出返回 `capped:true` + `more`）；一次调用看清半空页/图表出框/表格断裂，可疑页再用 `-Page n -Width 1100` 放大复核 |
 | `formula` | 单条：`-Doc -Para N [-Expect "<该段开头>"] -Latex "<LaTeX>" [-Display] [-Number "1"] [-Anchor "文字" -Where after\|before]`；**批量：`-Items <json>`**（`[{"para":N,"expect":"...","latex":"...","display":true,"number":"1"}]`） | **LaTeX → WPS 原生公式**（真 OMML，不是图片、不是线性文字）。行内式插到段末（或 `-Anchor` 指定处），`-Display` 独占一段并居中，`-Number`/`\tag{n}` 生成右对齐编号 `(n)`。**插入后校验 `OMaths.Count` 必须增加**，否则回滚并返回 `MATH_FAILED`；LaTeX 超出子集返回 `MATH_UNSUPPORTED`（点名不支持的命令），两者都**不留残留**。一次 ≤12 条 |
 | `footnote` | `-Action list`；`insert -Para N [-Expect] [-Find "词" -Where after\|before] (-Text "…" \| -TextFile <txt>)`；`edit -Index N [-Expect "…"] (-Text\|-TextFile)`；`delete -Index N`；`numbering -Number continuous\|section\|page` | **原生脚注 CRUD**。脚注是真脚注（WPS 自己编号），`list` 给 `i/label/para/page/text`（`i` **永远是 `Document.Footnotes` 的序号**，不是 `Range.Footnotes` 的）；`edit/delete` 带 `-Expect`（该脚注正文开头）不符报 `ANCHOR_MISMATCH` 而不是改错条 |
 | `font` | `-Doc <路径> -Name <字体名> [-Track]` | 把**正文、页眉、页脚、文本框**里的字体统一改成指定字体（中英文一起改，`-Name 仿宋`）；返回每个区段的结果与回读值。默认**不产生修订**，整批算一个撤销单元 |
 | `format` | `-Doc <路径> [-Para N \| -From N -To M \| -Style 样式名 \| -Match <正则>] [-Slow]` + 任意格式项 | 对**整篇/一段/一段区间/某样式的所有段/文本匹配正则的所有段**套字符与段落格式（`-Match` 例：`"^\s*(图\|附图)\s*\d"` 一次选中全部图名；返回命中数与前 5 个样例）。`-Style` 与 `-Match` 的定位扫描都在 WPS 进程内完成（v1.10 起 `-Style` 改 Find-by-style，往返 O(命中) 而非 O(段数)） |
 | `style` | `-Doc <路径> -Style <样式名> [-NoNumbering]` + 任意格式项 | 改**样式本身**（正文、标题 1…），所有用它的段落一起变 |
 | `page` | `-Doc <路径>`（**不带任何选项=查询各节设置**）`[-Paper A4] [-Orientation portrait\|landscape] [-Top/-Bottom/-Left/-Right 厘米] [-HeaderText] [-FooterText] [-PageNumber center\|right\|left\|none] [-PageNumberStart N\|none] [-All]` | 纸张/方向/页边距/页眉页脚/页码（逐节应用）；查询模式报每节纸张/方向/边距/页眉页脚 **+ `pageNumbers`（起始号/是否节内重启/该节首段的实际显示页码——页码断号一眼看出）**；`-PageNumberStart none` 试图清掉「本节重新编号」（WPS 常做不到，会**明说失败**并给 XML 路线） |
-| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`（每行带 `para` = 表起始段号）**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`**；**v1.33 一键整备 `-Action plan`**（只读侦察：每表 pages/rows/columns/题注位置与页码/边框/tblStyle/tblW/gridCols/pt 列宽/fontSize + `risks[]`（`captionInFirstRow`/`bordersNotThick`/`breakBefore`/`noStyle`/`noBorders`/`pctWidths`/`gridOverflow`/`multipageWithoutHeaderRepeat`）+ `captions[]`/`references[]`/`issues[]`（复用 captions 同一解析器）+ `renumber` 提议）与 **`-Action normalize`**（**默认只改 plan 判定未达标的表**：题注外提→空白规范化→可选重编号→加粗边框（WordOpenXML 列宽快照/恢复）→跨页表头→自检；逐表隔离、单条命令一个撤销单元、不 save；`-DryRun`/`-Table n`/`-NoCaptions`/`-NoBorders`/`-NoHeaderRepeat`/`-Gap 2`/`-Borders thick`/`-Fit keep\|window\|content`/`-Plan <plan.json>`/`-Verify`）。**表格整备先跑 plan 再 normalize，不要逐条小命令拼**（2026-11-03 实测：同一份 14 表报告用旧做法 127 次调用/88.6 min，其中 43 步是勘探与返工） | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法）。`scan` 的 `para` 可直接 `read -From <para-3> -Count 6` 看题注，或喂给 `-Action caption -Table n`。**v1.30**：① 新建表格的单元格默认**整词换行**（长数字不被拆）；② `-KeepTogether` 改为**逐行走选区写法 + 逐行回读**，返回 `keepTogether:{rowsExpected,rowsSet,readBackFailures,allowBreak}`，WPS 没接受的行走**整条命令 `ok:false`（`KEEPTOGETHER_FAILED`）**并点名行号——不再"报成功其实没落上"。**v1.33 两条硬结论**：③ **表名外提不是本 skill 的可靠能力**——题名做进表首行时，`normalize` 只在「回读题注页码 == 表起始页」成立时才外提（普通段落后/手动分页符前通常可以）；**表前是分节符时 WPS 无法在断点后造正文段，一律报 `needsHuman`，不重试**（彻底解决请人工把分节符剪到题注之后，或用微软 Word 的 `-CutPaste`；「删表+InsertXML」在 WPS 上会把 Writer 转死，默认禁用）；④ 给**XML 里没有 `w:tblBorders` 元素**的表写边框会让 WPS **重建整表布局、按渲染宽度重推 gridCol**（列宽漂移；无 tblStyle + dxa 固定的表会"崩"）——所以写前快照、写后回读、漂移即恢复，且已达标的表**跳过不写** |
-| `fillgaps` | `-Doc <路径> [-DryRun] [-MaxMoves 8] [-MinGapPt 0]` | **填掉图/表前面的页面留白**（v1.30；照 dsh-office 的 `fill_gaps` 移植）：图/表因放不下整块跳到下一页、上一页底部空出一截时，把**图/表后面的正文段**提到图/表之前补上。`-DryRun` 只报不动（**只读文档也能跑**），返回 `moves:[{block,kind,para,page,gap,text}]`；空白阈值默认 `max(90pt, 文本高度×12%)`，`-MinGapPt` 可覆盖。**保守判据**：块前一段必须是正文（不越标题）、块首行页码必须晚于前一段、块后段不能是空段/题注/图段/表内段、冒号结尾的引导句连带搬。搬完会**在表格前留一个空段**（实现代价，已记 quirks）；`moved:0` 是正常结果（说明这稿没有值得填的留白） | **常驻 helper 控制**（Word/Excel/PPT 三端都有，v1.15 起）：start 预热/查看管道、status 报 `running`/`pipe`、stop 让它答完即退。正常流程**不用手动调**——`open` 会自动拉起、`close` 关完文档自动退出；设 `WOC_NO_DAEMON=1` 可整轮退回一次性模式（也是 A/B 用的开关）。设计见 `reference/workflows.md` §15 |
+| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`（每行带 `para` = 表起始段号）**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`**；**v1.33 一键整备 `-Action plan`**（只读侦察：结构/题注位置与页码/边框/样式/列宽/字号 + `risks[]` + `captions[]`/`references[]`/`issues[]` + `renumber` 提议）与 **`-Action normalize`**（默认只改 plan 判定未达标的表；`-DryRun`/`-Table n`/`-NoCaptions`/`-NoBorders`/`-NoHeaderRepeat`/`-Gap 2`/`-Fit keep\|window\|content`/`-Plan <file>`/`-Verify`）。**先 plan 再 normalize，不要逐条小命令拼**；plan 完整字段清单见下方工作流 §11 与 [reference/word-quirks.md](reference/word-quirks.md)「表格整备」 | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法）。`scan` 的 `para` 可直接 `read -From <para-3> -Count 6` 看题注，或喂给 `-Action caption -Table n`。**v1.30**：新建表格的单元格默认**整词换行**；`-KeepTogether` 逐行走选区 + **逐行回读**（WPS 没接受的行走 → 整条命令 `ok:false` + `KEEPTOGETHER_FAILED` 点名行号，不再"报成功其实没落上"）。**v1.33 两条硬结论**：① 题名外提**不承诺**（回读「题注页码 == 表起始页」才保留；表前是分节符 → `needsHuman`，不重试；cut-paste 在 WPS 上会把 Writer 转死，默认禁用）；② 给**缺 `w:tblBorders` 的表**写边框会触发 WPS 重建布局、按渲染宽度重推 gridCol（写前快照/写后回读/漂移即恢复，已达标的表跳过）。细节 → [reference/word-quirks.md](reference/word-quirks.md)「表格整备」 |
+| `fillgaps` | `-Doc <路径> [-DryRun] [-MaxMoves 8] [-MinGapPt 0]` | **填掉图/表前面的页面留白**（v1.30；照 dsh-office 的 `fill_gaps` 移植）：图/表因放不下整块跳到下一页、上一页底部空出一截时，把**图/表后面的正文段**提到图/表之前补上。`-DryRun` 只报不动（**只读文档也能跑**），返回 `moves:[{block,kind,para,page,gap,text}]`；空白阈值默认 `max(90pt, 文本高度×12%)`，`-MinGapPt` 可覆盖。**保守判据**：块前一段必须是正文（不越标题）、块首行页码必须晚于前一段、块后段不能是空段/题注/图段/表内段、冒号结尾的引导句连带搬。`moved:0` 是正常结果（这稿没有值得填的留白）；搬完表格前会留一个空段（实现代价，见 quirks 与下方故障排查） |
+| `serve` | `-Action start\|status\|stop` | **常驻 helper 控制**（Word/Excel/PPT 三端都有，v1.15 起）：start 预热/查看管道、status 报 `running`/`pipe`、stop 让它答完即退。正常流程**不用手动调**——`open` 会自动拉起、`close` 关完文档自动退出；设 `WOC_NO_DAEMON=1` 可整轮退回一次性模式（也是 A/B 用的开关）。设计见 `reference/workflows.md` §15；`-Action reset`（v1.34）= daemon 读超时后复位重连 |
 | `textdiag` | `-Doc <路径> [-Slow]` | **读侧慢/回退的体检**（只读，一次调用）：① 段落数/修订数/表数/表行总数；② `Content.Text` 的块数与尾块；③ 抽样段落号在块模型下的文本 vs 真值；④ 表格行数 vs 段落数的关系（WPS 每行多算一个空段落——块模型对不上的根因）；⑤ `WordOpenXML` 是否可取、字符数、`w:p` 数、`w:p`+表行是否等于段落数、解析耗时；⑥ 最终 `fastPath`/`fastFail` 结论。**遇到「按说几秒却几十秒」先跑它** |
 | `captions` | `-Doc <路径> [-Label 表\|图] [-Max 200]` | **题注清单 + 编号体检**（只读，一条命令替掉"全篇扫段落配对"）：每张表 → 题注段号 `para` / 位置 `pos`（`above` 表上方、`in-table` 做在第 1 行、`below` 在表下方）/ 表号 `number` / 格式 `format`（`dot` 2.4.1、`hyphen` 3.3-1、`plain` 表1）/ 空白 `gap` / `title`；`summary` 汇总重号、同节跳号（`missing` 列出缺的号）、格式混用、空格不一、题注位置混用、缺题注、正文引用与表号的对应（`references` 里 `resolved`）+ 悬空引用；`issues` 每条给 `rule`+`para`+`sample`+`suggest`，直接可照着改。实测 10521 段 / 32 表 **6.4 s**；编号问题**不要**用 `audit` 或全篇 `read` 去查 |
 | `caption` | `-Para N -Label 表\|图 -Title "..." [-Above] [-Align center]` | 生成**域**式题注「表 1 xxx」（自动编号，增删后重排） |
@@ -143,7 +147,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `close` | `-Doc <路径> [-Save]` | 关闭；无其它文档时退出实例，并回报进程数 |
 | `quit` | — | 关掉该实例的**全部**文档并退出（不保存）。**慎用**：会波及用户在同一实例里开的文档，只在自己的独占实例上用 |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | **任务完成信号**（agent 无关，零依赖）：默认**托盘气泡 + 提示音**（原生 .NET），**不触碰文档任何内容**；`-Quiet` 静音。**任务收尾默认调用** |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**三者都是窗口状态，不写文档、不落盘**。`open` 已自动打标签；`-Text` 换气泡/状态栏里的话（如"正在核对第 3 节"）；`-Clear` 还原（`finish`/`close` 也会自动还原）。Writer 的 `Application.StatusBar` 只写不读、且 WPS 界面不渲染（实测状态栏仍是页面/字数），`statusBar:true` 只代表写入被接受；表格侧写入会真的显示。**`-Tray`**（v1.12）：常驻托盘图标，悬停=标记+当前步骤，右键可还原，`finish`/`close`/`-Clear` 自动移除 |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**三者都是窗口状态，不写文档、不落盘**。`open` 已自动打标签；`-Text` 换气泡/状态栏里的话（如"正在核对第 3 节"）；`-Clear` 还原（`finish`/`close` 也会自动还原）。Writer 的 `Application.StatusBar` 只写不读、且 WPS 界面不渲染（实测状态栏仍是页面/字数），`statusBar:true` 只代表写入被接受；表格侧写入会真的显示。**`-Tray`**：常驻托盘图标，悬停=标记+当前步骤，右键可还原，`finish`/`close`/`-Clear` 自动移除 |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）控制等待；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
 
@@ -209,7 +213,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
     - `normalize`（默认只改 plan 判定未达标的表）：题注外提（**尽力而为、不承诺**：回读「题注页码 == 表起始页」通过才保留；普通段落后、手动分页符前的表通常可提；**表前是分节符时 WPS 无法在断点后造正文段 → 报 `needsHuman`，不重试**）→ 题注空白统一（默认 `-Gap 2`，只统一「编号与题名」之间，不擅改「表2.1.1」这种标签-编号间距）→ 可选重编号 → 加粗边框（WordOpenXML 列宽快照/恢复，本来达标的表跳过）→ 跨页表头 → 自检；**逐表隔离**（一张失败不回滚其它）、整条命令一个撤销单元、**绝不隐式 save**。先 `-DryRun` 看一眼要改哪些表。
     - 复核：`render -Table n`（只渲该表所跨页，不再整页翻）+ `plan` 再跑一次比 before/after；`verification` 里 `captionInFirstRow`/`bordersNotThick`/`multipageWithoutHeaderRepeat`/`captionPageMismatch`/`widthsChanged` 都应归零。
     - 只有"单点小活"（就一张表、只提题名）才用逐条命令：`table -Action caption -Table n -Borders thick` / `-Action header-repeat` / `-Action rows`。
-    - 细节、失败码与实测数字见 [reference/workflows.md](reference/workflows.md) 的「表格整备（v1.33）」一节。
+    - 细节、失败码与实测数字见 [reference/workflows.md](reference/workflows.md) 的「表格整备」一节。
 12. **单位上标批量修（几百页报告的常见活）**：`unit -Doc X` 先看体量 → `unit -Doc X -Apply` 一键修（已正确的跳过）→ `render` 抽 1–2 页确认 → `save`。
     - 判据：`unit` 的 `plainDigitHits` − `unicodeOk` 不等于坏例数，**坏例数以 `-Apply` 返回的 `fixed` 为准**（只有 Find 能看到 run 格式，文本层分不出"真掉"和"格式上标"）。
     - `skippedSamples` 里若出现疑似真单位，用 `-Units` 补上重跑；若是英文词（`item3`、`com2`）则不用管。
@@ -219,9 +223,9 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
     - 全文见 [reference/workflows.md](reference/workflows.md) 的「单位上标批量修」一节。
 13. **反悔**：自己刚写完且无 `changedOutside` 时 `undo -Count N`（排版批=1 步）。
 14. **写公式（LaTeX，v1.29）**：`read` 定位段号 → `formula -Para N -Expect "<段首>" -Latex "..."`（行内式）；要编号的独立公式用 `-Display -Number "3"`。**含 `^` `{}` `\` 的 LaTeX 一定用单引号**，或整批走 `-Items <json>`。插完 `read` 一眼（公式在 `text` 里显示为数学字符，另有 `omaths` 计数）→ `render` 抽一页看分式/根号/上下标是否成形。支持的子集与不支持清单见 [reference/word-quirks.md](reference/word-quirks.md) 末节——**不支持的命令会直接报 `MATH_UNSUPPORTED` 并点名**，别反复试。
-15. **加脚注（v1.29）**：`footnote -Action insert -Para N -Expect "<段首>" [-Find "<锚词>" -Where after] -TextFile <txt>`（中文正文走文件）→ `footnote -Action list` 拿 `i` → 要改 `edit -Index i -Expect "<原文开头>"`，要删 `delete -Index i`。**不要**用"上标数字 + 页脚手写"伪造脚注：那不是原生脚注，增删后编号必错、也不会随页面重排。
-16. **交付前过全稿（v1.29）**：`render -Overview -Page 1 -To 18`（≤18 页/次，一张图 6 页）→ 看总览图挑可疑页 → `render -Page n -Width 1100` 放大 → 再 `save`。
-17. **排版收尾：填留白（v1.30）**：全稿写完、图表都插好之后跑一次 `fillgaps -DryRun` 看它会搬哪几段（返回 `moves[].gap` 是那一页底部的空白大小）→ 没意见就 `fillgaps` 实跑 → `render` 看 `moves[].page` 那几页。表格跨页被劈开、行落单时先 `table -KeepTogether -Table n`（它会逐行回读，`ok:false` 就是 WPS 没接受）。**注意**：`fillgaps` 只搬正文段、绝不越过标题；表格前会留一个空段；`moved:0` 说明这稿没有值得填的留白，不是失败。
+15. **加脚注**：`footnote -Action insert -Para N -Expect "<段首>" [-Find "<锚词>" -Where after] -TextFile <txt>`（中文正文走文件）→ `footnote -Action list` 拿 `i` → 要改 `edit -Index i -Expect "<原文开头>"`，要删 `delete -Index i`。**不要**用"上标数字 + 页脚手写"伪造脚注：那不是原生脚注，增删后编号必错、也不会随页面重排。
+16. **交付前过全稿**：`render -Overview -Page 1 -To 18`（≤18 页/次，一张图 6 页）→ 看总览图挑可疑页 → `render -Page n -Width 1100` 放大 → 再 `save`。
+17. **排版收尾：填留白**：全稿写完、图表都插好之后跑一次 `fillgaps -DryRun` 看它会搬哪几段（返回 `moves[].gap` 是那一页底部的空白大小）→ 没意见就 `fillgaps` 实跑 → `render` 看 `moves[].page` 那几页。表格跨页被劈开、行落单时先 `table -KeepTogether -Table n`（它会逐行回读，`ok:false` 就是 WPS 没接受）。**注意**：`fillgaps` 只搬正文段、绝不越过标题；表格前会留一个空段；`moved:0` 说明这稿没有值得填的留白，不是失败。
 
 ## Word 长任务的上下文纪律（v1.33，2026-11-03 实测）
 
@@ -246,16 +250,16 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `READONLY` | 文件被别处占用或是只读属性。关掉占用它的程序，或请用户另存一份再改；不要强行覆盖保存。 |
 | `ANCHOR_MISSING` | 段落编号漂移（表格也占段落号，且每行多一段）或 `expect`/`find` 与原文不符。整批**一条都没改**，先 `search`/`read` 该段核对编号与原文再来；并发协作时先怀疑"人刚改了这段"。 |
 | `BUSY` / `TIMEOUT` | 用户正在打字、或有对话框/弹窗挡着。**v1.32 起 helper 装了 OLE 消息过滤器**：WPS 拒绝调用时会以 **150 ms 间隔自动重试、最多 6 s**，仍不行才报 `BUSY`（可重试）——所以看到 `BUSY` 说明"已经等过 6 秒还忙"，等用户停手再发，别连发。`TIMEOUT` 是等你设的 `-TimeoutSec`。 |
-| `COM_ERROR: RPC 服务器不可用 (0x800706BA)`（v1.29 实测） | 有人**在 daemon 还活着时把 WPS 进程杀了**（或 WPS 崩溃），常驻 helper 握着的是死引用，之后每条命令都报这个 | 三端各跑一次 `serve -Action stop` 把 daemon 停掉，下一条命令会重新拉起并重连；**不要**反复重试同一条命令 |
+| `COM_ERROR: RPC 服务器不可用 (0x800706BA)`（实测） | 有人**在 daemon 还活着时把 WPS 进程杀了**（或 WPS 崩溃），常驻 helper 握着的是死引用，之后每条命令都报这个 | 三端各跑一次 `serve -Action stop` 把 daemon 停掉，下一条命令会重新拉起并重连；**不要**反复重试同一条命令 |
 | 打开即 `COM_ERROR` / 文件读不出来 | 多半是密文且不归 WPS 管（例如离线脚本写出的）。让用户在 WPS 里打开一次（驱动会透明解密），或按 [reference/encryption.md](reference/encryption.md) 先解密。注意：helper **不产出** `ENCRYPTED` 码。 |
 | `open` 返回 `multiInstanceWarning` | 文档可能同时开在另一个 WPS 实例里（本 skill 只能接到第一个注册实例）。请用户在 WPS 里关掉另一份再继续，否则两份会互相覆盖。 |
 | 结果里出现 `reopened` | 文档刚才被人在 WPS 里关掉了，本命令已从磁盘**静默重开**（未弹窗）。若同时有 `unsavedAtClose: true`，说明关闭时未保存——关闭前的改动（含本 skill 的修订/批注）**可能已丢失**：先 `diff` 快照对账、向用户确认后再继续。 |
-| `MATH_UNSUPPORTED` + 命令名（v1.29） | 该 LaTeX 用了 `Omml.cs` 子集外的命令（`\substack`、`\mathop`、`\stackrel`、`\overset/\underset`、`\boxed`、`\begin{array}{cc}` 的列格式串等） | 换写法：矩阵用 `matrix/pmatrix/cases` 且**不写列格式**；分段函数用 `cases`；实在要 `array` 就改成手写多行公式。报告类公式优先 ASCII，中文只在 `\text{}` 里且字体不保证 |
+| `MATH_UNSUPPORTED` + 命令名 | 该 LaTeX 用了 `Omml.cs` 子集外的命令（`\substack`、`\mathop`、`\stackrel`、`\overset/\underset`、`\boxed`、`\begin{array}{cc}` 的列格式串等） | 换写法：矩阵用 `matrix/pmatrix/cases` 且**不写列格式**；分段函数用 `cases`；实在要 `array` 就改成手写多行公式。报告类公式优先 ASCII，中文只在 `\text{}` 里且字体不保证 |
 | `MATH_FAILED`（"inserted the XML but built no equation"） | WPS 没把 Flat OPC 包认成公式：多发生在域代码/文本框/特殊段落上下文里 | 命令已按 `Content.End` 增量回滚，文档没脏。换段落下手，或先插一个空段再往空段里 `formula`；仍失败就退回 Unicode 上标文字并告知用户 |
-| 脚注 `ANCHOR_MISMATCH`（v1.29） | `-Index` 指向的脚注正文与 `-Expect` 不符（前面插/删过脚注，序号已移位） | 先 `footnote -Action list` 重取 `i` 再改，**不要**跳过后硬重试 |
-| 脚注里要写公式（v1.29） | 目前不支持（返回 `BAD_ARGS` 明说） | 公式放正文用 `formula`；脚注里用 Unicode（`x²`、`α ≤ β`） |
-| `KEEPTOGETHER_FAILED`（v1.30） | `table -KeepTogether` 逐行回读时 WPS 没接受某些行的 `KeepWithNext`/`AllowBreakAcrossPages`（合并单元格、复杂行高、表格在文本框里等） | 看 `error.detail.readBackFailures` / `.allowBreak.readBackFailures` 点名的行号；这几行改用"调段前文字让表格整块落下"或先取消合并单元格再跑。**不要**重跑同一条命令期待不同结果 |
-| `fillgaps` 返回 `moved:0`（v1.30） | 正常结果：这稿没有"图表被挤到下一页、上一页底部还空着"的情形（空白 < `max(90pt,12%)`，或图表本来就在同页） | 不需要处理。若你**肉眼看到**明显空白却没搬，用 `-MinGapPt 60` 再试一次；仍为 0 就把那页 `render` 出来给人看 |
+| 脚注 `ANCHOR_MISMATCH` | `-Index` 指向的脚注正文与 `-Expect` 不符（前面插/删过脚注，序号已移位） | 先 `footnote -Action list` 重取 `i` 再改，**不要**跳过后硬重试 |
+| 脚注里要写公式 | 目前不支持（返回 `BAD_ARGS` 明说） | 公式放正文用 `formula`；脚注里用 Unicode（`x²`、`α ≤ β`） |
+| `KEEPTOGETHER_FAILED` | `table -KeepTogether` 逐行回读时 WPS 没接受某些行的 `KeepWithNext`/`AllowBreakAcrossPages`（合并单元格、复杂行高、表格在文本框里等） | 看 `error.detail.readBackFailures` / `.allowBreak.readBackFailures` 点名的行号；这几行改用"调段前文字让表格整块落下"或先取消合并单元格再跑。**不要**重跑同一条命令期待不同结果 |
+| `fillgaps` 返回 `moved:0` | 正常结果：这稿没有"图表被挤到下一页、上一页底部还空着"的情形（空白 < `max(90pt,12%)`，或图表本来就在同页） | 不需要处理。若你**肉眼看到**明显空白却没搬，用 `-MinGapPt 60` 再试一次；仍为 0 就把那页 `render` 出来给人看 |
 | `fillgaps` 搬完表格上方多出一个空段（v1.30，已知代价） | 表格块的搬运必须在表格前一段的段末标记**之前**插一个 `\r` 才写得进去（直接写 `table.Range.Start` 会落进第一个单元格） | 需要极干净版面时，可先 `fillgaps` 再 `table -Action rows`/手工删掉那个空段，或接受它（视觉上是一行空白） |
 | `render -Overview` 只给 1–3 张图且 `capped:true` | 一次最多 18 页（3 张 × 6 页/张） | 接着 `-Page 19 -Overview` 看下一页组；**不要**一次要 60 页（图会大且糊） |
 | 中文乱码 | 控制台代码页不是 UTF-8。先 `[Console]::OutputEncoding=[Text.Encoding]::UTF8`，或把 JSON 落成文件按 UTF-8 读。 |
@@ -287,21 +291,21 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `doctor` | — | 自检：ProgID 安装/在跑、进程数、渲染能力、打开的工作簿 |
 | `status` | — | 在跑的实例与工作簿清单（name / path / saved / readOnly / active），工作表概况 |
 | `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用，未开则打开；返回工作表清单与各自 usedRange。**v1.11 起自动给窗口标签打「〔AI接管中〕」接管标记**（`hint.caption`；用 `wb.Windows(1).Caption`，WPS 表格里 `wb.ActiveWindow` 常为 null） |
-| `new` | `-Doc <路径> [-Show] [-Overwrite] [-NoHint]` | **新建空白工作簿并落盘**（v1.16）：`Workbooks.Add` + `SaveAs`（.xlsx/.xls/.csv/.xlsm 按扩展名选格式），已打开并打接管标记。文件已存在时拒绝（`EXISTS`），`-Overwrite` 才替换；**目标正开在 WPS 里则拒绝**（`IN_USE`，先 `close`）。`open` 对不存在的路径报 `NOT_OPEN`，要造新表用这条，**不要**再自己写 openpyxl |
+| `new` | `-Doc <路径> [-Show] [-Overwrite] [-NoHint]` | **新建空白工作簿并落盘**：`Workbooks.Add` + `SaveAs`（.xlsx/.xls/.csv/.xlsm 按扩展名选格式），已打开并打接管标记。文件已存在时拒绝（`EXISTS`），`-Overwrite` 才替换；**目标正开在 WPS 里则拒绝**（`IN_USE`，先 `close`）。`open` 对不存在的路径报 `NOT_OPEN`，要造新表用这条，**不要**再自己写 openpyxl |
 | `read` | `-Doc` `[(-Sheet 名 \| -Range "Sheet1!A1:F40")] [-Profile]` | 不带选项=工作簿概览；带 Sheet=读该表 used range（值 + 公式）；`>60 行或 >15 列`自动改列概况，要局部全量用 `-Range`。**v1.29 概况增强**：每列多了 `letter/header`、`numbers/dates/texts/blanks/errors`、`dateFrom/dateTo`、`farAbove`（离群 q3+3·IQR、命中 ≤5% 才报）、`distinct/topValues/repeats`，以及 **`look:[…]`**（`n with stray spaces`、`n number(s) written as text`、`n date(s) written as text`、`mixed numbers and text`、`n error value(s)`）；顶层加 `dataRows/emptyRows/duplicateRows`；**日期列按 `NumberFormat` 判定、值直接从序列号转成 `yyyy-MM-dd`**；错误值改成 `#DIV/0!`/`#N/A`/`#REF!` 等可读码。**拿到概况先看 `look`，再决定跑哪条 `clean`** |
 | `write` | `-Doc -Items <json>`（或单格 `-Cell B3 -Value x / -Formula "=..."`） | **批量写**（见下）：原子批、`expect` 锚校验、中途失败回滚，每格返回 before→after；**批内自动挂起重算+屏幕刷新，批末一次重算**（大表写几千格不产生重算风暴） |
 | `fill` | `-Doc -Range D2:D5000 [-Sheet] -Formula "=B2*C2"` | **整列填公式**：首格写一次 + 原生 FillDown（2000 行约 2 秒，含进程启动）；比逐格 write 快几个量级，大表必用。**v1.29 起返回 `errors:[{cell,code}]`**（写完即告 `#DIV/0!` 这类错误格，不用等用户发现） |
-| `replace` | `-Find "旧" [-Replace "新"]`（省略 = 删除）`[-Sheet] [-Range A1:F200] [-Column 表头\|字母] [-Whole] [-MatchCase] [-Regex] [-DryRun] [-Max N] [-All]` | **内存块替换**（v1.31）：一次块读 → 本地逐格替换 → 只写真正变化的格，**绝不走 `Range.Replace`**（WPS 会在刚写进去的文本上二次替换，`P→P-` 得 `P--`；我们单遍扫描，实测 `PP→P-P-`）。返回 `scanned/changed/byColumn/samples/formulaCellsSkipped/numericMatchesLeftAlone/truncated` + `preSnapshot`（可 `diff -Since`/`restore -Since`）。**公式格永不写**；**数字/日期格不改成文本**（`-Find 0` 想改数字列会给 `changed:0` + `numericMatchesLeftAlone:N`）；`-DryRun` 与实跑同一套判据；规则不自匹配时幂等（第二次 `changed:0`） |
-| `clean` | `-Column 表头\|C`（或 `-Columns "A,C"`）`[-To number\|date\|text] [-Casing upper\|lower\|proper] [-Remove "元,["] [-Map '{"是":"Y"}'] [-Year 2025] [-NoSpaces] [-NumberFormat]` | **清洗列**（v1.29）：去多余空格（含全角/制表符）、去指定字样、大小写、取值改名；`-To number` 认 `¥1,299`/`89元`/`10%`/`12 件`，`-To date` 认 `2025/3/1`/`2025.03.01`/`20250301`/`2025年3月1日`/`3月1日`（**年份取整列众数**，可用 `-Year` 指定）。返回每列 `changed`/`notReadable`（读不成的格 + 前 5 个地址与原文）/`valuesNow`；**有公式的列只写非公式格** |
-| `fillblanks` | `-Column 水位`（或 `-Columns`）`-With 0\|above\|mean\|median\|mode` | **补空格**（v1.29）：填固定值 / 上一格 / 均值 / 中位数 / 众数（报告附表"同上"高频） |
-| `dedupe` | `[-Columns "站码,日期"] [-Range]` | **去重复行**（v1.29）：键列相同（省略 = 整行相同）只留第一行；**真删行**，删前 `snapshot` |
-| `deletewhere` | `-Column 流量 -Cond "<" -Value 0`；`-Cond blank`（省略 `-Column` = 删整行为空的行）；`-Cond in -InValues "a,b"` | **按条件删行**（v1.29）：`blank\|=\|<>\|>\|<\|>=\|<=\|contains\|text\|error\|in`；**自底向上合并区间一次 `Delete`**（不是逐行删），返回删了哪些行 |
-| `sort` | `-By "流量:desc,站码"`（或 `-Column 流量 -Order desc`）`[-NoHeader]` | **就地表排序**（v1.29）：公式与格式随行走，不破坏联动 |
-| `filter` | `-Column 站点 -InValues "外洲,李家渡"`；`-Column 流量 -Criteria ">1000"`；`-Action clear` | **自动筛选**（v1.29）：只隐藏不删除，返回 `shown/total`；`-Action clear` 复原 |
-| `copy` | `-Range A1:F21 -To "备份!A1" [-Values]` | **复制区域**（v1.29）：公式+格式一起；`-Values` 固化数值且**不重解析文本**（20250301 不会变数字）。只做同簿 |
-| `addcol` | `-Header 流量2 -Formula "=D2*2"`（或 `-Value 0`）`[-After 流量] [-NumberFormat "0.0"] [-Values]` | **加一列并填满**（v1.29）：同名表头 = 重填；`-Values` 固化结果；返回错误格 |
-| `pivot` | `-Range A1:F2000 -Rows 站点 [-Columns 月份] -Agg "流量:sum,水位:average" [-Filters] [-Group "日期:month\|quarter\|year"] [-SortBy "合计：流量:desc"] [-Name 透视表] [-To "某表!A3"]` | **透视表**（v1.29）：结果网格**随返回值一起回**（`rows:[[行号,值…]]`，前 40 行 × 14 列），不用再 `read`；默认新建工作表「透视表」落在 A3。源区域每列必须有表头。**v1.31**：`-Group` 已实测——WPS 12.1 **原生支持**按日期分月/季/年（24 行实测：月 110…1320 总计 8580、季 660/1650/2640/3630、年 780/7800，全与手算一致），返回 `groupMode`（`none\|native\|failed`）+ `group{field,by,mode}`；**文本日期会失败**（WPS 抛「选定区域不能分组。」）→ `failed` + `notes` 给降级配方（加 `=YEAR()`/`TEXT(日期,"yyyy-mm")`/`"Q"&ROUNDUP(MONTH()/3,0)` 辅助列再按辅助列透视；辅助列是数据源、建完不能删） |
-| `sheet` | `-Doc -Action list\|add\|rename\|delete\|activate [-Name] [-NewName]` | 工作表增删改名 + **`activate`（v1.17）把某张表变成活动表**（用户看得见、且依赖 ActiveSheet 的老操作也跟它走）；以前只能裸 COM `Worksheets.Item(n).Activate()` 逃生 |
+| `replace` | `-Find "旧" [-Replace "新"]`（省略 = 删除）`[-Sheet] [-Range A1:F200] [-Column 表头\|字母] [-Whole] [-MatchCase] [-Regex] [-DryRun] [-Max N] [-All]` | **内存块替换**：一次块读 → 本地逐格替换 → 只写真正变化的格，**绝不走 `Range.Replace`**（WPS 会在刚写进去的文本上二次替换，`P→P-` 得 `P--`；我们单遍扫描，实测 `PP→P-P-`）。返回 `scanned/changed/byColumn/samples/formulaCellsSkipped/numericMatchesLeftAlone/truncated` + `preSnapshot`（可 `diff -Since`/`restore -Since`）。**公式格永不写**；**数字/日期格不改成文本**（`-Find 0` 想改数字列会给 `changed:0` + `numericMatchesLeftAlone:N`）；`-DryRun` 与实跑同一套判据；规则不自匹配时幂等（第二次 `changed:0`） |
+| `clean` | `-Column 表头\|C`（或 `-Columns "A,C"`）`[-To number\|date\|text] [-Casing upper\|lower\|proper] [-Remove "元,["] [-Map '{"是":"Y"}'] [-Year 2025] [-NoSpaces] [-NumberFormat]` | **清洗列**：去多余空格（含全角/制表符）、去指定字样、大小写、取值改名；`-To number` 认 `¥1,299`/`89元`/`10%`/`12 件`，`-To date` 认 `2025/3/1`/`2025.03.01`/`20250301`/`2025年3月1日`/`3月1日`（**年份取整列众数**，可用 `-Year` 指定）。返回每列 `changed`/`notReadable`（读不成的格 + 前 5 个地址与原文）/`valuesNow`；**有公式的列只写非公式格** |
+| `fillblanks` | `-Column 水位`（或 `-Columns`）`-With 0\|above\|mean\|median\|mode` | **补空格**：填固定值 / 上一格 / 均值 / 中位数 / 众数（报告附表"同上"高频） |
+| `dedupe` | `[-Columns "站码,日期"] [-Range]` | **去重复行**：键列相同（省略 = 整行相同）只留第一行；**真删行**，删前 `snapshot` |
+| `deletewhere` | `-Column 流量 -Cond "<" -Value 0`；`-Cond blank`（省略 `-Column` = 删整行为空的行）；`-Cond in -InValues "a,b"` | **按条件删行**：`blank\|=\|<>\|>\|<\|>=\|<=\|contains\|text\|error\|in`；**自底向上合并区间一次 `Delete`**（不是逐行删），返回删了哪些行 |
+| `sort` | `-By "流量:desc,站码"`（或 `-Column 流量 -Order desc`）`[-NoHeader]` | **就地表排序**：公式与格式随行走，不破坏联动 |
+| `filter` | `-Column 站点 -InValues "外洲,李家渡"`；`-Column 流量 -Criteria ">1000"`；`-Action clear` | **自动筛选**：只隐藏不删除，返回 `shown/total`；`-Action clear` 复原 |
+| `copy` | `-Range A1:F21 -To "备份!A1" [-Values]` | **复制区域**：公式+格式一起；`-Values` 固化数值且**不重解析文本**（20250301 不会变数字）。只做同簿 |
+| `addcol` | `-Header 流量2 -Formula "=D2*2"`（或 `-Value 0`）`[-After 流量] [-NumberFormat "0.0"] [-Values]` | **加一列并填满**：同名表头 = 重填；`-Values` 固化结果；返回错误格 |
+| `pivot` | `-Range A1:F2000 -Rows 站点 [-Columns 月份] -Agg "流量:sum,水位:average" [-Filters] [-Group "日期:month\|quarter\|year"] [-SortBy "合计：流量:desc"] [-Name 透视表] [-To "某表!A3"]` | **透视表**：结果网格**随返回值一起回**（`rows:[[行号,值…]]`，前 40 行 × 14 列），不用再 `read`；默认新建工作表「透视表」落在 A3。源区域每列必须有表头。**v1.31**：`-Group` 已实测——WPS 12.1 **原生支持**按日期分月/季/年（24 行实测：月 110…1320 总计 8580、季 660/1650/2640/3630、年 780/7800，全与手算一致），返回 `groupMode`（`none\|native\|failed`）+ `group{field,by,mode}`；**文本日期会失败**（WPS 抛「选定区域不能分组。」）→ `failed` + `notes` 给降级配方（加 `=YEAR()`/`TEXT(日期,"yyyy-mm")`/`"Q"&ROUNDUP(MONTH()/3,0)` 辅助列再按辅助列透视；辅助列是数据源、建完不能删） |
+| `sheet` | `-Doc -Action list\|add\|rename\|delete\|activate [-Name] [-NewName]` | 工作表增删改名 + **`activate`把某张表变成活动表**（用户看得见、且依赖 ActiveSheet 的老操作也跟它走）；以前只能裸 COM `Worksheets.Item(n).Activate()` 逃生 |
 | `comment` | `-Action list`；加：`-Cell D5 (-Text "短文" \| -TextFile <txt>)`；删：`-Action delete -All` | 单元格批注（校审指认用；中文长文走文件避开引号转义） |
 | `search` | `-Doc -Text <词> [-Sheet 名] [-Max 50] [-Case]` | **找格**：跨表搜值和公式，返回命中格/值/公式（定位用这个，别整表 read） |
 | `selection` | `-Doc` | **读用户当前选中的区域**：sheet/range/行列数/值（≤400 格直接带值）——用户说"就改我选的这块"时用；选在别的窗口报 NOT_OPEN |
@@ -309,10 +313,10 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `render` | `-Doc [-Sheet] [-Range] -Out <目录> [-Width 1100]` **`[-IncludeCharts]`** | 区域 `CopyPicture(xlScreen)` → PNG。**语义（v1.17 实测修正）**：图里**会**包含与该区域相交的浮动图表（A1:H52 有两张图 → 都拍到；A1:H10 无重叠 → 一张也没有），但**不含区域之外的**图表。`-IncludeCharts` 把视图自动扩到覆盖该表**全部**图表再出图（返回 `chartsIncluded` 与每张图 `left/top`）——有图表的表用它，**一次成图，不要再截桌面**。**v1.32：render 前后会保存/恢复你的剪贴板**（`CopyPicture` 用完不吞你复制的内容，且恢复的内容不进 Win+V 历史） |
 | `chart` | 加：`-Range 数据区 [-Type column\|bar\|line\|pie\|scatter\|area\|combo] [-Title] [-XTitle] [-YTitle] [-Y2Title] [-Secondary "系列名/序号"] [-Labels value\|percent] [-Legend bottom\|top\|left\|right] [-AxisMin/-AxisMax] [-NumberFormat] [-Anchor E2] [-Width 480] [-Height 300]`；`-Action list [-All]`；`-Action delete\|move -Index n [-Anchor X] [-Width] [-Height]` | 建原生图表。**v1.17**：① 第 1 列=x，**第 2..N 列各一条系列**（表头作系列名，多系列自动出图例）——「Q–H 族曲线」一张图即可；② 尺寸可调（默认 480×300 pt）；③ 建完可 `move` 挪位/缩放；④ `list -All` 跨表列出全部图表与几何信息；⑤ `-Sheet` 已正确转发。**v1.29**：⑥ `-Type combo` + `-Secondary` = **组合图/次坐标轴**（过程线+雨量柱，水文刚需）；⑦ `-Labels/-Legend/-AxisMin/-AxisMax/-NumberFormat`；⑧ 返回 **`occupancy:"G22:N41"`（占地区域）与 `overlaps:[…]`（与已有图重叠硬提示）**——放下张图前先看它；⑨ WPS 组合图刚改完系列类型时设标题会被拒，helper 已按 dsh-office 口径**重试 3 次再退 `SetElement`** |
 | `autofit` | `-Doc [-Sheet] [-Range]` | 列宽行高自适应 |
-| `freeze` | `-Cell A2`（冻结其上方与左侧）；`-Action remove` 取消 | **冻结窗格**（v1.29）：长表滚动看表头用 |
-| `cformat` | `-Range D2:D500 -Rule ">" -Value 1000 [-FillColor "#FFC7CE"]`；`-Rule colorscale\|databar\|top\|bottom\|duplicate\|unique\|blank\|formula\|between\|clear` | **条件格式**（v1.29）：阈值着色/色阶/数据条/前 N/重复值/空值/公式；`-Rule clear` 清空该区域规则 |
+| `freeze` | `-Cell A2`（冻结其上方与左侧）；`-Action remove` 取消 | **冻结窗格**：长表滚动看表头用 |
+| `cformat` | `-Range D2:D500 -Rule ">" -Value 1000 [-FillColor "#FFC7CE"]`；`-Rule colorscale\|databar\|top\|bottom\|duplicate\|unique\|blank\|formula\|between\|clear` | **条件格式**：阈值着色/色阶/数据条/前 N/重复值/空值/公式；`-Rule clear` 清空该区域规则 |
 | `validate` | `-Range H2:H200 -List "是,否,待定"` | **数据验证下拉**（v1.29，≤255 字符、值里不能含逗号；区域源未做） |
-| `table` | `-Range A1:F21 [-Name 站点表] [-Style TableStyleMedium2]` | **建成 ListObject 表**（v1.29）：纹行 + 筛选箭头 + 列名可当名字用；已是表则只改样式/名字。⚠️ 表内不能 `filter`（见下方限制表） |
+| `table` | `-Range A1:F21 [-Name 站点表] [-Style TableStyleMedium2]` | **建成 ListObject 表**：纹行 + 筛选箭头 + 列名可当名字用；已是表则只改样式/名字。⚠️ 表内不能 `filter`（见下方限制表） |
 | `format` | `-Doc -Range A1:D1 [-Sheet] + 格式项`；**多区域：`-Range "A4:E4;A13:E13;A27:E27"`（分号，v1.17）**；**每块不同格式：`-Items <json>`（v1.18，见下）** | 字体/字号/加粗/颜色/填充/对齐/数字格式/列宽/行高/框线/换行。一次调用排完整版，别再逐块串行（实测 26 次 ≈ 20 s）。**关掉某项用 `-NoBold/-NoItalic/-NoUnderline/-NoWrap`**（v1.17：`-Bold:$false` 过不了 `powershell -File` 的参数解析）。**v1.18 起 `-Color`/`-FillColor` 的 RGB 通道已修正**（之前红蓝互换） |
 | `snapshot` | `-Doc [-Sheet 名1,名2] [-Out <路径>]` | 存工作表的值+公式快照（默认全部表；大表用 `-Sheet` 限定范围，diff/restore 也只在该范围内比对/回滚，不碰未覆盖的表；默认存 %LOCALAPPDATA%，`-Out` 随文档带走） |
 | `diff` | `-Doc [-Since 快照路径\|last]` | 和快照比：哪些格改了（before→after，含公式联动）、哪些增删——**人改的和 Agent 改的都算** |
@@ -336,12 +340,12 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `format -Borders` 只认 `grid` / `thick` / `none` | 其他值会静默当 `grid`；**v1.16 起对角线（XlBordersIndex 5/6）恒被清空**，不会再把表格画成大 X（v1.15 及更早有此 BUG） | 表格框线用 `-Borders grid`（细）/`thick`（粗）/`none`（清） |
 | `render` 的宽度上限 | `-Width` 低于 100 不缩放；超大区域按 `-Width` 等比缩放 | 想看全貌用 `-Width 1200~1600`，别一次要 4000 |
 | **一个 ET 实例同时开两个工作簿会挂起**（v1.20 实测，非本次改动引入） | `open` 第二个工作簿时 WPS 12 的 `Workbooks.Open` 不返回（等 30 s+ 无响应；之后实例里剩一个空名幽灵工作簿，后续命令报 `DOC_CLOSED`/`E_FAIL`，只能结束 `et.exe` 重来）；用 `-Show`、走 daemon/一次性、先关再开都复现，部署版 v1.20b 同样复现 | **一个实例只开一个工作簿**：多工作簿任务必须串行（`close` 前一份再 `open` 下一份），不要把两个工作簿并存当并行 |
-| **`Range.NumberFormat` 整块多列返回 Null**（v1.29 实测） | `ws.Range("A1:C9").NumberFormat` 在 WPS 上得 Null，取 `.GetType()` 直接崩；只有**单列**能拿到 String | 判日期/格式一律**按列取**（整列格式不一致时再回退抽样单元格）；`read -Profile` 已按这个口径实现 |
-| **块写必须 0 基、尺寸精确、单列要含表头格**（v1.29 实测） | 数组尺寸差一格 WPS 静默不落位；单列块不含表头格会把表头写空 | 新命令（`clean`/`addcol`/`fillblanks`…）内部已遵守；自己写裸 COM 时同样规矩 |
-| **表（ListObject）内不能 `Range.AutoFilter`**（v1.29 实测） | 在 `table` 建出的表区域上调 `AutoFilter` 报 `E_ACCESSDENIED`；同区域 `sort`/`delete`/`fill` 正常 | 要在表内筛选：先 `table` 不建表、用普通区域 `filter`；已建表则删表后再筛（命令里已把这句翻成明确报错） |
-| **`pivot` 的 `Create` 只能两参**（v1.29 实测） | `PivotCaches().Create(1, range)` 可用；照 VBA 写四参/三参会报「找不到 Create 的重载」 | 命令内部已固定两参；`CreatePivotTable(dest,name)` 同样两参 |
-| **`pivot -Group` / 次轴刻度未实测**（v1.29） | 按月/季/年分组代码按 dsh-office 口径写了但未实测（失败只记 `notes` 不抛错）；图表次坐标轴的刻度/数字格式只作用主轴 | 需要分组就先小样本试一次、看 `notes`；次轴刻度目前只能接受默认或手工调 |
-| **组合图刚改完系列类型时设标题会被拒**（v1.29 实测） | WPS 在图表还在排版时拒绝 `HasTitle/ChartTitle`，直接 `SetElement` 也有概率失败 | helper 已**重试 3 次再退 `SetElement`**（照 dsh-office 的做法）；调用方不需要做任何事，但看到 `title` 为空就重跑一次 |
+| **`Range.NumberFormat` 整块多列返回 Null**（实测） | `ws.Range("A1:C9").NumberFormat` 在 WPS 上得 Null，取 `.GetType()` 直接崩；只有**单列**能拿到 String | 判日期/格式一律**按列取**（整列格式不一致时再回退抽样单元格）；`read -Profile` 已按这个口径实现 |
+| **块写必须 0 基、尺寸精确、单列要含表头格**（实测） | 数组尺寸差一格 WPS 静默不落位；单列块不含表头格会把表头写空 | 新命令（`clean`/`addcol`/`fillblanks`…）内部已遵守；自己写裸 COM 时同样规矩 |
+| **表（ListObject）内不能 `Range.AutoFilter`**（实测） | 在 `table` 建出的表区域上调 `AutoFilter` 报 `E_ACCESSDENIED`；同区域 `sort`/`delete`/`fill` 正常 | 要在表内筛选：先 `table` 不建表、用普通区域 `filter`；已建表则删表后再筛（命令里已把这句翻成明确报错） |
+| **`pivot` 的 `Create` 只能两参**（实测） | `PivotCaches().Create(1, range)` 可用；照 VBA 写四参/三参会报「找不到 Create 的重载」 | 命令内部已固定两参；`CreatePivotTable(dest,name)` 同样两参 |
+| **`pivot -Group` / 次轴刻度未实测** | 按月/季/年分组代码按 dsh-office 口径写了但未实测（失败只记 `notes` 不抛错）；图表次坐标轴的刻度/数字格式只作用主轴 | 需要分组就先小样本试一次、看 `notes`；次轴刻度目前只能接受默认或手工调 |
+| **组合图刚改完系列类型时设标题会被拒**（实测） | WPS 在图表还在排版时拒绝 `HasTitle/ChartTitle`，直接 `SetElement` 也有概率失败 | helper 已**重试 3 次再退 `SetElement`**（照 dsh-office 的做法）；调用方不需要做任何事，但看到 `title` 为空就重跑一次 |
 
 ### 调用姿势（v1.17，踩过的坑）
 
@@ -353,7 +357,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 3. **中文一律走 JSON 文件**（`write -Items`、`comment -TextFile`），不要塞进命令行——`woc.cmd` 那条路还受 OEM 代码页影响。
 4. **参数被静默忽略会告警（三端通用，v1.18）**：`scripts\param-check.ps1` 被 Word/Excel/PPT 三个包装器共用，对「绑定了却没进 request」的参数在 stderr 打 `WARN ignored parameter -X for command "Y"`。看到就说明这条命令不吃该参数（v1.16 前是静默丢弃，`chart -Sheet` 就是这么丢的）。显式传默认值（`-From 1`、`-Index 0`）不会误报；`WOC_NO_PARAMCHECK=1` 可整轮关掉。
 5. **颜色通道（Excel 侧 v1.18 修）**：`-Color`/`-FillColor` 之前红蓝互换（COM 要 BGR，旧代码给 RGB），现在 `#FF0000` 就是红色。若历史脚本里颜色看起来"反了"，按新行为重跑即可。
-6. **多条命令用 `batch`，别一条一个工具调用（v1.19）**：`woc.ps1 <app> batch -Ops ops.json`，一次进程启动跑完整批。实测本机 5 条命令 1982 ms → 891 ms（每条 op 35–204 ms）；命令越多差距越大。
+6. **多条命令用 `batch`，别一条一个工具调用**：`woc.ps1 <app> batch -Ops ops.json`，一次进程启动跑完整批。实测本机 5 条命令 1982 ms → 891 ms（每条 op 35–204 ms）；命令越多差距越大。
    - `ops.json` 里是**helper 级请求**（不是命令行参数名），每条形如 `{"cmd":"...", <请求字段>}`，`doc` 可写相对路径（会转绝对）。
    - 常用映射：写单元格 `{"cmd":"write","doc":X,"items":[{"sheet":"S","cell":"A1","value":1}]}`；格式 `{"cmd":"format","doc":X,"range":"A1:A2","bold":true}`；建图 `{"cmd":"chart","doc":X,"action":"add","range":"A1:B2","type":"line","anchor":"D2"}`；读 `{"cmd":"read","doc":X,"sheet":"S","range":"A1:A2"}`。
    - 返回 `{"result":{"count":n,"totalMs":...,"ops":[{i,ms,ok,result|error}]}}`，逐条带耗时；某条失败不影响后续（但**不会回滚**已成功的那些，重要批次仍要 `snapshot`）。
@@ -491,9 +495,9 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | `write` 报 rolled back | 批中途 COM 失败已自动还原；看错误信息，通常用户正好在编辑。重试或分小批。 |
 | 中文乱码 | 控制台代码页问题；本 skill 输出已是 UTF-8，若外层管道乱码，先 `[Console]::OutputEncoding=[Text.Encoding]::UTF8`。 |
 | et.exe 变多 | 中途异常没 `close`。`status` 看实例，只清理无窗口实例，汇报数字。 |
-| `replace` 返回 `changed:0` 但有 `numericMatchesLeftAlone`（v1.31） | 命中的是数字/日期格（如 `-Find 0` 想改 `10/20/30`）。**这是有意的**：把数字列悄悄变成文本列比"没改到"更坏 | 要改数值就用 `clean -To number`、`write`，或对整列做 `format`；确实要改成文本，先 `clean -To text` 再 `replace` |
-| `pivot -Group` 返回 `groupMode:"failed"` + 「选定区域不能分组。」（v1.31） | 日期列是**文本**（`@` 格式的 `2024-01-15`），WPS 拒绝按日期分组——这是 WPS 行为，不是本 skill 的问题 | 按返回 `notes` 的降级配方：`addcol -Header 年份 -Formula '=YEAR(A2)'` / `=TEXT(A2,"yyyy-mm")` / `="Q"&ROUNDUP(MONTH(A2)/3,0)`，再用辅助列做 `pivot -Rows 年份`。辅助列是数据源，**建完不能删** |
-| `replace` 的规则第二次还命中（v1.31） | 替换串里包含查找串（`P`→`P-`、`0`→`00`）时，再跑一次必然再命中——这是规则性质 | 一次调用只插一遍（`PP→P-P-`，不会 `P--`）；要幂等就把规则写成不自匹配的形式（如 `表1`→`表一`），或先 `snapshot`/`diff` 对账 |
+| `replace` 返回 `changed:0` 但有 `numericMatchesLeftAlone` | 命中的是数字/日期格（如 `-Find 0` 想改 `10/20/30`）。**这是有意的**：把数字列悄悄变成文本列比"没改到"更坏 | 要改数值就用 `clean -To number`、`write`，或对整列做 `format`；确实要改成文本，先 `clean -To text` 再 `replace` |
+| `pivot -Group` 返回 `groupMode:"failed"` + 「选定区域不能分组。」 | 日期列是**文本**（`@` 格式的 `2024-01-15`），WPS 拒绝按日期分组——这是 WPS 行为，不是本 skill 的问题 | 按返回 `notes` 的降级配方：`addcol -Header 年份 -Formula '=YEAR(A2)'` / `=TEXT(A2,"yyyy-mm")` / `="Q"&ROUNDUP(MONTH(A2)/3,0)`，再用辅助列做 `pivot -Rows 年份`。辅助列是数据源，**建完不能删** |
+| `replace` 的规则第二次还命中 | 替换串里包含查找串（`P`→`P-`、`0`→`00`）时，再跑一次必然再命中——这是规则性质 | 一次调用只插一遍（`PP→P-P-`，不会 `P--`）；要幂等就把规则写成不自匹配的形式（如 `表1`→`表一`），或先 `snapshot`/`diff` 对账 |
 
 ---
 
@@ -512,16 +516,16 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | **未转义的 Windows 路径** | 手拼 JSON 时 `C:\Users\...` 里的 `\U`/`\A`/`\D` 被当非法转义，旧解析器**静默丢反斜杠** ⇒ `C:Users...`，再叠加"路径不存在就新建"就凭空多一份稿 | v1.19 起非法转义直接 `BAD_ARGS`；拼请求一律走 JSON 序列化器（`batch` 的 ops 文件也是） |
 | **渲染成本 ~355 ms/页** | 3 页 1471 ms；`check` 全规则 970 ms/次；`read` 3 页 632 ms | 设计阶段渲一次 `-Overview`（6 页/图），之后**只渲改动页**；`check` 过程别跑，收尾跑一遍 `-MinSeverity blocker`；`read` 一次读全稿并缓存形状名 |
 | **接管后窗口不可见**（v1.25 修） | 用 `open`（不带 `-Show`）接管用户已打开的演示时，窗口会被置为隐藏（`Windows.Count=0`/`Visible=false`），用户在 WPS 里看不到任何改动 | v1.25 起 `open` 默认显示并 `Activate()`；确实要后台跑才传 `-Show:$false` |
-| **标题标记会被切标签页清掉**（v1.26 实测） | WPS 12 用共享窗口框（`PP12FrameClass`，属 `wps.exe`），`SetWindowText` 写的「〔AI接管中〕」在 COM 编辑/翻页/空闲后保持，但**用户切到别的标签页时 WPS 会重置标题** | 不是 bug：这样不会把标记挂到别的文档；下一条针对该稿的命令会自动补回（helper 里有 `TitleState` 记录，`hint -Clear`/`finish`/`close` 会停用） |
-| **母版上的标记会被整幅大图盖住**（v1.27 实测） | 第一版把「〔AI接管中〕」药丸加在 `SlideMaster`，实测封面这类**满版图片页**把母版形状整片遮住（母版在页面形状之下），渲染图上完全看不见 | v1.27 起改为**逐页贴、置顶**（`woc-ai-takeover-mark`）；如果自己做类似标记，别指望母版 |
+| **标题标记会被切标签页清掉**（实测） | WPS 12 用共享窗口框（`PP12FrameClass`，属 `wps.exe`），`SetWindowText` 写的「〔AI接管中〕」在 COM 编辑/翻页/空闲后保持，但**用户切到别的标签页时 WPS 会重置标题** | 不是 bug：这样不会把标记挂到别的文档；下一条针对该稿的命令会自动补回（helper 里有 `TitleState` 记录，`hint -Clear`/`finish`/`close` 会停用） |
+| **母版上的标记会被整幅大图盖住**（实测） | 第一版把「〔AI接管中〕」药丸加在 `SlideMaster`，实测封面这类**满版图片页**把母版形状整片遮住（母版在页面形状之下），渲染图上完全看不见 | v1.27 起改为**逐页贴、置顶**（`woc-ai-takeover-mark`）；如果自己做类似标记，别指望母版 |
 | **页面标记是内容，不是窗口状态**（v1.28 定案） | 与标题标记不同，药丸是**形状**：用户自己按 Ctrl+S 会把它存进文件（实测：裸 COM `Save()` 后重开，徽章确实在文件里）；`save`/`export` 已在落盘前自动剥离、写完补回 | 默认**不贴**（`hint` 零改动）；要界面可见才 `-SlideMark`，收尾 `finish`/`hint -Clear`；万一被 Ctrl+S 存进去，**下一条命令自动修复**（`badgeRepaired:true`），只读文件给 `badgeDirty` |
 | **daemon 必须保温** | 一次性模式 746 ms vs 保温 422 ms；`close` 掉最后一份文档后 daemon 自己退，下一条命令重新付 ~0.5 s | 一轮任务里别频繁 `close` 又重开；批量命令用 `batch`（一次启动跑一批） |
-| **图片裁切单位是点，不是比例**（v1.29） | `PictureFormat.CropLeft=0.14` 会被存下、也读得回来，但**渲染完全不裁**（图被拉伸填满框）；且**裁完再改 `Width/Height` 会把裁切洗掉** | `crop` 内部已换算成「比例 × 缩放后尺寸（点）」并保证顺序（先定框→写裁切→只调 Left/Top）；自己写裸 COM 时照这个顺序。裁完 `boxActual` 可能与请求差几十点（480×270→480×224），**永远 `render` 目检** |
-| **SmartArt 只能建不能改**（v1.29） | `Shapes.AddSmartArt` 成功（"图示 1"），但 `Shape.SmartArt.AllNodes` 读或写全部 `E_FAIL`/`RPC_E_SERVERFAULT`；`AddNode` 也不通 | 别承诺"在 SmartArt 里逐条写文字"。要可控框图：`shape -Name` 摆框 + `connect` 连线；`smartart` 只用来快速占位（返回 `nodes:0` + note） |
-| **`-Arrow both` / `Fill.OneColorGradient` 回读不可信**（v1.29） | 双向箭头的起始箭头回读 `begin=1` 但实际不生效；`OneColorGradient` 写进去 `Fill.Type` 回读仍是 1（solid） | 需要渐变/纹理一律走 `bg -Texture`（生成位图再 `UserPicture`，fillType 回读 6 才是真生效）；箭头只信 `-Arrow end` |
-| **`anim` 只证明写入，不证明放映**（v1.29） | `EntryEffect` 回读一致、`MainSequence` 条数增加，但**未在放映里验证** | 交付前 F5 人工看一眼；返回 `unsupported:true` 或 `matches:false` 时如实告诉用户"没设上"，别写"已加动画" |
-| **成品页的 `check` 误报 pagenum / fontsize**（v1.31） | 新版式页码是**普通文本框**（WPS 页码占位符每页显示 "1"，不可用），`check` 的 `pagenum` 规则按占位符判 → 每页报 1 条；`gallery` 图注 10pt < 正文 14pt 门槛也报 `fontsize` | 交付前用 `check -Config '{"suppress":[{"rule":"pagenum"}],"bodyMin":12}'`（或把图注调到 12pt）；这两类不是缺陷，别为此改版式 |
-| **`TextFrame.AutoSize` 别碰**（v1.31 实测） | 给文本框写一次 `AutoSize` 会把框**压成约 29pt 高**（WPS 按文字重算，宽度信息丢失），随后 `check` 满屏 overflow | 写文字**不要**设 AutoSize；写完回写 `Left/Top/Width/Height` 保持几何（`Kinds.cs` 的实现即如此） |
+| **图片裁切单位是点，不是比例** | `PictureFormat.CropLeft=0.14` 会被存下、也读得回来，但**渲染完全不裁**（图被拉伸填满框）；且**裁完再改 `Width/Height` 会把裁切洗掉** | `crop` 内部已换算成「比例 × 缩放后尺寸（点）」并保证顺序（先定框→写裁切→只调 Left/Top）；自己写裸 COM 时照这个顺序。裁完 `boxActual` 可能与请求差几十点（480×270→480×224），**永远 `render` 目检** |
+| **SmartArt 只能建不能改** | `Shapes.AddSmartArt` 成功（"图示 1"），但 `Shape.SmartArt.AllNodes` 读或写全部 `E_FAIL`/`RPC_E_SERVERFAULT`；`AddNode` 也不通 | 别承诺"在 SmartArt 里逐条写文字"。要可控框图：`shape -Name` 摆框 + `connect` 连线；`smartart` 只用来快速占位（返回 `nodes:0` + note） |
+| **`-Arrow both` / `Fill.OneColorGradient` 回读不可信** | 双向箭头的起始箭头回读 `begin=1` 但实际不生效；`OneColorGradient` 写进去 `Fill.Type` 回读仍是 1（solid） | 需要渐变/纹理一律走 `bg -Texture`（生成位图再 `UserPicture`，fillType 回读 6 才是真生效）；箭头只信 `-Arrow end` |
+| **`anim` 只证明写入，不证明放映** | `EntryEffect` 回读一致、`MainSequence` 条数增加，但**未在放映里验证** | 交付前 F5 人工看一眼；返回 `unsupported:true` 或 `matches:false` 时如实告诉用户"没设上"，别写"已加动画" |
+| **成品页的 `check` 误报 pagenum / fontsize** | 新版式页码是**普通文本框**（WPS 页码占位符每页显示 "1"，不可用），`check` 的 `pagenum` 规则按占位符判 → 每页报 1 条；`gallery` 图注 10pt < 正文 14pt 门槛也报 `fontsize` | 交付前用 `check -Config '{"suppress":[{"rule":"pagenum"}],"bodyMin":12}'`（或把图注调到 12pt）；这两类不是缺陷，别为此改版式 |
+| **`TextFrame.AutoSize` 别碰**（实测） | 给文本框写一次 `AutoSize` 会把框**压成约 29pt 高**（WPS 按文字重算，宽度信息丢失），随后 `check` 满屏 overflow | 写文字**不要**设 AutoSize；写完回写 `Left/Top/Width/Height` 保持几何（`Kinds.cs` 的实现即如此） |
 
 ## PPT 命令速查
 
@@ -529,12 +533,12 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 |---|---|---|
 | `doctor` | — | 自检：ProgID 安装/在跑、wpp 进程数、开着的演示文稿 |
 | `status` | — | 实例与文稿清单（name / path / saved / readOnly / slides / active） |
-| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用；未开则打开；**路径不存在则新建空稿并保存到该路径**；返回 slides 与 slideSize。接管标记：`open` 只打窗口标题（v1.26），**每页的页面标记由 `hint` 贴**（v1.27） |
+| `open` | `-Doc <路径> [-Show] [-ReadOnly] [-NoHint]` | 已开则复用；未开则打开；**路径不存在则新建空稿并保存到该路径**；返回 slides 与 slideSize。接管标记：`open` 只打窗口标题，**每页的页面标记由 `hint` 贴** |
 | `read` | `-Doc [-From 1] [-Count 30]` | 逐页：layout + 形状清单（编号/名称/类型/占位符/l/t/w/h/文字前 160 字）+ 备注；>30 页自动分页 |
 | `search` | `-Doc -Text <词> [-Max 50] [-Case]` | 跨页找文字：返回 页号/形状名/片段 |
 | `replace` | `-Doc -Find <词> [-Replace <新词>] [-Scope all\|slides\|groups\|tables\|notes\|footer\|master] [-Slides "1-5,8"] [-Regex] [-Case] [-Max 500] [-DryRun]`；**批量：`-Items <json>`** | **全稿查找替换**（Word 侧 `revise`、Excel 侧 `write` 的对等能力）：扫**正文 / 组合内部 / 表格单元格 / 备注页 / 页眉页脚**；**母版默认不动**，要改必须显式 `-Scope master`（一改波及全稿）。默认**忽略大小写**（`-Case` 区分）、`-Regex` 支持 `$1`；**每处写入前用 `Characters()` 回读校验**，不符进 `skipped` 绝不盲写；返回逐处 `before→after`+`context`，并自动存 `prereplace` 快照，`restore -Since prereplace` 一键盘回滚。`-Replace` 省略 = 删除匹配 |
 | `selection` | `-Doc` | 用户当前所在页与选中的形状名（需窗口开着） |
-| `slide` | `-Action add [-Preset <档位>] [-Title ...] [-Items <json>] [-Fit contain\|cover] [-L -T -W -H] [-At N]`；`-Action reuse -From <源页> [-At N] -Items <json>`；`-Action dup\|move\|delete -Index N [-At\|-To M]` | **预设版式建页**（几何随文稿尺寸自适应；预设文本框已命名 title/subtitle/number/body/left/right，后续 `-Shape` 直达）。**v1.31 新增 8 种成品版式**（数据走 `-Items <json>`，中文走 JSON 文件；标题可放 `-Title` 或 JSON 里的 `title`）：`cards`（2–6 张等高卡片，`[{head,text?,value?}]`）、`stats`（2–4 个大数字，`{stats:[{value,unit?,label}]}`）、`timeline`（3–5 步横向时间线、文字上下交错，`{steps:[{when,head,text?}]}`）、`process`（3–5 步流程块+箭头，`{steps:[{head,text?}]}`）、`compare`（左右对比，`{left:{head,points},right:{…}}`）、`summary`（2–4 条编号总结，`{points:[{head,text?}]}`）、`gallery`（2–6 图带题注，`{images:[{path,caption?,fit?}]}`，默认 `contain` 整图不裁）、`split`（半页满版图+半页文字，`{title,text?,points?,image,side}`）。统一带标题、色杠、页脚与**普通文本框页码**（不用 WPS 页码占位符——那玩意儿每页显示 "1"）；返回 `{preset,shapes[],overflowWarnings[],fontSizeDrops[]}`，**`overflowWarnings` 非空就按提示改数据或换档位**。**v1.32 再补两类**：`canvas`（自由版面，`{title,items:[{type,box:[x,y,w,h],…}],edges:[…]}`，item 支持 text/heading/card/panel/line/arrow/image/stat/bullets/steps/callout/quote/node/chart；**`node`+`edges` 用 `AddConnector` 真连到形状边**，`connected.begin/end` 回读，连不上必进 `warnings`；越界自动夹取并逐条报）与 `grid`（结构化版面，`{title,rows:[[part,…],…]}`，`part` 有 `span`，宽度按 span 均分、行高按内容估、chart/image/panel/stack 吸收余量，支持 `stack` 竖叠；**不用给坐标**）。`-Action reuse`（v1.32）= 复制一页后按**形状名**换文字/换图（`{texts:{名:新文字},images:{名:新图}}`），保留版式与连线；替换不到的键进 `missing` 并警告；**复制页的页码会自动改成「新页号 / 总页数」**。旧的 `title\|section\|bullets\|two\|end` 仍可用 |
+| `slide` | `-Action add [-Preset <档位>] [-Title ...] [-Items <json>] [-Fit contain\|cover] [-L -T -W -H] [-At N]`；`-Action reuse -From <源页> [-At N] -Items <json>`；`-Action dup\|move\|delete -Index N [-At\|-To M]` | **预设版式建页**（几何随文稿尺寸自适应；预设文本框已命名 title/subtitle/number/body/left/right，后续 `-Shape` 直达）。**v1.31 新增 8 种成品版式**（`cards`/`stats`/`timeline`/`process`/`compare`/`summary`/`gallery`/`split`，数据走 `-Items <json>`，中文走 JSON 文件；标题可放 `-Title` 或 JSON 里的 `title`）：统一带标题、色杠、页脚与**普通文本框页码**（不用 WPS 页码占位符——那玩意儿每页显示 "1"），返回 `{preset,shapes[],overflowWarnings[],fontSizeDrops[]}`，**`overflowWarnings` 非空就改数据或换档位**。**v1.32 再补**：`canvas`（自由版面，给坐标 + `edges` 用 `AddConnector` 真连到形状边）、`grid`（结构化版面，按 `rows`/`span` 排，**不用给坐标**）、`-Action reuse`（复制页后按形状名换字换图，页码自动改成「新页号 / 总页数」）。**每档 `-Items` 字段契约、示例 JSON、item 类型与限制 → [reference/ppt-presets.md](reference/ppt-presets.md)**；旧的 `title\|section\|bullets\|two\|end` 仍可用 |
 | `split` | `-Doc -Chunks "1-20,21-45,46-80" -Out <目录> [-Prefix 名字] [-DryRun]` | **拆分册**：每个区间存成一个独立文稿（`<前缀>-part01.pptx`…），**源稿不动**。区间必须从 1 起连续覆盖全稿——**有空隙直接报错**（静默丢页比报错更贵）。新稿的页尺寸先按源稿设好再粘贴，否则整册被缩放 |
 | `merge` | `-Doc <目标稿> -Sources "a.pptx,b.pptx"` 或 `-Items <json: {"sources":[…]}>` `[-After N] [-DryRun]` | **合并多稿**：把来源稿的页依次插到目标稿 `-After N` 之后（默认追加到末尾），插完关掉来源稿。**每页保留它原来的版式**；要全篇统一外观再跑 `theme -Apply`，交付前跑 `check`。返回 `from/to` 页码范围，撤销就删这段再保存 |
 | `text` | 单条：`-Slide N [-Shape 名\|-ShapeIdx n] (-Text \| -TextFile) [-Expect 原文开头]`；**批量：`-Items <json>`** | 改形状文字；`expect` 锚校验不符则**整批一条不改**（`ANCHOR_MISSING`）；默认解析到标题占位符，否则第一个有字形状——**强烈建议显式 -Shape**；每条返回 before/textAfter，**立刻比对** |
@@ -545,11 +549,11 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | `export` | `-Format pdf\|png\|jpg\|md [-Slides "1-5,8"] [-Out <路径或目录>] [-Width 1600] [-Quality 88]` | **交付导出**：`pdf` 走 `SaveCopyAs(...,32)`（真 PDF，且**不改打开中文稿的身份**）；`png/jpg` 走剪贴板→helper 写盘（**明文**，页范围生效）；`md` 直接出大纲（等于 `outline`）。⚠️ **本机 PDF 落盘是密文**，返回里 `encrypted:true` 会明确提示，发人前先解密 |
 | `table` | `-Slide N -Data <json: {"rows":[[...]]}> [-L -T -W -H] [-Size 14]` | 建表并填内容（首行默认加粗表头） |
 | `shape` | `-Action add -Type rect\|roundrect\|ellipse [-L -T -W -H] [-Fill 颜色] [-Line 颜色] [-Text ...] [-Name 名]`；`-Action delete -Name <名>` | 画色块/圆角矩形/椭圆（可带字）；或按名删形状。**`-Name` 是 `connect` 的前提** |
-| `crop` | `-Slide -Shape <图片名> [-Path <图>] [-Focus top\|center\|bottom\|left\|right] [-Fit cover\|contain] [-L -T -W -H] [-Name]` | **满版套图/人像裁切**（v1.29）：`cover`=铺满裁溢出（默认），`contain`=完整显示居中；默认 `focus` = 水平居中 + **垂直保留上 1/5**（人像保头），裁掉 >60% 时返回 `cut` 点名。⚠️ **单位是点不是比例**（写 0.14 会被存下但渲染不裁）；**裁完不要再改 W/H**（会洗掉裁切）；返回 `box`/`boxActual`/`cropReadBack`，**必须 `render` 目检** |
-| `smartart` | `-Action list [-Match <关键字>]`；`-Action add -Slide N -Preset <版式> -Items <json> [-L -T -W -H]` | 原生 SmartArt（v1.29）：`-Preset` 认 process/cycle/hierarchy/org/pyramid/venn/list/matrix/funnel/target/gear/timeline/arrow 等英文关键字、中文关键字或版式全名（134 种，中文名）；`-Items` 每项 `{text,children}`。⚠️ **本机 WPS 12.1 能建图形但节点文字写不进**（`SmartArt.AllNodes` E_FAIL）⇒ 返回 `nodes:0` + `note`；要可控框图用 `shape` + `connect` |
+| `crop` | `-Slide -Shape <图片名> [-Path <图>] [-Focus top\|center\|bottom\|left\|right] [-Fit cover\|contain] [-L -T -W -H] [-Name]` | **满版套图/人像裁切**：`cover`=铺满裁溢出（默认），`contain`=完整显示居中；默认 `focus` = 水平居中 + **垂直保留上 1/5**（人像保头），裁掉 >60% 时返回 `cut` 点名。⚠️ **单位是点不是比例**（写 0.14 会被存下但渲染不裁）；**裁完不要再改 W/H**（会洗掉裁切）；返回 `box`/`boxActual`/`cropReadBack`，**必须 `render` 目检** |
+| `smartart` | `-Action list [-Match <关键字>]`；`-Action add -Slide N -Preset <版式> -Items <json> [-L -T -W -H]` | 原生 SmartArt：`-Preset` 认 process/cycle/hierarchy/org/pyramid/venn/list/matrix/funnel/target/gear/timeline/arrow 等英文关键字、中文关键字或版式全名（134 种，中文名）；`-Items` 每项 `{text,children}`。⚠️ **本机 WPS 12.1 能建图形但节点文字写不进**（`SmartArt.AllNodes` E_FAIL）⇒ 返回 `nodes:0` + `note`；要可控框图用 `shape` + `connect` |
 | `connect` | `-Slide N -FromShape <名> -ToShape <名> [-Kind straight\|elbow\|curve] [-Arrow none\|end\|both] [-Label <文字>] [-FromSide/-ToSide top\|left\|bottom\|right]` | **形状之间拉连接线**（v1.29，框图用）：边自动选（左右相邻→右接左，上下相邻→下接上），`BeginConnected/EndConnected` 回读判真连；返回 `connected.begin/end` 与 `warning`（未真连时线不跟随框移动）。⚠️ **`-From/-To` 是页码范围**，连线两端只能用 `-FromShape/-ToShape`；`-Arrow both` 的起始箭头在 WPS 未必生效 |
-| `bg` | `-Slide N\|-All [-Color #RRGGBB] [-Gradient [-Color]] [-Texture paper\|grid\|dot\|gradient] [-Image <图>] [-Reset]` | **页面背景/纹理**（v1.29）：纹理=生成一张 1600×900 PNG 再 `Background.Fill.UserPicture`（不碰 COM 纹理填充，WPS 上真生效）；`-Gradient` 写入不报错但 `Fill.Type` 回读仍 1 ⇒ **不可信，优先 `-Texture gradient`**；`-Reset` 交还母版 |
-| `anim` | `-Slide N\|-All [-Transition none\|fade\|push\|wipe\|split] [-Effect fade\|fly-in\|wipe\|zoom\|appear] [-OnClick] [-Duration 0.6]` | **切换与入场动画**（v1.29）：返回 `transition.matches`（写入=回读）、`MainSequence` 前后条数、`unsupported`。⚠️ **只能证明写进去了，不能证明放映真播**——要交付就 F5 人看一眼；`unsupported:true` 别当成生效 |
+| `bg` | `-Slide N\|-All [-Color #RRGGBB] [-Gradient [-Color]] [-Texture paper\|grid\|dot\|gradient] [-Image <图>] [-Reset]` | **页面背景/纹理**：纹理=生成一张 1600×900 PNG 再 `Background.Fill.UserPicture`（不碰 COM 纹理填充，WPS 上真生效）；`-Gradient` 写入不报错但 `Fill.Type` 回读仍 1 ⇒ **不可信，优先 `-Texture gradient`**；`-Reset` 交还母版 |
+| `anim` | `-Slide N\|-All [-Transition none\|fade\|push\|wipe\|split] [-Effect fade\|fly-in\|wipe\|zoom\|appear] [-OnClick] [-Duration 0.6]` | **切换与入场动画**：返回 `transition.matches`（写入=回读）、`MainSequence` 前后条数、`unsupported`。⚠️ **只能证明写进去了，不能证明放映真播**——要交付就 F5 人看一眼；`unsupported:true` 别当成生效 |
 | `format` | `-Slide N -Shape <名> `+ 格式项 | 改文字格式（字体/字号/加粗/斜体/颜色/对齐/填充），返回回读值 |
 | `font` | `-Doc [-Font 宋体] [-From N] [-To M]` | **全稿统一字体**：逐页扫所有文字（**含组合内部与表格单元格**），只写 `Font.Name`+`NameFarEast`，**不动字号/颜色/加粗/版式**；返回 `shapes`/`groups`/`tables`/`failed` 与样例。⚠️ 换字体常使**字身变宽而多折行**，跑完必须 `render -Overview` 复核，个别挤爆的框用 `format -Size` 收一档 |
 | `notes` | `-Slide N (-Text\|-TextFile\|-Clear)` | 写/清演讲者备注 |
@@ -557,7 +561,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | `render` | `-Doc [-From 1] [-To 4] -Out <目录> [-Width 1100]`；**总览：`-Overview`（每次 ≤24 页，6 页拼一张并带页码）** | 逐页 EMF→PNG（**每次最多 4 页**）；写盘者是 helper，**明文可看**；`-Overview` 是"交付前过一遍全稿"的经济方式。**v1.32：render / export png\|jpg 前后会保存/恢复你的剪贴板**（`Slide.Copy` 用完不吞你复制的内容，恢复内容不进 Win+V 历史） |
 | `theme` | `-Set <json 文件>` / `-Apply` / `-Reset` / 不带选项=查看 | **整稿风格打底**：primary/accent/title/text/muted 五色 + font/titleFont + footer（页脚文字）+ pageNumber + skipFooterOnCover；**v1.31 新增可选 token**：`accent2`（次强调色）、`surface`（卡片底色基色，默认 `#F2F5F9`）、`cardFill`（卡片底色，缺省跟随 `surface`）、`cardRadius`（卡片圆角 pt，默认 12）、`sectionStyle`（章节页样式 `solid\|side\|band\|number`，缺省 `side`）；旧主题文件缺字段自动取默认值。`-Set` 存到该文稿主题文件（%LOCALAPPDATA%\wps-office-cooperate\ppt-themes），之后所有预设页自动跟随；`-Apply` 把已有页的字体/配色刷一遍并补页脚页码（**落在深色色块上的文字自动改白**） |
 | `master` | `-Action list`；`-Action footer [-Text 页脚] [-PageNum] [-Date] [-SkipCover] [-Slides] [-Clear]`；`-Action layout -Layout 1..11 [-Slides] [-DryRun]`；`-Action rebase -Path <模板稿> -Out <新稿> [-Layout n] [-KeepTemplatePages] [-Slides]` | **版式 / 页脚 / 套外来模板**。`list` 给出设计、版式清单与每页现状；`footer` 批量页脚+页码+日期（封面可跳过，`-Clear` 全清）；`layout` 批量换版式；`rebase` **以外来模板为底，把本稿的页搬进去**，内容页继承模板的母版与版式，模板自带的示例页默认删掉。⚠️ 换版式**只能用 `-Layout 1..11` 旧常量**（`Slide.CustomLayout = 对象` 在 WPS 里静默无效，`ApplyTemplate` 返回成功但什么都不做）；换完必须 `render` 看有没有丢占位符内容 |
-| `chart` | `-Action add -Slide N -Data <json> [-Type column\|barh\|line\|pie\|area\|doughnut\|scatter\|radar] [-Title] [-XTitle] [-YTitle] [-Legend] [-LegendPos bottom\|top\|left\|right\|corner] [-Trendline] [-DataLabels] [-L -T -W -H]`；`-Action list` | **原生可编辑图表**（不是图，是图表对象）：数据经图表**内嵌工作簿**写入，所以读者能就地改数、换类型、重设样式。⚠️ **必须有窗口**：`open -Show` 之后再画，无窗口时 `AddChart` 直接 E_FAIL（`NO_WINDOW`）。WPS 只收**字面值**（不放公式）；种子是 3 系列×4 点，多余系列会删、点位靠**增删工作表行**对齐（`SetSourceData` 被拒）；超过 3 个系列会明确报"未写入"而不是静默丢。**v1.29 扩展**：`-Trendline`（线性趋势线，`equationShown` 看方程/R² 是否真显现）、`-DataLabels`、`-LegendPos`；**`-Type radar` 在 WPS 是"名义支持"**（回读 -415 但渲染成柱形）——要雷达图用形状自绘或换 `line` |
+| `chart` | `-Action add -Slide N -Data <json> [-Type column\|barh\|line\|pie\|area\|doughnut\|scatter\|radar] [-Title] [-XTitle] [-YTitle] [-Legend] [-LegendPos bottom\|top\|left\|right\|corner] [-Trendline] [-DataLabels] [-L -T -W -H]`；`-Action list` | **原生可编辑图表**（不是图，是图表对象）：数据经图表**内嵌工作簿**写入，所以读者能就地改数、换类型、重设样式；`-Trendline`（`equationShown` 看方程/R²）、`-DataLabels`、`-LegendPos` 可用。⚠️ **必须有窗口**（`open -Show` 之后再画）、只收**字面值**、最多 3 系列、**`-Type radar` 是"名义支持"**（回读 -415 但渲染成柱形）——**5 条 WPS 硬约束与建图配方见下方「原生图表」一节，别在这里试第三种写法** |
 | `audit` | `-Doc [-From/-To] [-MinFont 12]` | **机械体检**：文字溢出文本框、字号过小、形状越出页面、形状重叠（装饰色块除外）、图片 <20% 页宽、空页、无标题页。返回到 页/形状/类型/细节。⚠️ **人工制作的老稿误报率高**：整幅背景色块会报"重叠/越界"，标题用普通矩形会报"无标题页"，页面 logo 会报"图过小"——这些是设计意图，**结论以 `render` 目检为准**，audit 只当线索清单 |
 | `check` | `-Doc [-Profile report\|review\|bid\|internal] [-Rules all\|overflow,outframe,…] [-MinSeverity info\|minor\|major\|blocker] [-Config 规则.json] [-Out 报告.md\|.json] [-ExitCode]` | **交付前门禁**（audit 的判据版，**只读零风险**）：每条发现带 rule + 严重度（blocker/major/minor/info）+ fix 建议，返回 `summary`/{`issues`}/{`suppressed`}/`fonts`/`verdict`。规则库：`overflow` 文字撑破框、`outframe` 出页面、`placeholder` 残留"单击此处添加"、`fontsize` 标题<28/正文<14/脚注<10（按 profile 变）、`pagenum` 非封面缺页码/封面有页码、`title` 标题字号不一致、`contrast` 对比度<4.5:1、`density` 单页>300 字或>40 形状、`image-small` 图<20% 页宽、`empty` 空页。`-Config` 可覆盖阈值 + 按 `slide`/`shape`/`rule` 白名单抑制（抑制项**单列**在 `suppressed`，不消失）；`-ExitCode` 有 blocker 时返回码 3（给 CI/脚本用）；`-Out` 出 markdown 或 json 报告 |
 | `outline` | `-Doc [-Out 大纲.md\|.json]` | **导出大纲**：每页标题 + 要点 + 备注（按上→下、左→右的阅读序）。给"AI 写讲稿"这条链路供料：命令只负责抽取，写讲稿交给模型，`notes` 写回。⚠️ **中文参数别走命令行**（PS 5.1 会把 `-Profile 投标` 变成乱码），profile 用 ASCII 别名 `report/review/bid/internal`；中文一律走 JSON 文件 |
@@ -570,7 +574,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | `close` | `-Doc [-Save]` | 关闭；`-Save` 会先保存（有改动才存，返回 `saved:true`）；最后一份时退出实例，回报 wpp 进程数。**关闭后同一路径可以再 `open`** |
 | `quit` | — | 全部关闭并退出（不保存）。**慎用** |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | 完成信号（托盘气泡+提示音）；**不碰文稿任何内容**。任务收尾默认调用 |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-SlideMark\|-NoSlideMark] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11）：气泡/托盘图标 + 窗口标题标记（v1.26）+ **按需的页面标记（v1.27 引入、v1.28 改为 opt-in）**。**默认零改动**，响应 `inAppHint` 说明"要界面可见加 `-SlideMark`"；`-SlideMark` 逐页贴「〔AI接管中〕」并返回 `slideMarkCount` + `slideMarkWarning`；`-NoSlideMark`/`-Clear` 移除；`save`/`export` 落盘前自动剥离；**用户 Ctrl+S 造成的污染由下一条命令自动修复**（`badgeRepaired:true`，只读文件给 `badgeDirty`）。COM 标题仍不可写 → `captionSupported:false` |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-SlideMark\|-NoSlideMark] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**：气泡/托盘图标 + 窗口标题标记+ **按需的页面标记（v1.27 引入、v1.28 改为 opt-in）**。**默认零改动**，响应 `inAppHint` 说明"要界面可见加 `-SlideMark`"；`-SlideMark` 逐页贴「〔AI接管中〕」并返回 `slideMarkCount` + `slideMarkWarning`；`-NoSlideMark`/`-Clear` 移除；`save`/`export` 落盘前自动剥离；**用户 Ctrl+S 造成的污染由下一条命令自动修复**（`badgeRepaired:true`，只读文件给 `badgeDirty`）。COM 标题仍不可写 → `captionSupported:false` |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，多半是 WPS 弹了对话框。
 
@@ -595,57 +599,11 @@ ppt bg -Doc deck.pptx -All -Reset
 
 **纪律**：三类改动都要 `snapshot` 打底（PPT 无撤销栈）；每步之后 `render` 抽页目检；`crop` 的 `cut` 字段点名"裁掉超过 60% 的图"必须看，必要时改 `-Focus` 或 `-Fit contain`。
 
-### 成品版式建页（v1.31，8 档，数据走 JSON）
+### 成品版式建页 / 自由版面 / 结构化版面 / 复用页（v1.31–v1.32）
 
-```powershell
-# 一次定主题（含新 token：cardFill / cardRadius / sectionStyle）
-ppt theme -Doc deck.pptx -Set theme.json
-# 逐档加页：-Items 指向 JSON 文件（中文只在文件里，别塞命令行）
-ppt slide -Doc deck.pptx -Action add -Preset cards    -Items cards.json      # {"title":"…","cards":[{head,text,value}]}
-ppt slide -Doc deck.pptx -Action add -Preset stats    -Items stats.json      # {"title":"…","stats":[{value,unit,label}]}
-ppt slide -Doc deck.pptx -Action add -Preset timeline -Items timeline.json   # {"title":"…","steps":[{when,head,text}]}
-ppt slide -Doc deck.pptx -Action add -Preset process  -Items process.json    # {"title":"…","steps":[{head,text}]}
-ppt slide -Doc deck.pptx -Action add -Preset compare  -Items compare.json    # {"title":"…","left":{head,points},"right":{…}}
-ppt slide -Doc deck.pptx -Action add -Preset summary  -Items summary.json    # {"title":"…","points":[{head,text}]}
-ppt slide -Doc deck.pptx -Action add -Preset gallery  -Items gallery.json    # {"title":"…","images":[{path,caption}]}
-ppt slide -Doc deck.pptx -Action add -Preset split    -Items split.json      # {"title":"…","image":"…jpg","side":"left"}
-ppt render -Doc deck.pptx -Overview -Out shots      # 60 秒看完全稿
-```
+八档成品版式 `cards` / `stats` / `timeline` / `process` / `compare` / `summary` / `gallery` / `split`（v1.31，数据走 `-Items <json>`）；v1.32 再补 `canvas`（自由版面，给坐标 + `edges` 用 `AddConnector` 真连到形状边）/ `grid`（结构化版面，按 `rows`/`span` 排，不用给坐标）/ `slide -Action reuse`（复制页后按形状名换字换图），以及形状绘制图表（`scatter` 含 OLS 拟合线+方程+R²、`curve`、`pie`、`doughnut`）。
 
-- **数据放 JSON、标题也放 JSON**（`title` 字段）：七个内容档位都要求标题，缺了会报 `BAD_ARGS … needs -Title (or "title" in the -Items object)`。
-- 统一外观：标题 28pt（`**强调**` 会用 accent 加粗）、色杠 + 细线、页脚、页码「n / N」；正文 14pt，放不下会**自动降一档字号**并记进 `fontSizeDrops`。
-- **`overflowWarnings` 非空就别交**：要么删字、要么换档（例如 5 条要点拆成 two/compare）。形状是 `gallery` 默认 `contain`（整图不裁）；要统一比例裁切用 `-Fit cover`。
-- 图片裁切走 **GDI+ 预裁再按框插入**（不碰 `PictureFormat.Crop*`——WPS 上它按点解释、且改宽高会把裁切洗掉，实测 1200×600 进 480×540 会变成 552×540 出页）。
-
-### 自由版面 / 结构化版面 / 形状图表 / 复用页（v1.32）
-
-```powershell
-# canvas：给坐标，节点之间自动连线（AddConnector 真连到形状边）
-ppt slide -Doc deck.pptx -Action add -Preset canvas -Items canvas.json
-# canvas.json = {"title":"…","items":[{"type":"node","id":"A","box":[60,150,220,80],"text":"采集层"},…],
-#                "edges":[{"from":"A","to":"B","kind":"elbow","label":"原始数据"}]}
-
-# grid：不给坐标，按行/span 排（左图右文、2×2 卡片、上表下结论）
-ppt slide -Doc deck.pptx -Action add -Preset grid -Items grid.json
-# grid.json = {"title":"…","rows":[[{"type":"image","span":1,"path":"…","fit":"cover"},
-#                                   {"type":"stack","span":1,"items":[{"type":"heading","text":"…"},{"type":"text","text":"…"}]}],
-#                                  [{"type":"card","head":"…","value":"12"},{"type":"card","…":…}],
-#                                  [{"type":"callout","text":"结论一"},{"type":"callout","text":"结论二"}]]}
-
-# 形状绘制图表（不建原生图表对象，塞进任意框；canvas/grid 的 item {"type":"chart","chart":{…}}）
-#   scatter（可 fit:true → 最小二乘线 + 方程 + R²）、curve（末端标系列名）、pie、doughnut
-
-# 复用一页：复制后按形状名换文字/换图，版式与连线保留，页码自动改成「新页 / 总页」
-ppt read -Doc deck.pptx -From 4 -Count 1                     # 先看形状名
-ppt slide -Doc deck.pptx -Action reuse -From 4 -At 7 -Items reuse.json
-# reuse.json = {"texts":{"title":"新标题"},"images":{"pic1":"C:\\…\\new.png"}}
-```
-
-- **canvas 不会替你避让**：框重叠、文字压边不会自己挪（只报越界与连接失败），重叠要自己调 `box`；`grid` 才是"不用管坐标"的那条路。
-- **形状图表一张约 45–60 个形状**：`check` 的 `density` 规则会报，交付时按规则抑制（`-Config`）或把点数控制在 10 个内。要"读者能改数"的原生图表仍用 `chart` 命令（代价：必须有窗口、最多 3 系列）。
-- **`reuse -At` 是尽力而为**：WPS 对刚 `Duplicate()` 出来的页 `MoveTo` 被静默忽略（独立 `slide -Action move` 有效），所以返回里 `added` 是实际落点、`requestedAt` 是你要的位置；要精确位置再补一条 `slide -Action move -Index <added> -To <目标>`。
-- **主题写不进 pptx**：实测 WPS 拒绝 `Presentation.Tags`（`Tags.Add` 不报错但 `Count` 恒 0）⇒ 主题仍存 `%LOCALAPPDATA%\wps-office-cooperate\ppt-themes\`，**换机要把这个 JSON 一起带走**再 `theme -Set`；`theme -Probe` 可复核该结论。
-- `slide -Action reuse` / `dup` 内部会**保存并恢复你的剪贴板**（`Duplicate` 借剪贴板，v1.32 修掉了"复用后再 render 必崩"的问题）。
+**每档的 `-Items` 字段契约、逐档示例 JSON、返回值与已知限制 → [reference/ppt-presets.md](reference/ppt-presets.md)**（v1.34 从主文档下沉）。速记三条：中文只放 JSON 文件里（别塞命令行）；`overflowWarnings` 非空就别交（删字或换档）；图片裁切走 GDI+ 预裁，**别碰 `PictureFormat.Crop*`**（WPS 按点解释、改宽高会把裁切换掉）。
 
 ### `text -Items` 批量格式
 
@@ -833,13 +791,16 @@ ppt check -Doc 稿.pptx -Config 院标规则.json -Out check.md
 
 ## 参考
 
-- [reference/workflows.md](reference/workflows.md) —— Word 全部典型工作流分步教程 + 排版实测坑详解。
-- [reference/multi-task.md](reference/multi-task.md)
-- [reference/multi-task-excel.md](reference/multi-task-excel.md)
-- [reference/multi-task-ppt.md](reference/multi-task-ppt.md)
-- [reference/multi-task-session.md](reference/multi-task-session.md) —— 跨 app 任务板与波次调度（`tasks-session.ps1`）、物理约束与验收。 —— PPT 多任务：页号/形状锚点、全局任务优先、结构先做、`tasks-ppt.ps1` 三条命令与验收。 —— Excel 多任务：任务卡字段、`tasks-excel.ps1` 三条命令、合并/冲突规则、提交顺序与验收。 —— 多任务协作（多章节 / 同章多任务 / 章节+全文）：任务卡字段、`tasks.ps1` 三条命令、提交顺序、合并规则、实测坑与验收清单。
-- [reference/word-quirks.md](reference/word-quirks.md) —— WPS Writer 与 Word 的实测差异表（冒充版本号、样式中文名、`Range` 是方法、关最后一个文档静默杀实例……）。
+- [reference/workflows.md](reference/workflows.md) —— Word / PPT 全部典型工作流分步教程 + 排版与交付实测坑详解。
+- [reference/multi-task.md](reference/multi-task.md) —— Word 多任务：任务卡字段、`tasks.ps1` 三条命令、提交顺序、合并规则、实测坑与验收清单。
+- [reference/multi-task-excel.md](reference/multi-task-excel.md) —— Excel 多任务：任务卡字段、`tasks-excel.ps1` 三条命令、合并/冲突规则、提交顺序与验收。
+- [reference/multi-task-ppt.md](reference/multi-task-ppt.md) —— PPT 多任务：页号/形状锚点、全局任务优先、结构先做、`tasks-ppt.ps1` 三条命令与验收。
+- [reference/multi-task-session.md](reference/multi-task-session.md) —— 跨 app 任务板与波次调度（`tasks-session.ps1`）、物理约束与验收。
+- [reference/word-quirks.md](reference/word-quirks.md) —— WPS Writer 与 Word 的实测差异表（冒充版本号、样式中文名、`Range` 是方法、关最后一个文档静默杀实例……）+「表格整备」实测。
 - [reference/excel-quirks.md](reference/excel-quirks.md) —— WPS 表格 COM 的实测差异与坑（冒充 Excel、SaveAs 身份变化、块数组 0 基、渲染走剪贴板……）。
+- [reference/ppt-quirks.md](reference/ppt-quirks.md) —— WPS 演示的实测差异与坑（页码占位符每页 "1"、`Crop*` 单位是点、`SmartArt.AllNodes` E_FAIL、`Presentation.Tags` 被拒……）。
+- [reference/ppt-presets.md](reference/ppt-presets.md) —— PPT 预设版式 8 档 + `canvas`/`grid`/`reuse` 的 `-Items` 字段契约与示例 JSON（v1.34 新增）。
 - [reference/encryption.md](reference/encryption.md) —— 落盘即密文的现象、为什么 COM 路线不受影响、交付与解密链路。
 - [reference/word-acceptance.md](reference/word-acceptance.md) / [reference/excel-acceptance.md](reference/excel-acceptance.md) —— 各版本验收记录。
+- [reference/changelog.md](reference/changelog.md) —— **唯一版本历史（v1.1 至今）**；当前版本见文首「当前版本」与 frontmatter `version`。
 

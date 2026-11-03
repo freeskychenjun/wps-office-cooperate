@@ -1,4 +1,4 @@
-﻿// v1.14 - resident helper: one long-lived process per app, so a command does not pay
+// v1.14 - resident helper: one long-lived process per app, so a command does not pay
 // "start .NET exe + attach to WPS + find the document" again and again.
 //
 // Measured floor on this machine (2026-11-01): a warm `status` cost ~4.8 s, of which ~2.0 s is
@@ -143,6 +143,27 @@ internal static class PipeServer
     private static string Escape(string s)
     {
         if (s == null) return "";
-        return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", " ").Replace("\n", " ");
+        // Full JSON string escaping: the old version only handled \\, " and CR/LF, so an exception
+        // message carrying a tab or another control character produced a frame the client could not
+        // parse (the client would then fall back to the one-shot path and re-run the command).
+        StringBuilder b = new StringBuilder(s.Length + 8);
+        foreach (char c in s)
+        {
+            switch (c)
+            {
+                case '\\': b.Append("\\\\"); break;
+                case '"': b.Append("\\\""); break;
+                case '\r': b.Append("\\r"); break;
+                case '\n': b.Append("\\n"); break;
+                case '\t': b.Append("\\t"); break;
+                case '\b': b.Append("\\b"); break;
+                case '\f': b.Append("\\f"); break;
+                default:
+                    if (c < 0x20) b.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                    else b.Append(c);
+                    break;
+            }
+        }
+        return b.ToString();
     }
 }

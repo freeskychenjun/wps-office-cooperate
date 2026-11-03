@@ -1,4 +1,4 @@
-﻿// v0.7 fast locate: fetch doc.Content.Text ONCE (one COM roundtrip, ~0.5 s on a 15k-paragraph
+// v0.7 fast locate: fetch doc.Content.Text ONCE (one COM roundtrip, ~0.5 s on a 15k-paragraph
 // report) and match in memory; convert hit offsets to paragraph numbers with the
 // Range(0,offset).Paragraphs.Count trick (one roundtrip per HIT, not per paragraph).
 // The per-paragraph loop remains as the fallback for hosts where Content.Text misbehaves.
@@ -450,6 +450,9 @@ internal static partial class Program
     private static List<string> DocTextsByChunks(dynamic doc, int total, out string why)
     {
         why = null;
+        // v1.34: the daemon is long-lived, so counters from a previous request must not leak into
+        // this one (the response builder only checks the texts path, not which request set them).
+        _chunkStats = null;
         if (total < 2) return null;
         List<string> texts = new List<string>(total);
         ChunkStats st = new ChunkStats();
