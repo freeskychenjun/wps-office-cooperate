@@ -1615,9 +1615,49 @@ internal static partial class Program
         dynamic pane = win.Panes.Item(1);
         int total = (int)pane.Pages.Count;
         if (total <= 0) throw new Fail("COM_ERROR", "WPS reports 0 pages. Open the document in print view (View.Type = 3) and try again.");
+        // v1.33: render -Table n renders exactly the pages that table straddles (plus its caption
+        // page), so "scan for the pages, then render twice" becomes one call.
+        int tableNo = a.Int("table", 0);
+        Dictionary<string, object> tableInfo = null;
+        if (tableNo > 0)
+        {
+            int tables = (int)TryGet(() => (object)(int)doc.Tables.Count, 0);
+            if (tableNo > tables) throw new Fail("BAD_ARGS", "table " + tableNo + " does not exist (the document has " + tables + ").");
+            try { doc.Repaginate(); } catch (Exception) { }
+            dynamic only = doc.Tables.Item(tableNo);
+            int[] span = PageSpanOf(doc, only);
+            int tableFrom = span[0];
+            int tableTo = span[1];
+            int capPage = 0;
+            try
+            {
+                int paraTotal = (int)doc.Paragraphs.Count;
+                int startPara = TableStartPara(doc, only, paraTotal);
+                CaptionRec above = CaptionAbove(doc, startPara, new HashSet<int>());
+                if (above != null) capPage = PageOfPara(doc, above.Para);
+            }
+            catch (Exception) { }
+            if (capPage > 0 && (tableFrom <= 0 || capPage < tableFrom)) tableFrom = capPage;
+            if (tableFrom > 0)
+            {
+                page = tableFrom;
+                last = tableTo < tableFrom ? tableFrom : tableTo;
+            }
+            tableInfo = new Dictionary<string, object>();
+            tableInfo["table"] = tableNo;
+            tableInfo["pageFrom"] = tableFrom;
+            tableInfo["pageTo"] = tableTo;
+            if (capPage > 0) tableInfo["captionPage"] = capPage;
+        }
         if (page > total) throw new Fail("BAD_ARGS", "page " + page + " does not exist (the document has " + total + ").");
         last = Math.Min(last, total);
-        if (a.Flag("overview", false)) return RenderOverviewDoc(pane, dir, page, last, total, width);
+        if (a.Flag("overview", false))
+        {
+            object overview = RenderOverviewDoc(pane, dir, page, last, total, width);
+            Dictionary<string, object> ov = overview as Dictionary<string, object>;
+            if (ov != null && tableInfo != null) ov["table"] = tableInfo;
+            return overview;
+        }
 
         List<object> files = new List<object>();
         for (int p = page; p <= last; p++)
@@ -1635,6 +1675,7 @@ internal static partial class Program
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["pages"] = total;
         r["files"] = files;
+        if (tableInfo != null) r["table"] = tableInfo;
         r["note"] = "Tracked revisions and comments that are visible in print view appear in these pictures.";
         return r;
     }

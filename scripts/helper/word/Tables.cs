@@ -184,13 +184,15 @@ internal static partial class Program
         dynamic doc = RequireDoc(a, true);
         string action = a.Str("action", "").Trim().ToLowerInvariant();
         if (action == "scan" || action == "inspect") return TabScan(a);   // read-only, allowed on a locked doc
+        if (action == "plan") return TabPlan(a);                          // read-only too (v1.33)
+        if (action == "normalize" || action == "normalise") return TabNormalize(a);   // -DryRun works read-only
         if (IsReadOnly(doc)) throw new Fail("READONLY", "The document is open read-only; no table was changed.");
 
         if (action == "header-repeat" || action == "headerrepeat" || action == "repeat-header") return TabHeaderRepeat(a);
         if (action == "caption" || action == "uncaption") return TabCaptionMove(a);
         if (action == "rows" || action == "row" || action == "delete-row" || action == "deleterow") return TabRowDelete(a);
         if (action.Length > 0 && action != "format" && action != "modify")
-            throw new Fail("BAD_ARGS", "unknown table action \"" + action + "\" (scan | header-repeat | caption | rows | format; inserting a table uses \"data\")");
+            throw new Fail("BAD_ARGS", "unknown table action \"" + action + "\" (scan | plan | normalize | header-repeat | caption | rows | format; inserting a table uses \"data\")");
 
         // "data" means insert; without it the command reformats tables that are already there.
         if (a.Has("data")) return TabInsert(doc, a);

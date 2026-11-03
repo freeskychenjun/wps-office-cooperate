@@ -195,17 +195,79 @@ Agent 接管一段 → 人裁决/手改 → Agent 读人的结果继续。四个
 
 ---
 
-## 12. 批量整理表格（2026-10-25 实战，饶河报告 85 张表）
+## 12. 表格整备（v1.33：`plan` + `normalize` 一条命令，取代下面的手工流程）
 
-中文报告最常见的四类表格毛病，一条 `table -Action scan` 先体检再动手。**实测提醒：不要凭"中文报告都有这个毛病"预设大面积命中**——那份 85 张表的报告里，题名做进第 1 行的只有 1 张。
+> 起因：2026-11-03 中午，一份 29 页 / 14 表的水利自检报告做「题注编号修正 + 表名外提 + 所有表格加粗边框」。任务本身 3 件事，旧做法用了 **127 次工具调用 / 88.6 分钟**（第 2 轮 88.6 min，其中 90% 在等模型、10% 在跑命令）。参考 `design-report-format`（一条 exe 内部跑完 scan→format→table）改造成本节的写法后，同样工作实测 **8 条命令 / 约 40 s**（plan 6.5 s + dry-run 4.1 s + normalize 15.4 s + plan-after 5.3 s + render 2.8–3.7 s×3）；其中表名外提只对分页符前的表生效，分节符前的表按平台限制报 `needsHuman`。
+>
+> 关键结论：慢的根因不是 COM，而是**步数 × 每步上下文**——上下文 21.8 万 token 时每步首字延迟 5–60 s；127 次调用里 **56 次（42.2 分钟）是试错与绕路**，43 步（29 分钟）本可由一条命令替代。
+
+### 12.0 四步流程
 
 ```powershell
-office.ps1 word table -Doc $DOC -Action scan
+# 1) 只读侦察：一条命令给全（表结构/题注/边框/列宽/风险/编号提议/正文引用）
+office.ps1 word table -Doc $DOC -Action plan
+# 2) （可选）人确认编号映射：把 plan 里 renumber.approved 改成 true 再传回
+office.ps1 word table -Doc $DOC -Action normalize -Plan approved-plan.json -DryRun   # 先看要改哪些
+# 3) 一次改到位：题注外提（尽力而为，见 12.3；分节符在表前会报 needsHuman）→ 空白统一 → 重编号 → 加粗边框（列宽快照/恢复）→ 跨页表头 → 自检
+office.ps1 word table -Doc $DOC -Action normalize -Plan approved-plan.json
+# 4) 表级复核：只渲该表所跨页（不再整页翻）
+office.ps1 word render -Doc $DOC -Table 9 -Out .\check -Width 1300
 ```
 
-返回 `summary`（`tables` / `multipage` / `multipageWithoutHeaderRepeat` / `captionInFirstRow` / `bordersNotThick`）+ 每张表一行。只读，不改文档、不进撤销栈，只读打开的文档也能跑。
+`normalize` **默认只改 plan 判定未达标的表**；整条命令一个撤销单元、逐表隔离、**不 save**（保存永远是人裁决的最后一步）。
 
-### 12.1 题名做进了第 1 行（`captionInFirstRow: true`）
+### 12.1 `plan` 的返回（只读，一次 6–8 s）
+
+- `tables[]`（每表）：`para` / `pages` / `rows` / `columns` / `caption{pos,para,page,text}` / `split` / `headerRepeated` / `borders[outer,inner]` / `tblStyle`（空 = 无样式）/ `tblW`（`pct/5019`、`dxa/8393`、`auto/0`）/ `gridCols[]`（pt）/ `fontSize` / `risks[]`。
+- `risks[].flags`：`captionInFirstRow`（题名在表内）、`bordersNotThick`、`breakBefore`（表前有分页/分节符 → 题注外提要特殊处理）、`noStyle`、`noBorders`（**写边框会触发 WPS 重建布局**）、`pctWidths`、`gridOverflow`（列宽合计超版心）、`multipageWithoutHeaderRepeat`。
+- `captions[]` / `references[]` / `issues[]`：与 `captions` 命令同一解析器（两命令永不会打架）。
+- `renumber`：`items[{table,para,from,to,unique,basis}]` + `refs[{number,to,ambiguous}]` + `duplicates`/`ambiguous`。**这是"按出现顺序 + 引用指向"的候选映射，不是裁决**——重号时 `unique=false`，人/agent 确认后才能 `approved:true`。
+- `summary`：14 个计数（`captionInFirstRow`、`bordersNotThick`、`noStyle`、`noBorders`、`pctWidths`、`breakBefore`、`multipage…`、`gridOverflow`、`textWidth` 等）。
+
+**为什么要它**：这些字段以前只能靠 `scan`（只有 11 个键）+ 自己解密读 XML + 逐段 `read` 拼出来；现场"查不出列宽为什么崩"就是这样烧掉 37 分钟的。
+
+### 12.2 `normalize` 的行为与参数
+
+| 参数 | 说明 |
+|---|---|
+| `-Action normalize` | 默认全套；只处理未达标表 |
+| `-Table n` | 只做这一张（试跑用；仍会自动判风险） |
+| `-DryRun` | 只报将改什么，不写文档（只读文档也能跑） |
+| `-NoCaptions` / `-NoBorders` / `-NoHeaderRepeat` | 关掉对应阶段 |
+| `-Gap 2` | **只统一「编号与题名」之间**的空间（默认 2 个半角空格，`0` 关闭）；「标签与编号」（表/表2.1.1）保持原稿习惯，不擅改 |
+| `-Borders thick` | 外框 1.5 pt + 内线 0.5 pt（当前唯一档；`grid`/`three-line` 走旧 `table -Borders`） |
+| `-Fit keep\|window\|content` | 边框后列宽策略：保持原宽（默认）/ 按比例撑满版心 / AutoFit 内容 |
+| `-Plan <file>` | 带上人确认过的 `renumber`（`approved:true` 才执行） |
+| `-Verify` | 收尾复检（默认就带 verification 块）；失败项进 `needsHuman` |
+
+执行顺序（命令内部保证）：**题注外提 → 题注空白规范化 → 可选重编号 → 加粗边框 → 跨页表头 → 自检**（先提题名再设表头，否则重复出去的是题名行；先套边框后删行会让首行边框重算）。
+
+返回：`summary{changed,skipped,needsHuman,captionsMoved,bordersApplied,widthsRestored,headerRepeated,pageBefore/After,revisions/comments before/after}`、`verification{captionInFirstRow,bordersNotThick,multipageWithoutHeaderRepeat,captionPageMismatch,widthsChanged,pageDelta}`、`tables[]`（每表只回关键字段）、`failures[]`（单表失败不中断）。
+
+### 12.3 两个已修的真缺陷（机制级）
+
+1. **表名外提：WPS 上不做可靠承诺（2026-11-03 定调）**。能提的只有「普通段落后 / 手动分页符前」的表：`normalize` 只用 `before-para`（在表前一段的段末标记前插 CR），且**回读题注页码 == 表起始页**才接受（T1/T7 实测可提）。**表前是分节符时（如横向节首的表）无解**——分节符的段末标记紧邻表格，任何"在表前插段落"都会落回上一节，`normalize` 直接报 `needsHuman{captionMoved:"wps-section-start"}`，不重试；要彻底解决只能人工把分节符剪到题注之后，或在微软 Word 里用 `-CutPaste`。表前一段带**手动分页符**（`\f`）或**分节符**（`sectPr`）时，旧写法在"段末标记之前插 CR"会把题注插到断点**之前**。`normalize` 改为固定方法链 **range-insert → table-start → before-para**，每种都**回读题注页码 == 表起始页**才接受：
+   - **before-para**：在表前一段的段末标记前插 `"\r" + 题名`，再回读页码；普通段落后/手动分页符前的表用它可成（T1/T7 实测）。
+   - 我们**试过并删掉**的写法（留档避免重复踩）：`table-para`（`Table.Range.InsertParagraphBefore`）、`range-insert`（`doc.Range(tableStart,tableStart).InsertBefore`）、`table-start`（`doc.Range(tableStart-1,tableStart-1).InsertParagraphBefore`）——在 WPS 上分节符紧邻表格时全部把题注插进**上一节或表格第一格**，清理失败尝试还会毁表（曾把 18 列表段落数打掉 3、页数 +2），所以按「不挂不脏」原则删除。
+   - **cut-paste**（`WordOpenXML` 存表 → 删表 → 节首写题名 → `InsertXML` 放回）在**微软 Word** 上可用；**WPS 12.1 上会把 Writer 进程转死（实测 100% CPU、COM 全部挂起、只能杀进程）**，所以默认只在真 Word 上自动启用，WPS 上必须显式 `-CutPaste` 才尝试。
+   - 三法（+可选 cut-paste）都不过 → 该表回滚 + `needsHuman{captionMoved:"section-break"}`，其它表继续。**绝不为了一张表把整条命令或整个文档挂住。**
+2. **加边框把列宽搞崩**（表 2.1.7，旧做法排查 37 分钟）：实测根因**不是**"WPS 自动挂默认样式"也不是"宽度被改成百分比"（磁盘上本来就有 `tblStyle` 且 `tblW/tcW` 就是 pct）。触发条件 = **该表 XML 里没有 `w:tblBorders` 元素**：第一次写边框迫使 WPS 补建边框描述并**重建该表布局**，`w:gridCol` 按"当前渲染宽度"重新推导（容量取整）。破坏力由该表有无 `tblStyle`、宽度是 pct 还是 dxa 决定——原稿那张表恰好无样式 + dxa 固定，直接崩；有 `tblBorders` 的 12 张纹丝不动。
+   - 而 **COM 读不出列宽**：autofit 列 `Column.Width` 在 WPS 返回 `9999999`（`wdUndefined`）。所以快照走 `doc.Content.WordOpenXML`（整篇 0.16 s）：解析 `tblStyle/tblW/tblLayout/gridCol[]/首行 tcW/tblBorders`；写后比 `gridCol` 漂移（>2%），漂了就 `PreferredWidthType/PreferredWidth` + 逐列 `Width = dxa/20` 写回，再读一次 XML 复核。
+   - **短路**：已达标的表跳过（实测全局改 14 张只有 2 张真变）。
+
+### 12.4 验证闭环
+
+1. `normalize` 的 `verification` 五项归零；`failures[]`/`needsHuman[]` 为空或已解释；
+2. `plan` 复跑对比 before/after（题注页码、边框、`gridCols` 漂移 ≤2%）；
+3. `render -Table n` 目检：题注在框外居中、外框明显粗于内线、续页顶部有列名、数字没被拆行；
+4. 段落数变化只来自"删题名行 + 插题注段"；页数基本不变；修订数/批注数不变；
+5. **最后才 `save`**，由人裁决。
+
+### 12.5 旧做法（v1.32 及以前，仅"单点小活"还用它）
+
+以下逐条命令仍保留，适合"就一张表 / 只提个题名"的小活；**多表批量一律走 12.0**，不要逐条拼（85 张表逐张调 ≈ 4–5 分钟且无法单表回退）。
+
+### 12.6 题名做进了第 1 行（单表手工）
 
 ```powershell
 office.ps1 word table -Doc $DOC -Action caption -Table 1 -Borders thick
@@ -219,7 +281,7 @@ office.ps1 word table -Doc $DOC -Action caption -Table 1 -Borders thick
 
 返回 `caption` / `newPara` / `rowsBefore→rowsAfter` / `firstRowText` / `borderRead`。删完一定要看 `firstRowText` 变成真表头（如 `序号`）。
 
-### 12.2 跨页却没重复表头
+### 12.7 跨页却没重复表头（单表手工）
 
 ```powershell
 office.ps1 word table -Doc $DOC -Action header-repeat          # 全文档，迭代到稳定
@@ -232,7 +294,7 @@ office.ps1 word table -Doc $DOC -Action header-repeat -Table 6 -Row 2   # 强制
 
 顺序：**先提取题名，再设表头重复**，否则重复的是题名行。
 
-### 12.3 全文档边框加粗
+### 12.8 全文档边框加粗（单表/少量表手工）
 
 ```powershell
 office.ps1 word table -Doc $DOC -Borders thick        # 不带 -Table = 所有表
@@ -240,9 +302,9 @@ office.ps1 word table -Doc $DOC -Borders thick        # 不带 -Table = 所有�
 
 一次 COM 遍历 + 单个撤销记录（85 张表约十几秒）。**不要**逐张调（85 次进程附着 ≈ 4–5 分钟）。回读：四个外边 `[1,12]`（1.5 pt）、两条内线 `[1,4]`（0.5 pt）。
 
-批量套边框前先确认没有"用表格做的排版/图片框"——`scan` 里 `bordersNotThick` 会把它们一并算进来；如有，按表号排除、不要一刀切。
+批量套边框前先确认没有"用表格做的排版/图片框"——`scan` 里 `bordersNotThick` 会把它们一并算进来；如有，按表号排除、不要一刀切。**v1.33 起**：无 `w:tblBorders` 的表写边框会触发 WPS 重建布局（见 12.3），要保列宽就走 `normalize`。
 
-### 12.4 删行
+### 12.9 删行
 
 ```powershell
 office.ps1 word table -Doc $DOC -Action rows -Table 2 -Row 3
@@ -250,20 +312,15 @@ office.ps1 word table -Doc $DOC -Action rows -Table 2 -Row 3
 
 返回 `rowsBefore/rowsAfter` 与删后的首行文本。删行会连同文字一起删（等同退格），删前想留内容先 `cell` 读出来。
 
-### 12.5 验证闭环
-
-1. `scan` 复跑：`captionInFirstRow` 归零、`multipageWithoutHeaderRepeat` 归零、`bordersNotThick` 归零；
-2. `render` 目标页：题名在框外居中、外框明显粗于内线、续页顶部有列名、数据条数没变；
-3. `pages` 基本不变（只有改页面结构时才该变）；
-4. 格式类改动不进修订，**save 之前** `render` 让用户看过。
-
-### 12.6 页码断号（另一类坑，COM 做不到）
+### 12.10 页码断号（另一类坑，COM 做不到）
 
 现象：正文 `1,2,3` 之后某些物理页反复跳回 `1`。根因是 `sectPr` 里带了 `<w:pgNumType w:start="1"/>`。
 
 - `page -Doc $DOC` 的查询模式会报每节 `pageNumbers`（`startNumberRaw` / `restartAtSectionRaw` / `firstDisplayedPage`），断号一眼看出；
 - `page -PageNumberStart none` 会尝试清掉"本节重新编号"，但 **WPS 常常做不到**（`RestartNumberingAtSection` 读回 `null`；写 `StartingNumber = 0` 会理解成"从 0 开始"，写 `-1` 会把分页搞乱）——命令会**明说失败**，别硬试；
 - 可行路线：关闭文档（不保存）→ 改 `word/document.xml` 删掉多余节的 `pgNumType@w:start`（保留第一节的 `start="1"`）→ 重新 `open` → 导出 PDF 逐页取页码验证连续 → `fields` 刷目录 → `save`。导出 PDF 落盘即密文，要先用 `decrypt-office-pdf` 解密再读。
+
+
 ---
 
 ## 13. 单位上标批量修（2026-10-25 实测，300 页 / 13498 段）

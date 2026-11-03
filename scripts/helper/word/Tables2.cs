@@ -116,8 +116,8 @@ internal static partial class Program
 
     /// <summary>
     /// table -Action header-repeat: set "repeat header rows on every page" on the tables that
-    /// straddle a page break. Iterates until stable, because repeating a header pushes pages
-    /// and can make a neighbouring table straddle a page break too (measured: 22 -> 6 -> 0).
+    /// straddle a page break. The iteration itself lives in RepeatTableHeaders (shared with
+    /// table -Action normalize, v1.33).
     /// </summary>
     private static object TabHeaderRepeat(Bag a)
     {
@@ -137,93 +137,112 @@ internal static partial class Program
         int selStart = -1, selEnd = -1;
         try { selStart = (int)app.Selection.Start; selEnd = (int)app.Selection.End; } catch (Exception) { }
 
-        List<object> log = new List<object>();
-        int changed = 0, passesUsed = 0;
         try
         {
+            Dictionary<string, object> rep;
             using (P2Edit edit = new P2Edit(doc, false, "wps-word-cooperate header repeat"))
             {
-                for (int pass = 1; pass <= passes; pass++)
-                {
-                    passesUsed = pass;
-                    try { doc.Repaginate(); } catch (Exception) { }
-
-                    List<int> todo = new List<int>();
-                    List<string> what = new List<string>();
-                    int from = only > 0 ? only : 1, to = only > 0 ? only : total;
-                    for (int n = from; n <= to; n++)
-                    {
-                        dynamic table = doc.Tables.Item(n);
-                        int[] span = PageSpanOf(doc, table);
-                        bool split = span[1] > span[0] && span[0] > 0;
-                        int heading = ReadHeadingFormat(app, table);
-                        // In single-table mode an unsplit table is still fixed when asked.
-                        if (heading == -1) continue;
-                        if (!split && only == 0) continue;
-                        todo.Add(n);
-                        what.Add(n.ToString(CultureInfo.InvariantCulture) + (split ? "" : "*"));
-                    }
-
-                    Dictionary<string, object> entry = new Dictionary<string, object>();
-                    entry["pass"] = pass;
-                    entry["candidates"] = todo.Count;
-                    entry["tables"] = what;
-                    log.Add(entry);
-                    if (todo.Count == 0) break;
-
-                    foreach (int n in todo)
-                    {
-                        dynamic table = doc.Tables.Item(n);
-                        int cols = (int)TryGet(() => (object)(int)table.Columns.Count, 0);
-                        int[] cells = RowCellCounts(table, 2);
-                        int rowsToRepeat = rowOverride > 0 ? rowOverride : ((cols > 0 && cells.Length > 1 && cells[1] > 0 && cells[1] < cols) ? 2 : 1);
-                        int tRows = (int)TryGet(() => (object)(int)table.Rows.Count, 0);
-                        if (rowsToRepeat > tRows) rowsToRepeat = tRows;
-                        bool ok = false;
-                        string err = null;
-                        try
-                        {
-                            SelectRows(app, table, rowsToRepeat);
-                            app.Selection.Rows.HeadingFormat = -1;
-                            ok = ReadHeadingFormat(app, table) == -1;
-                        }
-                        catch (Exception e) { err = Clean(e.Message); }
-                        Dictionary<string, object> one = new Dictionary<string, object>();
-                        one["table"] = n;
-                        one["headerRows"] = rowsToRepeat;
-                        one["columns"] = cols;
-                        one["headingFormat"] = ReadHeadingFormat(app, table);
-                        one["ok"] = ok;
-                        if (err != null) one["error"] = err;
-                        log.Add(one);
-                        if (ok) changed++;
-                    }
-                }
-            }
-
-            // final verification sweep
-            try { doc.Repaginate(); } catch (Exception) { }
-            int missing = 0;
-            for (int n = 1; n <= total; n++)
-            {
-                dynamic table = doc.Tables.Item(n);
-                int[] span = PageSpanOf(doc, table);
-                bool split = span[1] > span[0] && span[0] > 0;
-                if (!split) continue;
-                if (ReadHeadingFormat(app, table) != -1) missing++;
+                rep = RepeatTableHeaders(doc, app, only > 0 ? only : 1, only > 0 ? only : total, passes, rowOverride, only > 0, total);
             }
 
             Dictionary<string, object> r = new Dictionary<string, object>();
             r["action"] = "header-repeat";
             r["mode"] = only > 0 ? "table" : "document";
-            r["passesUsed"] = passesUsed;
-            r["changed"] = changed;
-            r["log"] = log;
-            r["multipageStillMissing"] = missing;
+            r["passesUsed"] = rep["passesUsed"];
+            r["changed"] = rep["changed"];
+            r["log"] = rep["log"];
+            r["multipageStillMissing"] = rep["missing"];
             r["note"] = "format-only change (no revision marks). 0 missing = stable; otherwise raise -Passes. Render the continuation page to confirm the header row is there.";
             return r;
         }
         finally { RestoreSelection(doc, selStart, selEnd); }
+    }
+
+    /// <summary>
+    /// Repeat the header rows of the tables in [from,to] that straddle a page break, iterating until
+    /// stable: repeating a header pushes pages and can make a neighbouring table straddle a page
+    /// break too (measured: 22 -> 6 -> 0). singleTableMode keeps working on one table even when it
+    /// does not straddle anything. Shared by header-repeat and table -Action normalize (v1.33).
+    /// </summary>
+    private static Dictionary<string, object> RepeatTableHeaders(dynamic doc, dynamic app, int from, int to,
+        int passes, int rowOverride, bool singleTableMode, int docTotal)
+    {
+        List<object> log = new List<object>();
+        int changed = 0, passesUsed = 0;
+        for (int pass = 1; pass <= passes; pass++)
+        {
+            passesUsed = pass;
+            try { doc.Repaginate(); } catch (Exception) { }
+
+            List<int> todo = new List<int>();
+            List<string> what = new List<string>();
+            for (int n = from; n <= to; n++)
+            {
+                dynamic table = doc.Tables.Item(n);
+                int[] span = PageSpanOf(doc, table);
+                bool split = span[1] > span[0] && span[0] > 0;
+                int heading = ReadHeadingFormat(app, table);
+                // In single-table mode an unsplit table is still fixed when asked.
+                if (heading == -1) continue;
+                if (!split && !singleTableMode) continue;
+                todo.Add(n);
+                what.Add(n.ToString(CultureInfo.InvariantCulture) + (split ? "" : "*"));
+            }
+
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["pass"] = pass;
+            entry["candidates"] = todo.Count;
+            entry["tables"] = what;
+            log.Add(entry);
+            if (todo.Count == 0) break;
+
+            foreach (int n in todo)
+            {
+                dynamic table = doc.Tables.Item(n);
+                int cols = (int)TryGet(() => (object)(int)table.Columns.Count, 0);
+                int[] cells = RowCellCounts(table, 2);
+                int rowsToRepeat = rowOverride > 0 ? rowOverride : ((cols > 0 && cells.Length > 1 && cells[1] > 0 && cells[1] < cols) ? 2 : 1);
+                int tRows = (int)TryGet(() => (object)(int)table.Rows.Count, 0);
+                if (rowsToRepeat > tRows) rowsToRepeat = tRows;
+                bool ok = false;
+                string err = null;
+                try
+                {
+                    SelectRows(app, table, rowsToRepeat);
+                    app.Selection.Rows.HeadingFormat = -1;
+                    ok = ReadHeadingFormat(app, table) == -1;
+                }
+                catch (Exception e) { err = Clean(e.Message); }
+                Dictionary<string, object> one = new Dictionary<string, object>();
+                one["table"] = n;
+                one["headerRows"] = rowsToRepeat;
+                one["columns"] = cols;
+                one["headingFormat"] = ReadHeadingFormat(app, table);
+                one["ok"] = ok;
+                if (err != null) one["error"] = err;
+                log.Add(one);
+                if (ok) changed++;
+            }
+        }
+
+        // final verification sweep over the whole document, exactly as v1.32 reported it
+        try { doc.Repaginate(); } catch (Exception) { }
+        int missing = 0;
+        for (int n = 1; n <= docTotal; n++)
+        {
+            dynamic table = doc.Tables.Item(n);
+            int[] span = PageSpanOf(doc, table);
+            bool split = span[1] > span[0] && span[0] > 0;
+            if (!split) continue;
+            if (ReadHeadingFormat(app, table) != -1) missing++;
+        }
+
+        Dictionary<string, object> result = new Dictionary<string, object>();
+        result["passesUsed"] = passesUsed;
+        result["changed"] = changed;
+        result["log"] = log;
+        result["missing"] = missing;
+        return result;
     }
 
     // ------------------------------------------------------------ caption out of row 1
@@ -231,8 +250,11 @@ internal static partial class Program
     /// <summary>
     /// table -Action caption: a caption that was typed into the first (merged) row is moved
     /// into a paragraph of its own just above the table, then that row is deleted.
-    /// Order matters: insert the paragraph first (deleting the row first would destroy the
-    /// caption text), apply borders last (deleting a row re-computes the top border).
+    /// v1.33: the insertion/verification itself lives in MoveCaptionOutOfTable (Tables3.cs), which
+    /// tries three methods and keeps the first one whose PAGE NUMBER reads back correct. That is
+    /// what fixes the orphan caption in front of a page/section break (session bug 1).
+    /// Order matters: insert the paragraph first (deleting the row first would destroy the caption
+    /// text), apply borders last (deleting a row re-computes the top border).
     /// </summary>
     private static object TabCaptionMove(Bag a)
     {
@@ -265,76 +287,29 @@ internal static partial class Program
         if (!IsCaptionText(caption) && !force)
             throw new Fail("BAD_ARGS", "the first cell of table " + n + " is not a caption (\"" + Head(caption.Trim(), 40) + "\"); pass -Force to move it anyway.");
 
-        // keep the caption's own look, but only if it looks like a caption at all
-        string fontName = Convert.ToString(TryGet(() => (object)firstCell.Range.Font.Name, ""), CultureInfo.InvariantCulture);
-        string fontFe = Convert.ToString(TryGet(() => (object)firstCell.Range.Font.NameFarEast, ""), CultureInfo.InvariantCulture);
-        double fontSize = Convert.ToDouble(TryGet(() => (object)firstCell.Range.Font.Size, (object)0.0), CultureInfo.InvariantCulture);
-        int align = Convert.ToInt32(TryGet(() => (object)(int)firstCell.Range.ParagraphFormat.Alignment, (object)1), CultureInfo.InvariantCulture);
-
         dynamic app = App(true, true);
         int selStart = -1, selEnd = -1;
         try { selStart = (int)app.Selection.Start; selEnd = (int)app.Selection.End; } catch (Exception) { }
 
         int newPara = 0, rowsAfter = rowsBefore;
+        string method = "";
         try
         {
             using (P2Edit edit = new P2Edit(doc, false, "wps-word-cooperate caption move"))
             {
-                // 1) the paragraph right before the table
-                int tableStart = (int)TryGet(() => (object)(int)table.Range.Start, 0);
-                int prevCount = 0;
-                dynamic prevPara = null;
-                if (tableStart > 1)
-                {
-                    prevCount = (int)TryGet(() => (object)(int)doc.Range(0, tableStart - 1).Paragraphs.Count, 0);
-                    if (prevCount > 0) prevPara = doc.Paragraphs.Item(prevCount);
-                }
-
-                if (prevPara != null)
-                {
-                    // insert AT the paragraph mark (End - 1) so the new paragraph can never
-                    // land inside the table - the mistake that InsertParagraphAfter makes.
-                    int pos = (int)prevPara.Range.End - 1;
-                    doc.Range(pos, pos).InsertAfter("\r" + caption);
-                    newPara = prevCount + 1;
-                }
-                else
-                {
-                    doc.Paragraphs.Item(1).Range.InsertBefore(caption + "\r");
-                    newPara = 1;
-                }
-
-                int insideTable = TabOfParagraph(doc, newPara);
-                if (insideTable > 0)
-                    throw new Fail("COM_ERROR", "the caption paragraph landed inside table " + insideTable + " - the table starts at the very beginning of the document; move the caption by hand.");
-
-                // 2) style the new paragraph like the caption was
-                dynamic np = doc.Paragraphs.Item(newPara);
-                if (fontName != null && fontName.Length > 0)
-                {
-                    try { np.Range.Font.Name = fontName; } catch (Exception) { }
-                    try { if (fontFe != null && fontFe.Length > 0) np.Range.Font.NameFarEast = fontFe; } catch (Exception) { }
-                }
-                if (fontSize > 0) { try { np.Range.Font.Size = (float)fontSize; } catch (Exception) { } }
-                try
-                {
-                    np.Format.Alignment = align;
-                    np.Format.FirstLineIndent = 0;
-                    np.Format.LeftIndent = 0;
-                    np.Format.RightIndent = 0;
-                }
-                catch (Exception) { }
-
-                // 3) delete the row that held the caption
-                rowsAfter = DeleteRowViaSelection(app, table, 1);
-                if (rowsAfter >= rowsBefore)
-                    throw new Fail("COM_ERROR", "WPS did not delete row 1 of table " + n + " (still " + rowsAfter + " row(s)); the caption paragraph was inserted, undo and try the row deletion by hand.");
+                CaptionMoveResult mv = MoveCaptionOutOfTable(doc, app, n, a.Flag("cutPaste", false) || !IsWpsApp(app));
+                if (!mv.Ok)
+                    throw new Fail("COM_ERROR", mv.Error + " (three insertion methods were tried and each was checked by reading the caption page back)");
+                newPara = mv.NewPara;
+                rowsAfter = mv.RowsAfter;
+                method = mv.Method;
+                caption = mv.TextBefore;
             }
         }
         finally { RestoreSelection(doc, selStart, selEnd); }
 
         List<string> applied = new List<string>();
-        applied.Add("caption paragraph above the table (paragraph " + newPara + ")");
+        applied.Add("caption paragraph above the table (paragraph " + newPara + ", method " + method + ")");
         applied.Add("deleted row 1: " + rowsBefore + " -> " + rowsAfter + " row(s)");
 
         // 4) borders last: deleting a row recomputes the top border
@@ -352,12 +327,15 @@ internal static partial class Program
         rslt["table"] = n;
         rslt["caption"] = Head(caption.Trim(), 80);
         rslt["newPara"] = newPara;
+        rslt["method"] = method;
         rslt["rowsBefore"] = rowsBefore;
         rslt["rowsAfter"] = rowsAfter;
         rslt["firstRowText"] = Head(CleanPara(Convert.ToString(TryGet(() => (object)doc.Tables.Item(n).Cell(1, 1).Range.Text, ""), CultureInfo.InvariantCulture)).Trim(), 40);
         rslt["borderRead"] = TabBorderReadback(table);
         rslt["applied"] = applied;
-        rslt["note"] = "format-only, no revision marks. Render the page to confirm the caption now sits outside the frame and the outer border is thicker.";
+        rslt["note"] = "format-only, no revision marks. The caption page is read back and compared with "
+            + "the table's first page, so a caption in front of a page/section break no longer lands on "
+            + "the previous page. Render the page to confirm the caption sits outside the frame.";
         return rslt;
     }
 
@@ -479,7 +457,7 @@ internal static partial class Program
         return counts;
     }
 
-    /// <summary>"表1 xxx" / "表 1 xxx" / "附表2 ..." typed into a cell. One parser everywhere:
+    /// <summary>"琛? xxx" / "琛?1 xxx" / "闄勮〃2 ..." typed into a cell. One parser everywhere:
     /// the same CaptionRx that `word captions` and `audit` use, so the three can never disagree.</summary>
     private static bool IsCaptionText(string text)
     {

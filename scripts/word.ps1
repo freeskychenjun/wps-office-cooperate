@@ -92,6 +92,18 @@ param(
     [string]$Autofit,
     [string]$RowHeight,
     [switch]$KeepTogether,
+    # table -Action plan|normalize (v1.33): renumber plan file, phase switches, caption spacing,
+    # width policy after the borders were written, and a test hook for per-table isolation
+    [string]$Plan,
+    [switch]$NoCaptions,
+    [switch]$NoBorders,
+    [switch]$NoHeaderRepeat,
+    [int]$Gap = -1,
+    [string]$Fit,
+    [switch]$Verify,
+    # caption move: allow the cut-paste method on WPS (off by default: it froze WPS on 2026-11-03)
+    [switch]$CutPaste,
+    [int]$FailTable = 0,
     # fillgaps: report only / how many paragraphs may move in front of one block / empty band threshold
     [switch]$DryRun,
     [int]$MaxMoves = 8,
@@ -389,6 +401,7 @@ switch ($Command) {
         if (-not $Out) { Write-Error-Json 'BAD_ARGS' 'render needs -Out <directory>' }
         $request['page'] = $Page
         $request['out'] = Resolve-FullPath $Out
+        if ($Table -gt 0) { $request['table'] = $Table }
         if ($Overview) {
             # Contact sheet: 6 pages per image, at most 18 pages per call, 640 px per cell.
             $request['overview'] = $true
@@ -519,6 +532,18 @@ switch ($Command) {
         if ($Autofit) { $request['autofit'] = $Autofit }
         if ($RowHeight) { $request['rowHeight'] = $RowHeight }
         if ($KeepTogether) { $request['keepTogether'] = $true }
+        # plan / normalize (v1.33)
+        if ($PSBoundParameters.ContainsKey('Label') -and $Label) { $request['label'] = $Label }
+        if ($PSBoundParameters.ContainsKey('DryRun')) { $request['dryRun'] = [bool]$DryRun }
+        if ($Plan) { $request['plan'] = Resolve-FullPath $Plan }
+        if ($NoCaptions) { $request['noCaptions'] = $true }
+        if ($NoBorders) { $request['noBorders'] = $true }
+        if ($NoHeaderRepeat) { $request['noHeaderRepeat'] = $true }
+        if ($PSBoundParameters.ContainsKey('Gap')) { $request['gap'] = $Gap }
+        if ($Fit) { $request['fit'] = $Fit }
+        if ($Verify) { $request['verify'] = $true }
+        if ($CutPaste) { $request['cutPaste'] = $true }
+        if ($FailTable -gt 0) { $request['failTable'] = $FailTable }
         Add-Format-Fields $PSBoundParameters
     }
     'caption' {
@@ -735,7 +760,7 @@ $paramCommandSkips = @{
 $paramCheckPath = Join-Path $PSScriptRoot 'param-check.ps1'
 if (Test-Path -LiteralPath $paramCheckPath) {
     . $paramCheckPath
-    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Para = 0; To = 0; Row = 0; Col = 0; Table = 0; AtPara = 0; Passes = 0; Slide = 0; MaxMoves = 8; MinGapPt = 0 }
+    $paramDefaultValues = @{ From = 1; Count = 0; Index = 0; Max = 200; Para = 0; To = 0; Row = 0; Col = 0; Table = 0; AtPara = 0; Passes = 0; Slide = 0; MaxMoves = 8; MinGapPt = 0; Gap = -1; FailTable = 0 }
 Test-ParamConsumption -Command $Command -Bound $PSBoundParameters -Request $request `
         -Aliases $paramAliases -FormatFields $formatFields -CommandSkips $paramCommandSkips -DefaultValues $paramDefaultValues
 }

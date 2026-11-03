@@ -120,7 +120,7 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `format` | `-Doc <路径> [-Para N \| -From N -To M \| -Style 样式名 \| -Match <正则>] [-Slow]` + 任意格式项 | 对**整篇/一段/一段区间/某样式的所有段/文本匹配正则的所有段**套字符与段落格式（`-Match` 例：`"^\s*(图\|附图)\s*\d"` 一次选中全部图名；返回命中数与前 5 个样例）。`-Style` 与 `-Match` 的定位扫描都在 WPS 进程内完成（v1.10 起 `-Style` 改 Find-by-style，往返 O(命中) 而非 O(段数)） |
 | `style` | `-Doc <路径> -Style <样式名> [-NoNumbering]` + 任意格式项 | 改**样式本身**（正文、标题 1…），所有用它的段落一起变 |
 | `page` | `-Doc <路径>`（**不带任何选项=查询各节设置**）`[-Paper A4] [-Orientation portrait\|landscape] [-Top/-Bottom/-Left/-Right 厘米] [-HeaderText] [-FooterText] [-PageNumber center\|right\|left\|none] [-PageNumberStart N\|none] [-All]` | 纸张/方向/页边距/页眉页脚/页码（逐节应用）；查询模式报每节纸张/方向/边距/页眉页脚 **+ `pageNumbers`（起始号/是否节内重启/该节首段的实际显示页码——页码断号一眼看出）**；`-PageNumberStart none` 试图清掉「本节重新编号」（WPS 常做不到，会**明说失败**并给 XML 路线） |
-| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`（每行带 `para` = 表起始段号）**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`** | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法）。`scan` 的 `para` 可直接 `read -From <para-3> -Count 6` 看题注，或喂给 `-Action caption -Table n`。**v1.30**：① 新建表格的单元格默认**整词换行**（长数字不被拆）；② `-KeepTogether` 改为**逐行走选区写法 + 逐行回读**，返回 `keepTogether:{rowsExpected,rowsSet,readBackFailures,allowBreak}`，WPS 没接受的行走**整条命令 `ok:false`（`KEEPTOGETHER_FAILED`）**并点名行号——不再"报成功其实没落上" |
+| `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`（每行带 `para` = 表起始段号）**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`**；**v1.33 一键整备 `-Action plan`**（只读侦察：每表 pages/rows/columns/题注位置与页码/边框/tblStyle/tblW/gridCols/pt 列宽/fontSize + `risks[]`（`captionInFirstRow`/`bordersNotThick`/`breakBefore`/`noStyle`/`noBorders`/`pctWidths`/`gridOverflow`/`multipageWithoutHeaderRepeat`）+ `captions[]`/`references[]`/`issues[]`（复用 captions 同一解析器）+ `renumber` 提议）与 **`-Action normalize`**（**默认只改 plan 判定未达标的表**：题注外提→空白规范化→可选重编号→加粗边框（WordOpenXML 列宽快照/恢复）→跨页表头→自检；逐表隔离、单条命令一个撤销单元、不 save；`-DryRun`/`-Table n`/`-NoCaptions`/`-NoBorders`/`-NoHeaderRepeat`/`-Gap 2`/`-Borders thick`/`-Fit keep\|window\|content`/`-Plan <plan.json>`/`-Verify`）。**表格整备先跑 plan 再 normalize，不要逐条小命令拼**（2026-11-03 实测：同一份 14 表报告用旧做法 127 次调用/88.6 min，其中 43 步是勘探与返工） | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法）。`scan` 的 `para` 可直接 `read -From <para-3> -Count 6` 看题注，或喂给 `-Action caption -Table n`。**v1.30**：① 新建表格的单元格默认**整词换行**（长数字不被拆）；② `-KeepTogether` 改为**逐行走选区写法 + 逐行回读**，返回 `keepTogether:{rowsExpected,rowsSet,readBackFailures,allowBreak}`，WPS 没接受的行走**整条命令 `ok:false`（`KEEPTOGETHER_FAILED`）**并点名行号——不再"报成功其实没落上"。**v1.33 两条硬结论**：③ **表名外提不是本 skill 的可靠能力**——题名做进表首行时，`normalize` 只在「回读题注页码 == 表起始页」成立时才外提（普通段落后/手动分页符前通常可以）；**表前是分节符时 WPS 无法在断点后造正文段，一律报 `needsHuman`，不重试**（彻底解决请人工把分节符剪到题注之后，或用微软 Word 的 `-CutPaste`；「删表+InsertXML」在 WPS 上会把 Writer 转死，默认禁用）；④ 给**XML 里没有 `w:tblBorders` 元素**的表写边框会让 WPS **重建整表布局、按渲染宽度重推 gridCol**（列宽漂移；无 tblStyle + dxa 固定的表会"崩"）——所以写前快照、写后回读、漂移即恢复，且已达标的表**跳过不写** |
 | `fillgaps` | `-Doc <路径> [-DryRun] [-MaxMoves 8] [-MinGapPt 0]` | **填掉图/表前面的页面留白**（v1.30；照 dsh-office 的 `fill_gaps` 移植）：图/表因放不下整块跳到下一页、上一页底部空出一截时，把**图/表后面的正文段**提到图/表之前补上。`-DryRun` 只报不动（**只读文档也能跑**），返回 `moves:[{block,kind,para,page,gap,text}]`；空白阈值默认 `max(90pt, 文本高度×12%)`，`-MinGapPt` 可覆盖。**保守判据**：块前一段必须是正文（不越标题）、块首行页码必须晚于前一段、块后段不能是空段/题注/图段/表内段、冒号结尾的引导句连带搬。搬完会**在表格前留一个空段**（实现代价，已记 quirks）；`moved:0` 是正常结果（说明这稿没有值得填的留白） | **常驻 helper 控制**（Word/Excel/PPT 三端都有，v1.15 起）：start 预热/查看管道、status 报 `running`/`pipe`、stop 让它答完即退。正常流程**不用手动调**——`open` 会自动拉起、`close` 关完文档自动退出；设 `WOC_NO_DAEMON=1` 可整轮退回一次性模式（也是 A/B 用的开关）。设计见 `reference/workflows.md` §15 |
 | `textdiag` | `-Doc <路径> [-Slow]` | **读侧慢/回退的体检**（只读，一次调用）：① 段落数/修订数/表数/表行总数；② `Content.Text` 的块数与尾块；③ 抽样段落号在块模型下的文本 vs 真值；④ 表格行数 vs 段落数的关系（WPS 每行多算一个空段落——块模型对不上的根因）；⑤ `WordOpenXML` 是否可取、字符数、`w:p` 数、`w:p`+表行是否等于段落数、解析耗时；⑥ 最终 `fastPath`/`fastFail` 结论。**遇到「按说几秒却几十秒」先跑它** |
 | `captions` | `-Doc <路径> [-Label 表\|图] [-Max 200]` | **题注清单 + 编号体检**（只读，一条命令替掉"全篇扫段落配对"）：每张表 → 题注段号 `para` / 位置 `pos`（`above` 表上方、`in-table` 做在第 1 行、`below` 在表下方）/ 表号 `number` / 格式 `format`（`dot` 2.4.1、`hyphen` 3.3-1、`plain` 表1）/ 空白 `gap` / `title`；`summary` 汇总重号、同节跳号（`missing` 列出缺的号）、格式混用、空格不一、题注位置混用、缺题注、正文引用与表号的对应（`references` 里 `resolved`）+ 悬空引用；`issues` 每条给 `rule`+`para`+`sample`+`suggest`，直接可照着改。实测 10521 段 / 32 表 **6.4 s**；编号问题**不要**用 `audit` 或全篇 `read` 去查 |
@@ -203,11 +203,13 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
     - 先看 `summary`：`duplicates`（重号）、`sequenceGaps`（同节跳号，`missing` 给缺的号）、`formats`（点分/短横混用）、`spaces`（表号与题名之间空格不一）、`positions`（表内/表外混用）、`uncaptioned`（缺题注）、`unresolvedReferences`（悬空引用）。
     - 再看 `issues[].suggest` 照改：改号用 `revise`（题注段号就在 `issues[].para`）；表格改动本身用 `table -Action caption` / `-Action rows`；改完 `fields` 刷域式题注。
     - `tables[].para` 是每张表的起始段号，可以直接 `read -From <para-3> -Count 6` 看题注上下文。
-11. **批量整理表格（中文报告高频）**：`table -Action scan` 先出体检表（哪张表题名在框内、哪张跨页没表头、边框粗细）→ 按结果选做：
-    - 题名在框内：`table -Action caption -Table n -Borders thick`（提题名 → 删该行 → 加边框，顺序已在命令内部保证）
-    - 跨页缺表头：`table -Action header-repeat`（自动迭代到稳定；**先**处理题名，否则重复出去的是题名行）
-    - 全文档边框加粗：`table -Borders thick`（**不带 -Table 即全表**，一次 COM 遍历 + 一个撤销记录；85 张表约十几秒，别逐张调）
-    - 细节见 [reference/workflows.md](reference/workflows.md) 的「批量整理表格」一节
+11. **批量整理表格（中文报告高频）——v1.33 起一条命令**：**先 `table -Action plan`，再 `table -Action normalize`**，最后 `render -Table n` 看一张表级图后 `save`。
+    - `plan`（只读，一条命令给全）：每表题注位置/页码、边框是否达标、`tblStyle`/`tblW`/`gridCols`/列宽/字号、`risks[]`（表内题名 `captionInFirstRow`、边框未达标 `bordersNotThick`、表前断点 `breakBefore`、无样式 `noStyle`、无 `tblBorders` `noBorders`、宽度是百分比 `pctWidths`、列宽超版心 `gridOverflow`、跨页缺表头）+ 题注清单/正文表号引用/重编号提议。**这些字段以前只能自己解 XML 才看到，别再去解密读 XML**。
+    - 编号语义要人拍板：`renumber.items[]` 给的是"按出现顺序+引用指向"的**候选**映射，`duplicates`/`ambiguous` 非空时不要自动改；人确认后把 `approved:true` 的 plan 文件喂 `normalize -Plan <file>`。
+    - `normalize`（默认只改 plan 判定未达标的表）：题注外提（**尽力而为、不承诺**：回读「题注页码 == 表起始页」通过才保留；普通段落后、手动分页符前的表通常可提；**表前是分节符时 WPS 无法在断点后造正文段 → 报 `needsHuman`，不重试**）→ 题注空白统一（默认 `-Gap 2`，只统一「编号与题名」之间，不擅改「表2.1.1」这种标签-编号间距）→ 可选重编号 → 加粗边框（WordOpenXML 列宽快照/恢复，本来达标的表跳过）→ 跨页表头 → 自检；**逐表隔离**（一张失败不回滚其它）、整条命令一个撤销单元、**绝不隐式 save**。先 `-DryRun` 看一眼要改哪些表。
+    - 复核：`render -Table n`（只渲该表所跨页，不再整页翻）+ `plan` 再跑一次比 before/after；`verification` 里 `captionInFirstRow`/`bordersNotThick`/`multipageWithoutHeaderRepeat`/`captionPageMismatch`/`widthsChanged` 都应归零。
+    - 只有"单点小活"（就一张表、只提题名）才用逐条命令：`table -Action caption -Table n -Borders thick` / `-Action header-repeat` / `-Action rows`。
+    - 细节、失败码与实测数字见 [reference/workflows.md](reference/workflows.md) 的「表格整备（v1.33）」一节。
 12. **单位上标批量修（几百页报告的常见活）**：`unit -Doc X` 先看体量 → `unit -Doc X -Apply` 一键修（已正确的跳过）→ `render` 抽 1–2 页确认 → `save`。
     - 判据：`unit` 的 `plainDigitHits` − `unicodeOk` 不等于坏例数，**坏例数以 `-Apply` 返回的 `fixed` 为准**（只有 Find 能看到 run 格式，文本层分不出"真掉"和"格式上标"）。
     - `skippedSamples` 里若出现疑似真单位，用 `-Units` 补上重跑；若是英文词（`item3`、`com2`）则不用管。
@@ -220,6 +222,20 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 15. **加脚注（v1.29）**：`footnote -Action insert -Para N -Expect "<段首>" [-Find "<锚词>" -Where after] -TextFile <txt>`（中文正文走文件）→ `footnote -Action list` 拿 `i` → 要改 `edit -Index i -Expect "<原文开头>"`，要删 `delete -Index i`。**不要**用"上标数字 + 页脚手写"伪造脚注：那不是原生脚注，增删后编号必错、也不会随页面重排。
 16. **交付前过全稿（v1.29）**：`render -Overview -Page 1 -To 18`（≤18 页/次，一张图 6 页）→ 看总览图挑可疑页 → `render -Page n -Width 1100` 放大 → 再 `save`。
 17. **排版收尾：填留白（v1.30）**：全稿写完、图表都插好之后跑一次 `fillgaps -DryRun` 看它会搬哪几段（返回 `moves[].gap` 是那一页底部的空白大小）→ 没意见就 `fillgaps` 实跑 → `render` 看 `moves[].page` 那几页。表格跨页被劈开、行落单时先 `table -KeepTogether -Table n`（它会逐行回读，`ok:false` 就是 WPS 没接受）。**注意**：`fillgaps` 只搬正文段、绝不越过标题；表格前会留一个空段；`moved:0` 说明这稿没有值得填的留白，不是失败。
+
+## Word 长任务的上下文纪律（v1.33，2026-11-03 实测）
+
+> 背景：一份 29 页/14 表的报告做「题注编号 + 表名外提 + 加边框」，旧做法用了 **127 次工具调用 / 88.6 分钟**。拆开看：**工具只跑了 8.8 分钟（10%），79.7 分钟（90%）在等模型**；其中 57.8 分钟是每步重读 21.8 万 token 上下文的**首字延迟**（prompt <150k 时 TTFT 4.6 s，>300k 时 60 s，峰值 94 s；相关系数 0.83）。**真正贵的是「步数 × 每步上下文」，不是 COM 慢。** 文档涨 1 万 token，后面每一步都变慢。
+> 纪律比命令更重要：把 127 次调用里 56 次（42.2 分钟）的试错绕路消掉，比把命令改快 2 倍更值钱。下面每条都带本次实测代价，违反哪条会在复盘里被点名。
+
+1. **先 `table -Action plan` 再动手**，plan 的结论直接驱动后续入参。本次 13:20 的 `scan` 已报出「6 张边框未达标、T7 内线 9999999、T9 题名在首行」，13:46 仍 14 张一起改——"侦察结论没被消费"代价 **38.2 分钟（43% 墙钟）**。
+2. **别读 helper 源码猜参数**。本次 31 次 `Select-String/read/grep/Get-ChildItem` 打在 `.cs`/`word.ps1` 上 = **15.4 分钟**；答案本来就在命令返回码里（`ANCHOR_MISSING` 等错误已写清原因与出路）。要新能力就提需求改命令，不要在会话里考古。
+3. **别为拿列宽/样式/分节符自己解 XML**。本次 3 次 `decrypt-files.ps1`（92.3 s，占工具时间 17%）+ 4 个自写脚本 = **26.4 分钟**；这些现在是 `plan` 的返回字段（`gridCols`/`tblW`/`tblStyle`/`risks[].breakBefore`）。
+4. **`E_FAIL` 出现一次就换机制，不要试第三种写法**。表 2.1.9 题注外提失败后连试 5 条路径 = **14.7 分钟**；正确动作是查 plan 的 `breakBefore`/`captionMoveRisk`，能外提就走 `normalize`，不能就报工单。
+5. **别全量下笔，只改"未达标清单"**。本次只需改 6 张却改了 14 张 → 无法定位/无法单表回退 → 整体回滚重做，**37.6 分钟排查 + 17.9 分钟作废**。`normalize` 默认就只改未达标表，别再手工 `-Borders thick` 一把梭。
+6. **别反复整页 render 看同一页**。本次 18 次 `read_image`、`page-17` 看了 7 次 ≈ **8.4 分钟**；现在用 `render -Table n` 只出该表那几页，一次一张图看完就够。
+7. **回滚用「close 不保存 + 重开」或单表快照，不要叠 `undo`**。本次 4 次 `undo` 后原稿 2 条批注丢了 1 条、段落数 4069→4066；`undo` 不分作者。
+8. **返回体与 reasoning 都会进下一次 prompt**：本次工具结果占上下文增量 46.8%、自己的 reasoning 回灌 41.4%。所以：命令返回要精简（必要时 `-DryRun` 先看摘要）、别写长推理、同一事实别重复查。
 
 ## Word 故障排查
 
@@ -253,6 +269,10 @@ description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式
 | `inTable` 与所见不符 | 已修（`Table.Range.End` 是排他端，判据改 `start < end`）；回归用例在 `tests/word/captions/check_captions.py` 的 B1 两条断言。若仍见到紧随表格的正文段带 `inTable:true`，先 `undo` 再报告。 |
 | `table` 报 `0x800A1767` / 行操作炸 | WPS 的 `Row` 对象残缺（`Rows.Item(n).Delete/.HeadingFormat/.Range/.Cells` 都不可靠）。**不要自己写 `Rows.Item(n)` 循环**——用 `table -Action rows/header-repeat/caption`，内部走"选中整行 → `Selection.Rows`"的写法 |
 | `insert -Where after` 的段落进了表格 | 已修：锚点后紧跟表格时，helper 改在段末标记之前插 CR。若仍见到 `inTable:true` 而锚点不在表格里，先 `undo` 再报告 |
+| **表名外提：本 skill 不承诺**（v1.33 结论） | 把「做在表格第 1 行的题名」提到框外，**WPS 上不可靠**：①表前是**分节符**时（题名行在横向/新节首），分节符的段末标记紧邻表格，任何"在表前插段落"都会落回上一节、题注留上一页——WPS 没有可用原语，`normalize` 直接报 `needsHuman{captionMoved:"wps-section-start"}`，**不重试**；②「删表 + InsertXML 放回」的 cut-paste 在 WPS 上会把 Writer **转死**（100% CPU、COM 全挂，2026-11-03 实测），只在微软 Word 或显式 `-CutPaste` 时尝试；③能可靠外提的只有普通段落后/手动分页符前的表（回读题注页 == 表页才算成功）。**要彻底解决请人工把分节符剪到题注之后，或在微软 Word 里处理。** |
+| 加边框后**列宽/版式崩**（v1.33 实测根因） | 触发条件不是"没样式"或"宽度是百分比"，而是**该表 XML 里没有 `w:tblBorders` 元素**：第一次写边框会让 WPS 重建整表布局、按渲染宽度重推 `gridCol`（无 `tblStyle` + dxa 固定宽度的表会直接崩）。`plan` 的 `risks[].noBorders`/`noStyle`/`gridOverflow` 会预判；`normalize` 写前快照、写后回读、漂移即恢复，本来达标的表跳过 |
+| 想读列宽/字号/表样式，`table -Action format` 回的全是 `9999999` | WPS 对 autofit 列 `Column.Width` 返回 `wdUndefined`（即 9999999），COM 侧读不出真实列宽。用 `table -Action plan` 的 `gridCols`（来自一次 `Content.WordOpenXML`，整篇约 0.16 s），**不要**自己解密读 XML |
+| `doctor` 显示 Word 16 但实际操作行为像 WPS / `version` 只有 12.0 | 本机 `Word.Application` 的官方 CLSID 被**用户级注册表覆盖**到 `wps.exe`（`HKCU\Software\Classes\WOW6432Node\CLSID\{000209FF-…}\LocalServer32`），`CurVer=Word.Application.12`；两家 `Application.Name` 都返回 "Microsoft Word"，**判据只看 `doctor`/`status` 的 `app.path` + `app.build`** |
 
 ---
 
@@ -822,3 +842,4 @@ ppt check -Doc 稿.pptx -Config 院标规则.json -Out check.md
 - [reference/excel-quirks.md](reference/excel-quirks.md) —— WPS 表格 COM 的实测差异与坑（冒充 Excel、SaveAs 身份变化、块数组 0 基、渲染走剪贴板……）。
 - [reference/encryption.md](reference/encryption.md) —— 落盘即密文的现象、为什么 COM 路线不受影响、交付与解密链路。
 - [reference/word-acceptance.md](reference/word-acceptance.md) / [reference/excel-acceptance.md](reference/excel-acceptance.md) —— 各版本验收记录。
+
