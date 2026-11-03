@@ -186,6 +186,62 @@ word.ps1 内部还有自我重复：`Read-Items-Json` 的 5 行逻辑内联 6 �
 - **不建议做的**：①引入 pytest/框架重写测试——现有"验收脚本 + 编号断言"模式与仓库气质匹配，缺的是 runner 不是框架；②per-app 拆分 SKILL.md——docs/borrow/README.md:106 已论证 skill 无首次注入钩子，拆了反而每次都要多读文件；③把 helper 升级 C# 7+/csproj——csc.exe 零依赖自举是部署优势，C#5 的代价已在可控范围；④为消重复而引入 DLL 发布——源码链接模式零部署依赖，保持。
 - **风险最高的单项**是 P1-4（语义变更）与 P2-1（大文件重组）：前者改变 agent 可见行为，后者纯搬运但 touch 面大，都应独立 commit + 全量回归。
 
+## 七、实施记录（v1.34，2026-11-04）
+
+> 结论：**本方案的主体（P0 全部 + P1 的 1/3/6/7/8）已实施并提交 `v1.34`（commit e304e1a）**；P1-2/P1-4/P1-5 与多数 P2 项按风险判断**明确推迟**，理由逐条列在下面。实施前已按第 191 行的告诫逐条复核代码与行号，下列"实施时发现"是方案里没有的增量。
+
+### 已实施
+
+| 条目 | 实际做法（与方案的差异） | 证据 |
+|---|---|---|
+| P0-1 版本单源化 | 做了，且范围略扩：frontmatter `version:`、`## 当前版本` 只留 5 条、历史只在 changelog、新增 `docs/release-checklist.md` | SKILL.md 版本注记 146→1；v1.32 头条漂移消除 |
+| P0-2 编码整改 | 未采用"全转 BOM"，改为**全部纯 ASCII**（更彻底、与仓库自称一致）+ `tests/check_encoding.ps1` 门禁；`woc.ps1` 的 BOM 保留 | fast 层 encoding PASS：27 个 .ps1 |
+| P0-3 publish 护栏 | 目标必须是 `…\skills\<name>`（`-Force` 放行）+ 预检全部源文件 + staging + `-WhatIf` + 空目录清理 | 误传 `…\.tmp\publish-guard-test` 被拒；两轮发布到临时目标 68 文件、stale 清理生效 |
+| P0-4 exit 2 判定 | 共享 `Test-JsonOkFalse`：先正则快路径、命中才 `ConvertFrom-Json` 判**顶层** ok，解析失败才回退正则 | 32 条共享函数断言全过（含嵌套/转义 `"ok": false` 仍 exit 0） |
+| P0-5 batch 可见性 | 顶层 `ok = okCount > 0`（**混合批次仍 ok:true**，只有全败才 false），新增 `okCount/failedCount` | 2×ping → ok:true/okCount 2/exit 0；全败 → ok:false/exit 2 |
+| P0-6 参数绑定错误 | 方案提的 `-Command` 捕获会破坏 woc.ps1 存在的理由（`=`/`^` 原样到达），**改为**：stderr 暂存转发 + 检测绑定错误签名时补 ASCII `BAD_ARGS` JSON；SKILL.md 铁律写清两种形态 | `woc.ps1 word badcommand` → JSON+exit 1；`read`（无 -Doc）→ 原 JSON 不变 |
+| P0-7 小清理 | 全部做了；两处修正：`'unit','units' {}` 在 PS 5.1 **语法非法**（解析器实测），改用 `$commandKey` 归一；另发现并修掉 transport 变量 `$text` 与 `[string]$Text` **大小写不敏感撞名**（会让 one-shot 回退被静默跳过、空 stdout exit 0）。`case/caseSensitive` 与 `finish -Doc` 经复核**无 agent 可见不一致**（三端 PS 参数都叫 `-Case`），不改 | 三端 serve/status、batch、错误路径实测 |
+| P0-8 夹具自给 | 新增 `make_normalize_fixture.py` 现场生成 14 表/4 题注/2 缺 tblBorders/0 修订夹具，`--fixture` 仍可跑真实报告 | `check_normalize.py --static-only` 克隆即可跑（fast 层） |
+| P0-9 死引用/依赖 | `run_acceptance.ps1` 改 `scripts\woc.ps1 word ...`；新增 `requirements-dev.txt` + `tests/README.md` | 同上 |
+| P1-1 PS 包装层去重 | 新增 `scripts\woc-app-common.ps1`（375→448 行，含 P1-3）；三 wrapper 805/792/877 → 591/587/669；pipe 协议从 4 份实现收敛为 2 份（`woc-common.ps1` 的 batch 客户端仍独立，职责不同） | `git diff --stat`：−738/+120；daemon 与 one-shot JSON 逐字节一致 |
+| P1-3 daemon 超时 | **只做 wrapper 侧**：`Invoke-Daemon -ReadTimeoutMs`（异步读 + 500 ms 切片 + Stopwatch 截止）+ `serve -Action reset`（按完整 exe 路径杀本版本 helper）。**helper 侧看门狗不做**：无法安全中止已阻塞的 STA COM 调用，强行复投只会让 COM 状态更脏；wrapper 超时 + reset 已让"永久挂死"变成"可恢复错误" | 假管道服务器实测 805 ms 返回 TIMEOUT；reset killed:1→下条命令自动新起 |
+| P1-6 Excel 回归 | 16 组用例 / 228 断言，oracle 用 openpyxl 独立读回（含 `.xls` 往返、选择性回滚、图表存在性），90 s/步看门狗、逐用例重置 daemon | 实测 **228 PASS / 0 FAIL / 464 s**；`-SkipWps` 列 16 用例 exit 0 |
+| P1-7 runner+CI | `tests/run_all.ps1`（fast/wps/all、`-Only`、`-List`、`-SkipWps`、PASS/FAIL/SKIP+耗时+汇总+非零退出）；`.github/workflows/tests.yml` 只跑 fast 层（windows-latest） | fast 层 **10/10 PASS / 24.7 s**；注入失败验证 exit 1 |
+| P1-8 速查表减重 | 做的是"只搬不删"版：SKILL.md 90366→82637 字符（**−8.6%**，方案目标 −40% 含"再删 8–12K token"，那需要删掉 quirk 事实——本 skill 的价值就在这些实测细节上，故止步于搬迁+去重）；preset 契约下沉 `reference/ppt-presets.md`，两条超长行拆成摘要+指针，参考列表粘连修好 | 字符数实测；46 个被删文本里的技术 token 逐一验证有落点 |
+| P2-4 静态状态 | 只做 word 侧 `_chunkStats`/`_xmlNote` 每请求重置 | 编译通过；行为由既有回归覆盖 |
+| P2-5 PipeServer 加固 | 只做 `Escape` 补全控制字符（`\t\b\f` 与 `\uXXXX`）；`Json.Num` 收紧**未做**（3 份副本，收益低，留待 P1-2 单源化时一起改） | 三端 helper 直接 csc 编译 OK |
+| P2-6 borrow 冻结 | docs/borrow 加 3 行冻结头 + 5 个 `skill-*-v13x.md` 移 `archive/` + 删 `tools/build_guide.py` | 相对链接 17 文件/50 条 0 broken |
+| P2-8 磁盘卫生 | `tests/clean.ps1`；`.gitignore` 修 `tests/work/` 错位、补运行时产物；`git rm --cached` 两个被跟踪产物；删 9 个死夹具与磁盘残留 exe | clean 实跑 11 路径/446 项，临时假仓库验证不越界 |
+
+### 实施时新发现（方案未列，都是真问题）
+
+1. **Excel `sheet -Action delete` 删非空表会永久挂死**（WPS 模态确认框，COM 无法应答；实测 180 s 超时）——由新回归驱动器发现，修复=该次调用临时关 `DisplayAlerts` 并回报 `usedCells`（实测 1.2 s）。
+2. **PPT `check -ExitCode` 在热 daemon 路径失效**（旧代码管道命中即 `exit 0`，门禁形同虚设）——transport 合并后统一在两道传输之后判定。
+3. **Excel `chart -Action list` 的 `type` 返回原始数字码**（WPS 回 int，旧实现只映射 double）——已与 `add` 的名字统一。
+4. **busy 判定三端漂移**确认（Excel/PPT 缺中文「忙」/dialog）——已补齐。
+5. **`$text`/`$Text` 大小写撞名**（见 P0-7）——去重时险些引入的静默 bug，已在三个 wrapper 里改名并加注释。
+6. Excel 回归发现 `write -Value '777'` 存的是文本（CLI 参数是 string）——文档口径问题，未改实现。
+
+### 明确推迟（及理由）
+
+| 条目 | 为何这次不做 |
+|---|---|
+| **P1-2 C# shared 扩容（1500+ 行×3）** | 收益最大但风险最高：`Fail/Json/Bag`、COM attach、marker、busy 等多份副本要动三个 helper 的公共路径；本次没有三端全量 wps 回归的预算，而 helper 编译失败/行为漂移会影响真实文档操作。**前置条件已就位**（P1-6/7 的回归底线），建议下一个独立版本做，每步跑 Excel 回归 + `check_normalize --static-only` + PPT 驱动器。 |
+| **P1-4 "文档消失"语义统一 + QuitAll 收敛** | 会改变 agent 可见行为（word 不再静默重开）且 QuitAll 涉及用户数据；`tests\ppt\**` 有 11 处 `quit` 调用依赖现有语义，必须配全量 WPS 回归 + SKILL.md 铁律声明。数据丢失风险确实存在（word 静默复活已丢弃文档、QuitAll 连带关用户文档），建议作为独立 minor 版本专门做。 |
+| **P1-5 tasks-lib.ps1** | 三份仲裁骨架 30–35% 重复是事实，但 `tasks*.ps1` 是"离线规划器"，改动面大而收益（行数）不如 P1-1；split 的挂死风险已由本次 `WaitForExit(180s)` 堵住。 |
+| **P2-1 巨型文件拆分** | 纯搬运但 touch 面极大（WppHelper/EtHelper），无回归收益，留待后续按需。 |
+| **P2-2 快照/回滚三端对齐、P2-3 共享层实弹测试、P2-7 sleep→轮询** | 设计与验证成本高、眼下无痛点；`P2-3` 依赖 P1-2 先落地。 |
+
+### 本次新增的验证基线（后续改动请跑这两条）
+
+```
+tests\run_all.ps1 -Layer fast                 # 10/10 PASS，约 25 s，CI 同款
+tests\excel\run_data.ps1                      # 16 组 / 228 断言，约 8 min（需 WPS 空闲）
+tests\word\check_normalize.py --static-only   # 自带夹具，克隆可跑
+tests\run_all.ps1 -Layer wps                  # 三端端到端（手动层，10+ min）
+```
+
 ---
 
 *本文件为分析产物，不随 publish.ps1 发布。实施任何条目前请以当时代码为准复核行号。*
+
