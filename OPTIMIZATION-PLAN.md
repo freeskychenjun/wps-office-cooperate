@@ -221,6 +221,7 @@ word.ps1 内部还有自我重复：`Read-Items-Json` 的 5 行逻辑内联 6 �
 4. **busy 判定三端漂移**确认（Excel/PPT 缺中文「忙」/dialog）——已补齐。
 5. **`$text`/`$Text` 大小写撞名**（见 P0-7）——去重时险些引入的静默 bug，已在三个 wrapper 里改名并加注释。
 6. Excel 回归发现 `write -Value '777'` 存的是文本（CLI 参数是 string）——文档口径问题，未改实现。
+7. **wps 层第一次整层跑就在 `ppt/run_chapters` 上永久挂死**：PS 5.1 的 `Start-Process -Wait` **会等子进程的全部后代**，而驱动调用的 `open` 会拉起常驻 helper daemon（长寿进程）⇒ `-Wait` 永不返回（真机复现：合成"子进程→隐藏孙进程 90 s"用例，15 s 后仍在等）。修复：6 个 PPT 驱动与 word 多任务驱动改成 `-PassThru` + 有界 `WaitForExit(300/180 s)`（超时 kill + throw），既解除挂死又给每步硬上限。**这条同时是给调用方的一般性结论：任何用 `-Wait` 包 wrapper 的宿主脚本，只要该命令会拉起 daemon（`open`），就会挂。**
 
 ### 明确推迟（及理由）
 

@@ -37,7 +37,8 @@ try {
 
     function RunWord([string[]]$a) {
         $p = Start-Process -FilePath 'powershell' -ArgumentList (@('-Mta', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $word) + $a) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $work ('out-' + [guid]::NewGuid().ToString('N') + '.json'))
-        $p.WaitForExit()
+        # Bounded: a real COM hang must fail the test, not hang the whole wps layer.
+        if (-not $p.WaitForExit(180000)) { try { $p.Kill() } catch { }; throw ('word command timed out after 180 s: ' + ($a -join ' ')) }
         return $p
     }
 
@@ -45,7 +46,7 @@ try {
     $null = RunWord @('open', '-Doc', $doc, '-NoHint')
     $readPath = Join-Path $work 'read.json'
     $p = Start-Process -FilePath 'powershell' -ArgumentList @('-Mta', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $word, 'read', '-Doc', $doc, '-Count', '0', '-SkipTableCells') -PassThru -NoNewWindow -RedirectStandardOutput $readPath
-    $p.WaitForExit()
+    if (-not $p.WaitForExit(180000)) { try { $p.Kill() } catch { }; throw 'word read timed out after 180 s' }
     $read = ReadJsonFile $readPath
     Check ([bool]$read.ok) 'read ok'
     $items = @($read.result.items)

@@ -45,10 +45,22 @@ function Invoke-Ppt {
     $errFile = Join-Path $Folder ('.err-' + $Step + '.txt')
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Ppt) + $PptArgs
     $argList = @($argList | ForEach-Object { Quote-Arg $_ })
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -NoNewWindow -Wait -PassThru `
+    # NOT -Wait: Windows PowerShell 5.1's -Wait waits for the child's DESCENDANTS too, and `open`
+    # starts the resident helper daemon (long-lived by design), so -Wait never returns - that hung
+    # the whole wps layer forever on the first cold-daemon `open` (measured 2026-11-04).
+    # WaitForExit(ms) waits for the wrapper process only and puts a hard ceiling on every step.
+    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -NoNewWindow -PassThru `
         -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    if (-not $proc.WaitForExit(300000)) {
+        try { $proc.Kill() } catch { }
+        throw ('skill command timed out after 300 s: ' + ($PptArgs -join ' '))
+    }
     $text = ''
-    if (Test-Path -LiteralPath $outFile) { $text = [System.IO.File]::ReadAllText($outFile, [System.Text.Encoding]::UTF8) }
+    for ($i = 0; $i -lt 20; $i++) {
+        if (Test-Path -LiteralPath $outFile) { $text = [System.IO.File]::ReadAllText($outFile, [System.Text.Encoding]::UTF8) }
+        if ($text) { break }
+        Start-Sleep -Milliseconds 100
+    }
     [System.IO.File]::WriteAllText((Join-Path $Folder ('resp-' + $Step + '.json')), $text.Trim(), $Utf8)
     $short = ($text -replace '\s+', ' ').Trim()
     if ($short.Length -gt 160) { $short = $short.Substring(0, 160) + '...' }
