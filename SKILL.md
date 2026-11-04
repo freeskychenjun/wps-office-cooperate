@@ -27,6 +27,10 @@ version: 1.34
 > - **调用错误的两种形态（v1.34）**：① 命令名/参数名打错（ValidateSet 拒绝、未知参数）时 PowerShell 在脚本正文之前就失败：**stdout 为空**、stderr 是宿主文本（含 `ParameterArgumentValidationError` / `Cannot validate argument`）、退出码 1；走 `woc.ps1` 时现在会**额外补一段 JSON** `{"ok":false,"error":{"code":"BAD_ARGS",...}}`，但走 `woc.cmd` 或直接调 `*.ps1` 仍只有 stderr。**判据**：stdout 空 + stderr 含上述关键字 ⇒ 按"调用错误"处理（改命令/参数），别当文档问题查。② 其余错误一律是 stdout 的 JSON 信封：`ok:false` + 退出码 2（`check*` 门禁为 3）。
 > 环境：Windows + WPS；首次调用会用系统自带 `csc.exe` 编译 helper（约 1 秒，之后按源码哈希缓存，不再编译）。
 
+> **阅读导航（先看这一条：本文件一次很可能读不完）**：本文件约 140 KB / 800 余行，**read 工具单次上限通常只有 50 KB 或 2000 行**，一次读往往到 Word 章末尾就断了。
+> - 三章位置（按标题定位最稳；行号为 2026-11-04 时点）：`# Word：…` :107 起、`# Excel：…` :287 起、`# PPT：…` :516 起。**Excel 章**依次是「Excel 命令速查 → Excel 侧已知限制 → 画散点 / 关系曲线 → write / format 的 items 格式 → 典型工作流」。
+> - **被截断时按工具结果里的 `Use offset=N to continue` 接着读**（只读了 Word 章就停的话，续读一次基本能覆盖整个 Excel 章）；**不要**改用 `grep` / `sed` 翻 `scripts\helper\*.cs` 猜参数——命令参数、限制和坑位都在本文件里。确实缺能力，按下方「skill 没覆盖时：合法逃生通道」反馈。
+
 ## 铁律（三个 app 通用，一条都不能省）
 
 > **调用方式铁律（v1.17 更新）**：命令行调用优先 **`scripts\woc.ps1 <app> <命令> ...`**（v1.17 新增：不经过 cmd.exe，公式/`^`/`&`/`$` 原样到达）；只有在 cmd.exe 里调用且参数简单时才用 `scripts\woc.cmd`——**cmd.exe 会吃掉以 `=` 开头的参数并把 `^` 当转义符**，`fill/write -Formula` 走它必坏。两者都等价于 `powershell -Mta -NoProfile -ExecutionPolicy Bypass -File <app>.ps1 ...`。**必须带 `-Mta`**：
@@ -311,14 +315,14 @@ version: 1.34
 | `selection` | `-Doc` | **读用户当前选中的区域**：sheet/range/行列数/值（≤400 格直接带值）——用户说"就改我选的这块"时用；选在别的窗口报 NOT_OPEN |
 | `rows` / `cols` | `-Doc [-Sheet] -Action insert\|delete -Index N [-Count M]` | 插入/删除 N 起的 M 行（列）——结构编辑；**先 snapshot**（可回滚），公式由表格自动调整 |
 | `render` | `-Doc [-Sheet] [-Range] -Out <目录> [-Width 1100]` **`[-IncludeCharts]`** | 区域 `CopyPicture(xlScreen)` → PNG。**语义（v1.17 实测修正）**：图里**会**包含与该区域相交的浮动图表（A1:H52 有两张图 → 都拍到；A1:H10 无重叠 → 一张也没有），但**不含区域之外的**图表。`-IncludeCharts` 把视图自动扩到覆盖该表**全部**图表再出图（返回 `chartsIncluded` 与每张图 `left/top`）——有图表的表用它，**一次成图，不要再截桌面**。**v1.32：render 前后会保存/恢复你的剪贴板**（`CopyPicture` 用完不吞你复制的内容，且恢复的内容不进 Win+V 历史） |
-| `chart` | 加：`-Range 数据区 [-Type column\|bar\|line\|pie\|scatter\|area\|combo] [-Title] [-XTitle] [-YTitle] [-Y2Title] [-Secondary "系列名/序号"] [-Labels value\|percent] [-Legend bottom\|top\|left\|right] [-AxisMin/-AxisMax] [-NumberFormat] [-Anchor E2] [-Width 480] [-Height 300]`；`-Action list [-All]`；`-Action delete\|move -Index n [-Anchor X] [-Width] [-Height]` | 建原生图表。**v1.17**：① 第 1 列=x，**第 2..N 列各一条系列**（表头作系列名，多系列自动出图例）——「Q–H 族曲线」一张图即可；② 尺寸可调（默认 480×300 pt）；③ 建完可 `move` 挪位/缩放；④ `list -All` 跨表列出全部图表与几何信息；⑤ `-Sheet` 已正确转发。**v1.29**：⑥ `-Type combo` + `-Secondary` = **组合图/次坐标轴**（过程线+雨量柱，水文刚需）；⑦ `-Labels/-Legend/-AxisMin/-AxisMax/-NumberFormat`；⑧ 返回 **`occupancy:"G22:N41"`（占地区域）与 `overlaps:[…]`（与已有图重叠硬提示）**——放下张图前先看它；⑨ WPS 组合图刚改完系列类型时设标题会被拒，helper 已按 dsh-office 口径**重试 3 次再退 `SetElement`** |
+| `chart` | 加：`-Range 数据区 [-Type column\|bar\|line\|pie\|scatter\|scatterline\|area\|combo]（完整枚举见下「画散点 / 关系曲线」） [-Title] [-XTitle] [-YTitle] [-Y2Title] [-Secondary "系列名/序号"] [-Labels value\|percent] [-Legend bottom\|top\|left\|right] [-AxisMin/-AxisMax] [-NumberFormat] [-Anchor E2] [-Width 480] [-Height 300]`；`-Action list [-All]`；`-Action delete\|move -Index n [-Anchor X] [-Width] [-Height]` | 建原生图表。**v1.17**：① 第 1 列=x，**第 2..N 列各一条系列**（表头作系列名，多系列自动出图例）——「Q–H 族曲线」一张图即可；② 尺寸可调（默认 480×300 pt）；③ 建完可 `move` 挪位/缩放；④ `list -All` 跨表列出全部图表与几何信息；⑤ `-Sheet` 已正确转发。**v1.29**：⑥ `-Type combo` + `-Secondary` = **组合图/次坐标轴**（过程线+雨量柱，水文刚需）；⑦ `-Labels/-Legend/-AxisMin/-AxisMax/-NumberFormat`；⑧ 返回 **`occupancy:"G22:N41"`（占地区域）与 `overlaps:[…]`（与已有图重叠硬提示）**——放下张图前先看它；⑨ WPS 组合图刚改完系列类型时设标题会被拒，helper 已按 dsh-office 口径**重试 3 次再退 `SetElement`**；⑩ **所有系列共用第 1 列 X（不支持每系列独立 X）**——两条曲线 X 量级不同请分两张图，见下「画散点 / 关系曲线」 |
 | `autofit` | `-Doc [-Sheet] [-Range]` | 列宽行高自适应 |
 | `freeze` | `-Cell A2`（冻结其上方与左侧）；`-Action remove` 取消 | **冻结窗格**：长表滚动看表头用 |
 | `cformat` | `-Range D2:D500 -Rule ">" -Value 1000 [-FillColor "#FFC7CE"]`；`-Rule colorscale\|databar\|top\|bottom\|duplicate\|unique\|blank\|formula\|between\|clear` | **条件格式**：阈值着色/色阶/数据条/前 N/重复值/空值/公式；`-Rule clear` 清空该区域规则 |
 | `validate` | `-Range H2:H200 -List "是,否,待定"` | **数据验证下拉**（v1.29，≤255 字符、值里不能含逗号；区域源未做） |
 | `table` | `-Range A1:F21 [-Name 站点表] [-Style TableStyleMedium2]` | **建成 ListObject 表**：纹行 + 筛选箭头 + 列名可当名字用；已是表则只改样式/名字。⚠️ 表内不能 `filter`（见下方限制表） |
 | `format` | `-Doc -Range A1:D1 [-Sheet] + 格式项`；**多区域：`-Range "A4:E4;A13:E13;A27:E27"`（分号，v1.17）**；**每块不同格式：`-Items <json>`（v1.18，见下）** | 字体/字号/加粗/颜色/填充/对齐/数字格式/列宽/行高/框线/换行。一次调用排完整版，别再逐块串行（实测 26 次 ≈ 20 s）。**关掉某项用 `-NoBold/-NoItalic/-NoUnderline/-NoWrap`**（v1.17：`-Bold:$false` 过不了 `powershell -File` 的参数解析）。**v1.18 起 `-Color`/`-FillColor` 的 RGB 通道已修正**（之前红蓝互换） |
-| `snapshot` | `-Doc [-Sheet 名1,名2] [-Out <路径>]` | 存工作表的值+公式快照（默认全部表；大表用 `-Sheet` 限定范围，diff/restore 也只在该范围内比对/回滚，不碰未覆盖的表；默认存 %LOCALAPPDATA%，`-Out` 随文档带走） |
+| `snapshot` | `-Doc [-Sheet 名1,名2] [-Out <路径>]` | 存工作表的值+公式快照（默认全部表；大表用 `-Sheet` 限定范围，diff/restore 也只在该范围内比对/回滚，不碰未覆盖的表；默认存 %LOCALAPPDATA%，`-Out` 随文档带走）。**没有 `-Tag`**——那是 Word 侧参数，Excel 别照抄，传了会报参数绑定错误 |
 | `diff` | `-Doc [-Since 快照路径\|last]` | 和快照比：哪些格改了（before→after，含公式联动）、哪些增删——**人改的和 Agent 改的都算** |
 | `restore` | `-Doc [-Since 快照路径\|last] [-Cells "Sheet1!C2,Sheet1!E2"] [-KeepExtras]` | **一键撤回**：把工作簿还原到快照状态（只改有差异的格；快照后新增的非空格默认清空，`-KeepExtras` 保留）。`-Cells` = **选择性回滚**，只还原点名的格（快照中没有的点名格清空），其余一切——包括人改的——原样保留。只还原内存，`diff` 验证后再决定 `save` 或不保存直接 `close` |
 | `calc` | `-Doc` | 全簿重算 |
@@ -336,7 +340,7 @@ version: 1.34
 |---|---|---|
 | `render` 的图表语义 | `Range.CopyPicture(xlScreen)` 画的是「这块区域在屏幕上的样子」：**与该区域相交的浮动图表会被拍进去**（2026-11-02 实测 A1:H52 两张图都在、A1:H10 一张都没有），**区域之外的图表永远不在图里** | 图表的表一律 `render -IncludeCharts`（把视图扩到覆盖全部图表）；只渲染表格时**别把图表圈进 `-Range`**，否则会重复画 |
 | `chart` 数据**必须同表** | `dynamic data = ws.Range(dataRef)` 不走跨表解析，`"其他表!A1:B9"` 不可靠 | 辅助数据放在**同一工作表**（例如右侧 AG:AQ，字号 8 弱化并标注"勿删"） |
-| `chart` 的系列约定 | 第 1 列 = x 轴，第 2..N 列各一条系列，**第 1 行是系列名**（v1.17 起多系列；v1.16 及更早只取最后一列） | 单列数据 = 一条系列（无 x 轴）；要「一族曲线」就按 x + 多值列排好 |
+| `chart` 的系列约定（**共用 X**） | 第 1 列 = **所有系列共用**的 x 轴，第 2..N 列各一条系列，**第 1 行是系列名**（v1.17 起多系列；v1.16 及更早只取最后一列）；helper 给每条系列写的是**同一个** `XValues`，**不支持每系列独立 X** | 单列数据 = 一条系列（无 x 轴）；要「一族曲线」就按 x + 多值列排好；**两条曲线 X 量级不同时不要插值合成一张图，分两张**（否则一条被压扁、还多了假数据点） |
 | `format -Borders` 只认 `grid` / `thick` / `none` | 其他值会静默当 `grid`；**v1.16 起对角线（XlBordersIndex 5/6）恒被清空**，不会再把表格画成大 X（v1.15 及更早有此 BUG） | 表格框线用 `-Borders grid`（细）/`thick`（粗）/`none`（清） |
 | `render` 的宽度上限 | `-Width` 低于 100 不缩放；超大区域按 `-Width` 等比缩放 | 想看全貌用 `-Width 1200~1600`，别一次要 4000 |
 | **一个 ET 实例同时开两个工作簿会挂起**（v1.20 实测，非本次改动引入） | `open` 第二个工作簿时 WPS 12 的 `Workbooks.Open` 不返回（等 30 s+ 无响应；之后实例里剩一个空名幽灵工作簿，后续命令报 `DOC_CLOSED`/`E_FAIL`，只能结束 `et.exe` 重来）；用 `-Show`、走 daemon/一次性、先关再开都复现，部署版 v1.20b 同样复现 | **一个实例只开一个工作簿**：多工作簿任务必须串行（`close` 前一份再 `open` 下一份），不要把两个工作簿并存当并行 |
@@ -346,6 +350,14 @@ version: 1.34
 | **`pivot` 的 `Create` 只能两参**（实测） | `PivotCaches().Create(1, range)` 可用；照 VBA 写四参/三参会报「找不到 Create 的重载」 | 命令内部已固定两参；`CreatePivotTable(dest,name)` 同样两参 |
 | **`pivot -Group` / 次轴刻度未实测** | 按月/季/年分组代码按 dsh-office 口径写了但未实测（失败只记 `notes` 不抛错）；图表次坐标轴的刻度/数字格式只作用主轴 | 需要分组就先小样本试一次、看 `notes`；次轴刻度目前只能接受默认或手工调 |
 | **组合图刚改完系列类型时设标题会被拒**（实测） | WPS 在图表还在排版时拒绝 `HasTitle/ChartTitle`，直接 `SetElement` 也有概率失败 | helper 已**重试 3 次再退 `SetElement`**（照 dsh-office 的做法）；调用方不需要做任何事，但看到 `title` 为空就重跑一次 |
+
+### 画散点 / 关系曲线（图表类型与共用 X）
+
+- **类型枚举**：`-Type` 合法值 = `column`（默认）/`bar`/`stacked`/`stackedbar`/`line`/`smooth`/`pie`/`doughnut`/`scatter`（纯散点，只有点）/`scatterline`（**带数据标记的散点线**，库容曲线、水位流量关系这类「点＋连线」用它）/`area`/`radar`/`combo`。传错时报错会列出全部合法值，不用猜、也不用去翻 `.cs`。
+- **共用 X 是硬限制**：`-Range` 第 1 列是所有系列**共用**的 X，第 2..N 列各一条系列；helper **不支持每系列独立 X**。两条曲线 X 量级不同（如两座水库库容 0–1.5 万 / 0–0.7 万 m³）就**分两张图**，不要插值合并成一张（会压扁一条、还多出假数据点）。
+- **竖排两列数据的配图**（高程一列、库容一列）：先在**同一工作表**右侧建辅助块（跨表 `-Range` 不解析），例如 `H1:I40` = 表头 + X/Y 两列，字号 8 弱化并在旁边标「绘图数据·勿删」；再 `chart -Action add -Doc <路径> -Sheet 库容曲线 -Range "H1:I40" -Type scatterline -Anchor H59 -Width 842 -Height 595`（数据区写**同一表内**地址，带表名的跨表引用不可靠）。
+- **尺寸**：A4 横向 1:1 出图用 `842×595 pt`（√2:1），屏上预览用默认 480×300；返回值带 `occupancy`/`overlaps`，放第二张前先看，放不下先 `-Action move`。
+- **核对**：`render -Doc X -IncludeCharts -Out <目录>` 一次拿到「单元格 + 全部图表」的 PNG，再用 `read` 看这张图；不要截桌面、不要为看一张图滚屏翻页。
 
 ### 调用姿势（v1.17，踩过的坑）
 
@@ -479,7 +491,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 5. **校审指认**：`comment -Cell D5 -Text "..."`（或批量逐条加）→ `render` 看角标 → `comment -Action list` 复核。
 6. **排版**：`format`（表头加粗+填充+居中+边框）→ `autofit` → `render` 复看。
 7. **新表**：`sheet -Action add -Name 汇总` → `write`（引用写 `'汇总'!A1`）→ `calc` → `render`。
-8. **图表**：`chart -Action add -Type line -Range 数据 -Title ... -Anchor E2` → `render` 目检 → 不满意 `-Action delete` 重来。
+8. **图表**：`chart -Action add -Type line -Range 数据 -Title ... -Anchor E2` → `render -IncludeCharts` 目检 → 不满意 `-Action delete` 重来。**散点 / 关系曲线（`scatterline`）、共用 X 限制、A4 尺寸与辅助数据块**见上文「画散点 / 关系曲线」。
 
 ## Excel 故障排查
 
