@@ -322,7 +322,7 @@ internal static partial class Program
         // v1.15 resident mode: keep the COM application alive and serve request JSON over a named
         // pipe (same transport as the Word helper - see helper/shared/PipeServer.cs).
         if (args != null && args.Length >= 2 && args[0] == "--serve")
-            return PipeServer.Run(args[1], HandleRequest, OpenDocumentCount);
+            return PipeServer.Run(args[1], "ppt", HandleRequest, OpenDocumentCount, ReleaseHints);
 
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
@@ -3451,6 +3451,48 @@ internal static partial class Program
         }
         catch (Exception) { }
     }
+
+    // ------------------------------------------------------------ hint lease (v1.35)
+    // The frame-title marker and the per-slide badge are the VISIBLE hint; the intent registry is
+    // TitleState (ppt-title-hint.json). The resident helper calls this when the agent's lease
+    // expires and on its way out (shared/HintLease.cs), so a session that simply stops - chat
+    // ended, model error, host killed - cannot leave a window branded as taken over.
+    // Nothing is written to the deck here: the badge is deck CONTENT, so it is only taken out of
+    // memory (and its repair state dropped) - never saved.
+    private static void ReleaseHints()
+    {
+        try { TrayDaemon.Stop("ppt"); } catch (Exception) { }
+        dynamic app = null;
+        try { app = App(false, false); } catch (Exception) { }
+        if (app == null) return;
+        int n = 0;
+        try { n = (int)app.Presentations.Count; } catch (Exception) { return; }
+        for (int k = 1; k <= n; k++)
+        {
+            try
+            {
+                dynamic p = app.Presentations.Item(k);
+                string full = Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture);
+                if (full.Length == 0) continue;
+                // TitleState is kept ON deliberately: it is the INTENT, not the mark. The next
+                // request re-applies the prefix through EnsureTitleMarker, so a session that only
+                // paused comes back branded instead of silently unbranded.
+                if (TitleStateGet(full)) ApplyTitleMarker(p, false);
+                // The badge is in-memory deck content: strip it, but only when MarkState says a
+                // badge was stamped - that snapshot is written by MarkStateSet right after
+                // stamping, so null means "no badge in this deck" and the slide walk (expensive:
+                // every slide, plus a view move/restore) can be skipped. Dropping the snapshot
+                // keeps the next command from "repairing" a badge nobody ever saved. Never save.
+                if (MarkStateGet(full) != null)
+                {
+                    ApplySlideMark(p, false);
+                    MarkStateClear(full);   // no badge left, nothing to repair later
+                }
+            }
+            catch (Exception) { }
+        }
+    }
+
     private static object HintCmd(Bag a)
     {
         dynamic p = RequirePres(a, false);

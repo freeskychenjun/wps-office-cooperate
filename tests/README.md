@@ -105,10 +105,21 @@ python tests\word\check_normalize.py --fixture "D:\path\to\real-report.docx"
 | 目录 | 内容 |
 |---|---|
 | `tests\word\` | 语料生成（`make_corpus.py` / `make_edits.py` / `make_audit_fixture.py`）、`validate.py`、表格题注（`captions\`）、`table -Action normalize`（`check_normalize.py` + `make_normalize_fixture.py`） |
-| `tests\excel\` | `check_hint.py` / `check_tray.py`（WPS 层）、`run_data.ps1` 数据层回归（由数据侧维护） |
+| `tests\excel\` | `check_hint.py` / `check_tray.py` / `check_hint_lease.py`（WPS 层手工验收）、`run_data.ps1` 数据层回归（由数据侧维护） |
 | `tests\ppt\` | `make_*.py` 夹具生成器 + `check_*.py` 独立 oracle + `run_*.ps1` 驱动器（replace / check / deliver / master / chapters / chart） |
 | `tests\multi-task\` | `ranges.json` 章节图 + `check_tasks.ps1`（split / merge / plan 回归） |
 | `tests\out-fast\` | `run_all.ps1` 的生成物（gitignore） |
+
+> **接管提示 / 租约的手工验收**（v1.35 起）：三端各一份 `check_hint.py`（显示与显式还原）与
+> `check_hint_lease.py`（租约：标记 → 静默 → 自动消失 → 下一条命令 → 自动补回 → `serve stop` →
+> 消失 → `finish` 清意图）。它们和 `check_tray.py` 一样是**手工** Python 脚本，不在 `run_all.ps1`
+> 的自动发现里（会改动真实 WPS 窗口，跑之前请先关掉自己的文档）：
+>
+> ```powershell
+> python tests\word\check_hint_lease.py
+> python tests\excel\check_hint_lease.py
+> python tests\ppt\check_hint_lease.py
+> ```
 
 ## 清理
 

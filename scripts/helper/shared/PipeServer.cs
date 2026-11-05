@@ -30,8 +30,14 @@ internal static class PipeServer
     /// <summary>
     /// Serve requests until idle, until no document is left open, or until the pipe breaks.
     /// Returns the process exit code.
+    ///
+    /// v1.35: this is also where the takeover-hint LEASE is enforced. The hint must not outlive
+    /// the agent (see shared/HintLease.cs), so the helper renews a lease file per request and,
+    /// while waiting in short slices, calls releaseHints() once the lease has expired. The same
+    /// release runs on the way out (idle timeout / `serve -Action stop` / last document closed),
+    /// so a branded window cannot survive the process either.
     /// </summary>
-    public static int Run(string pipeName, Func<string, string> handler, Func<int> openDocuments)
+    public static int Run(string pipeName, string app, Func<string, string> handler, Func<int> openDocuments, Action releaseHints)
     {
         int idleMs = 20 * 60 * 1000;
         string env = Environment.GetEnvironmentVariable("WOC_DAEMON_IDLE_MS");
@@ -40,10 +46,16 @@ internal static class PipeServer
             idleMs = parsed;
         string once = Environment.GetEnvironmentVariable("WOC_DAEMON_ONCE");
         bool exitAfterOne = once == "1";
+        int pollMs = HintLease.PollMs();
 
-        Console.Error.WriteLine("woc-daemon: listening on " + pipeName + " (idle " + idleMs + " ms)");
+        Console.Error.WriteLine("woc-daemon: listening on " + pipeName + " (idle " + idleMs
+            + " ms, hint lease " + HintLease.LeaseMs() + " ms)");
         bool hadDocument = false;
+        bool released = false;
         DateTime lastActivity = DateTime.UtcNow;
+        HintLease.Touch(app);
+        try
+        {
         while (true)
         {
             string request;
@@ -54,12 +66,28 @@ internal static class PipeServer
                 // throw, the stream gets disposed, and the client sees a broken pipe right after
                 // connecting (that bug cost one debugging round).
                 IAsyncResult connecting = server.BeginWaitForConnection(null, null);
-                int waitMs = idleMs - (int)(DateTime.UtcNow - lastActivity).TotalMilliseconds;
-                if (waitMs < 1000) waitMs = 1000;
-                if (!connecting.AsyncWaitHandle.WaitOne(waitMs))
+                // Wait in slices: a request wakes us early, and every slice re-checks the lease so
+                // an agent that went away is noticed without waiting for the 20 min idle timeout.
+                while (true)
                 {
-                    Console.Error.WriteLine("woc-daemon: idle timeout, exiting");
-                    return 0;
+                    int idleLeft = idleMs - (int)(DateTime.UtcNow - lastActivity).TotalMilliseconds;
+                    if (idleLeft <= 0)
+                    {
+                        Console.Error.WriteLine("woc-daemon: idle timeout, exiting");
+                        return 0;
+                    }
+                    int slice = Math.Min(idleLeft, pollMs);
+                    if (connecting.AsyncWaitHandle.WaitOne(slice)) break;
+                    if (!released && HintLease.Stale(app))
+                    {
+                        // Release ONCE per lease period: the intent registry stays, so the next
+                        // request re-applies the hint and a resumed session is branded again.
+                        released = true;
+                        Console.Error.WriteLine("woc-daemon: hint lease expired (no request for "
+                            + HintLease.LeaseMs() + " ms) - releasing takeover hints");
+                        try { releaseHints(); }
+                        catch (Exception) { Console.Error.WriteLine("woc-daemon: hint release failed"); }
+                    }
                 }
                 try { server.EndWaitForConnection(connecting); }
                 catch (Exception e)
@@ -101,6 +129,8 @@ internal static class PipeServer
             }
 
             lastActivity = DateTime.UtcNow;
+            HintLease.Touch(app);   // a served request renews the hint lease
+            released = false;
             try { if (openDocuments() > 0) hadDocument = true; }
             catch (Exception) { }
             if (exitAfterOne) return 0;
@@ -114,6 +144,13 @@ internal static class PipeServer
                     return 0;
                 }
             }
+        }
+        }
+        finally
+        {
+            // Any exit path (idle timeout, serve -Action stop, last document closed, a crash in
+            // this thread) must not leave a window branded "AI is working".
+            try { releaseHints(); } catch (Exception) { }
         }
     }
 

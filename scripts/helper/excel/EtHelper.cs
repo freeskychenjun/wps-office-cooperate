@@ -303,7 +303,7 @@ internal static partial class Program
         // v1.15 resident mode: keep the COM application alive and serve request JSON over a named
         // pipe (same transport as the Word helper - see helper/shared/PipeServer.cs).
         if (args != null && args.Length >= 2 && args[0] == "--serve")
-            return PipeServer.Run(args[1], HandleRequest, OpenDocumentCount);
+            return PipeServer.Run(args[1], "excel", HandleRequest, OpenDocumentCount, ReleaseHints);
 
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
@@ -342,6 +342,10 @@ internal static partial class Program
             Bag bag = new Bag(Json.Parse(requestJson));
             string cmd = bag.Str("cmd", "").Trim().ToLowerInvariant();
             if (cmd.Length == 0) throw new Fail("BAD_ARGS", "\"cmd\" is required");
+            // v1.35 hint lease: put the takeover mark back before doing anything else (WPS resets
+            // the caption on a tab switch, and the resident helper strips it when the agent goes
+            // quiet). `open`/`new` apply it themselves; hint/finish/close own the intent registry.
+            if (cmd != "open" && cmd != "new" && cmd != "hint" && cmd != "finish" && cmd != "close") EnsureHint(bag);
             response = Ok(cmd, Dispatch(cmd, bag));
         }
         catch (Fail f)
@@ -881,6 +885,7 @@ internal static partial class Program
         info["how"] = how;
         // Takeover hint: pure window state, applied on attach (see HintCmd).
         if (!a.Flag("noHint", false)) info["hint"] = HintOnTakeover(wb, a);
+        else HintStateSet(Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture), null);
         MarkerSet(full);
         if (otherInstancePossible)
         {
@@ -940,6 +945,7 @@ internal static partial class Program
         info["how"] = "created";
         info["note"] = "brand-new workbook saved to disk; write to it like any opened workbook";
         if (!a.Flag("noHint", false)) info["hint"] = HintOnTakeover(wb, a);
+        else HintStateSet(Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture), null);
         return info;
     }
 
@@ -2909,6 +2915,14 @@ internal static partial class Program
             {
                 string keep = cap.StartsWith(HINT_READONLY, StringComparison.Ordinal) ? HINT_READONLY : HINT_TAG;
                 TrySetCaption(wb, HintCaption(NameOf(wb), keep));
+                // The intent registry is keyed by path, so a save-as must move the entry with the
+                // workbook - otherwise the next command would fail to re-brand the renamed file.
+                string newFull = Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture);
+                if (!string.Equals(oldFull, newFull, StringComparison.OrdinalIgnoreCase))
+                {
+                    HintStateSet(oldFull, null);
+                    HintStateSet(newFull, keep);
+                }
             }
         }
         catch (Exception) { }
@@ -3032,6 +3046,111 @@ internal static partial class Program
         catch (Exception) { return false; }
     }
 
+    // ------------------------------------------------------------ hint lease (v1.35)
+    // The caption is the VISIBLE hint; this registry is the INTENT ("this workbook is under
+    // takeover"). Keeping them apart is what makes the hint a lease: the resident helper removes
+    // the caption when the agent goes quiet (shared/HintLease.cs) but leaves the intent alone, so
+    // the next request re-applies it with EnsureHint - a paused session comes back branded, an
+    // ended session leaves a clean window. Cleared only by hint -Clear / finish / close /
+    // open -NoHint, i.e. when the collaboration is explicitly over.
+    private static string HintStatePath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "wps-office-cooperate", "hint-state-excel.json");
+    }
+
+    private static string HintStateGet(string full)
+    {
+        if (full == null || full.Length == 0) return null;
+        try
+        {
+            Dictionary<string, object> m = Json.Parse(File.ReadAllText(HintStatePath(), Encoding.UTF8)) as Dictionary<string, object>;
+            if (m != null)
+            {
+                object v;
+                if (m.TryGetValue(full.ToLowerInvariant(), out v) && v != null)
+                {
+                    string tag = Convert.ToString(v, CultureInfo.InvariantCulture);
+                    if (tag != null && tag.Length > 0) return tag;
+                }
+            }
+        }
+        catch (Exception) { }
+        return null;
+    }
+
+    private static void HintStateSet(string full, string tag)
+    {
+        if (full == null || full.Length == 0) return;
+        IDisposable g = WocLocks.State(3000);
+        try
+        {
+            Dictionary<string, object> m = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                Dictionary<string, object> old = Json.Parse(File.ReadAllText(HintStatePath(), Encoding.UTF8)) as Dictionary<string, object>;
+                if (old != null) m = old;
+            }
+            catch (Exception) { }
+            string key = full.ToLowerInvariant();
+            if (tag == null || tag.Length == 0) m.Remove(key);
+            else m[key] = tag;
+            string dir = Path.GetDirectoryName(HintStatePath());
+            if (dir != null) Directory.CreateDirectory(dir);
+            string tmp = HintStatePath() + ".tmp";
+            File.WriteAllText(tmp, Json.Write(m), new UTF8Encoding(false));
+            File.Copy(tmp, HintStatePath(), true);
+            try { File.Delete(tmp); } catch (Exception) { }
+        }
+        catch (Exception) { }
+        finally { if (g != null) g.Dispose(); }
+    }
+
+    /// <summary>Re-apply the hint on a workbook that is still under takeover. Called before every
+    /// command: WPS drops the caption when the user switches to another tab, and the lease release
+    /// takes it off when the agent goes quiet - in both cases the mark belongs back on screen as
+    /// soon as the agent touches the workbook again.</summary>
+    private static void EnsureHint(Bag a)
+    {
+        try
+        {
+            string doc = a.Str("doc", null);
+            if (doc == null || doc.Length == 0) return;
+            string full = FullPathOf(doc);
+            string tag = HintStateGet(full);
+            if (tag == null) return;
+            dynamic app = App(false, false);
+            if (app == null) return;
+            dynamic wb = FindOpen(full);
+            if (wb == null) return;
+            if (IsHinted(CaptionOf(wb))) return;          // still branded: no COM write at all
+            TrySetCaption(wb, HintCaption(NameOf(wb), tag));
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>Take the visible hint off every workbook this instance has open. Called by the
+    /// resident helper when the agent's lease expires and on its way out; the intent registry is
+    /// kept, so the next request puts the mark back (see EnsureHint).</summary>
+    private static void ReleaseHints()
+    {
+        try { TrayDaemon.Stop("excel"); } catch (Exception) { }
+        dynamic app = null;
+        try { app = App(false, false); } catch (Exception) { }
+        if (app == null) return;
+        int n = 0;
+        try { n = (int)app.Workbooks.Count; } catch (Exception) { return; }
+        for (int k = 1; k <= n; k++)
+        {
+            try
+            {
+                dynamic wb = app.Workbooks.Item(k);
+                if (IsHinted(CaptionOf(wb))) TrySetCaption(wb, NameOf(wb));
+            }
+            catch (Exception) { }
+        }
+        try { TrySetStatusBar(app, ""); } catch (Exception) { }
+    }
+
     private static bool ShowBalloon(string title, string text)
     {
         try
@@ -3066,6 +3185,9 @@ internal static partial class Program
         string name = NameOf(wb);
         string caption = HintCaption(name, tag);
         bool set = TrySetCaption(wb, caption);
+        // Record the intent even when the caption could not be set (hidden window): the next
+        // command's EnsureHint will retry, and the lease release needs to know what to clear.
+        HintStateSet(Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture), tag);
         Dictionary<string, object> h = new Dictionary<string, object>();
         h["tag"] = tag;
         h["caption"] = caption;
@@ -3083,6 +3205,9 @@ internal static partial class Program
         if (wb == null) return r;
         r["captionCleared"] = TrySetCaption(wb, NameOf(wb));
         r["statusBarCleared"] = TrySetStatusBar(App(false, false), "");
+        // finish / close are an explicit end of the collaboration: drop the intent too, so a later
+        // command does not re-brand a workbook this skill was told to let go.
+        HintStateSet(Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture), null);
         return r;
     }
 
@@ -3108,6 +3233,9 @@ internal static partial class Program
         r["caption"] = caption;
         r["captionSet"] = captionSet;
         if (!clear) r["tag"] = tag;
+        // The intent registry follows an explicit hint too: -Clear ends the takeover, a plain
+        // hint (re)brands the workbook, so a later lease check knows what to release.
+        HintStateSet(Convert.ToString(TryGet(() => (object)wb.FullName, ""), CultureInfo.InvariantCulture), clear ? null : tag);
 
         string bar = a.Str("bar", null);
         if (bar == null) bar = clear ? "" : text;

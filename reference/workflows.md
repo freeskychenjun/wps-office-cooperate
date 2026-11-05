@@ -406,6 +406,20 @@ office.ps1 word unit -Doc $DOC -Apply -Units "s2"          # 追加真实使用�
 - 实测细节（哪个属性可写、Writer 的 `StatusBar` 只写不读且不渲染、表格侧 `ActiveWindow` 为 null）见 [word-quirks.md](word-quirks.md) 与 [excel-quirks.md](excel-quirks.md)。
 - 托盘实现的两个坑：① daemon 用 `--tray <state.json>` 重开自身，状态文件是唯一 IPC，菜单「还原」调本 skill 的 `hint -Clear`（daemon 不懂 COM）；② spawn 必须 `UseShellExecute=true`，否则子进程继承调用方 stdout 管道，`subprocess.communicate`/PowerShell 管道会被图标的 4 小时寿命卡死（2026-10-30 实测踩到）。
 
+### 14.1 租约：接管标记不可能比 agent 活得久（v1.35）
+
+背景（2026-11-05 用户反馈）：agent 接管后**退出 AI 会话**，窗口标签仍长期显示「〔AI接管中〕」。原因是标记只有"显示"、没有生命周期——唯一会清它的是 agent 自己调 `finish` / `close` / `hint -Clear`，会话一断就无人清（现场实测：16:52 打开的 deck 到 17:30 还顶着前缀，`WppHelper.exe --serve` 仍常驻，但已无命令进来）。
+
+现在标记是**租约**：
+
+- 常驻 helper 启动时 + 每服务完一条命令，刷新 `%LOCALAPPDATA%\wps-office-cooperate\hint-lease-<app>.txt`；
+- 等请求的空档 **≤5 s** 检查一次，超过 `WOC_HINT_LEASE_MS`（默认 **120 s**）没有新命令 ⇒ 还原所有仍挂着的标记（Word/Excel 标题与状态栏、PPT 标题前缀与页内药丸、托盘图标），三端同一套 `shared/HintLease.cs` + `PipeServer`；
+- helper 退出（空闲 20 min、`serve -Action stop`、最后一份文档关闭）也会**先还原再退出**；
+- **只清显示、不清意图**：Word/Excel 的 `hint-state-<app>.json`、PPT 的 `ppt-title-hint.json` 保留，下一条命令开头的 `EnsureHint` / `EnsureTitleMarker` 会自动补标 ⇒ 暂停超过 2 分钟的协作，回来后标记会自己回来；
+- 真正结束一轮协作仍用 `finish` / `close` / `hint -Clear`（它们清意图，之后不再自动补标）；`open -NoHint` 同样清意图；
+- 覆盖范围：`WOC_NO_DAEMON=1` 的一次性模式没有常驻进程跑定时器，仍只有显式收尾（这也是它只适合 A/B 的原因）；
+- 验收：`tests/<app>/check_hint_lease.py`（租约调到 4 s，断言 标记 → 静默 → 消失 → 命令 → 回来 → `serve stop` → 消失 → `finish` 清意图）。
+
 ## 15. 忙重试与剪贴板礼仪（v1.32 基础设施，用户看不见但会感觉到）
 
 这两件事都**不需要你调任何新参数**，行为变化只体现在"以前会失败 / 以前会丢东西"的地方。

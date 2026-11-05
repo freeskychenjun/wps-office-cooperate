@@ -1,22 +1,21 @@
 ---
 name: wps-office-cooperate
 description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式改写+批注+LaTeX 原生公式+脚注+版式核对+总览图）、Excel（.xlsx/.xls/.csv，批量写值公式+锚点校验+快照回滚+批注+数据清洗/透视表/条件格式/图表次轴）、PowerPoint（.pptx，预设版式建页+形状级改文字+表格图片+套版裁切+框图连线+SmartArt+逐页渲染核对），改动当场出现在用户正开着的 WPS 窗口里。当用户要求：在 WPS 里改这个文档/表格/演示文稿/PPT、在 WPS 里做修订、实时改 Word/Excel/PPT、一边看着一边改、做汇报 PPT、加批注、写公式/脚注、清洗表格/做透视表、核对排版/版式/表格格式，或提到 wps word、wps excel、wps ppt、live edit word/excel/ppt 时使用。不适用：纯离线批量处理（改副本、不要求用户在场，Word 用 docx-paragraph-polish，Excel 用 openpyxl/minimax-xlsx，PPT 用 pptx-generator 等离线方案）、用户明确不要动原文件（只出旁挂报告）、微软 Office 窗口里的文档（本 skill 只走 WPS）。
-version: 1.34
+version: 1.35
 ---
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
 ## 当前版本
 
-**版本 v1.34（2026-11-04）**：**工程质量版**（无新功能，只堵已知的坑；逐条证据见仓库根 `OPTIMIZATION-PLAN.md`）：
+**版本 v1.35（2026-11-05）**：**接管标记改为租约（修一个真实的"退不掉"缺陷）**。用户反馈：agent 接管文档后**退出 AI 会话**，文档标签仍长期显示「〔AI接管中〕」——现场取证：16:52 打开的 PPT 到 17:30 仍顶着前缀，常驻 helper 还活着，但没有 agent 再来发命令，而旧的还原路径（`finish`/`close`/`hint -Clear`）全是 agent 主动调用，agent 一走就永远没人清。
 
-- **包装层去重**：三端共用 `scripts\woc-app-common.ps1`（守护进程/编译/batch/传输尾段/共享命令体），三个 wrapper 合计 −738 行；顺手消除 ppt csc 漏 refs、Start-Daemon 轮询次数两处漂移。
-- **挂死类修复**：daemon 管道读加超时（超时 → `TIMEOUT` + exit 2，不再永久挂起）+ `serve -Action reset` 恢复通道；**Excel 删非空工作表**不再被 WPS 确认框卡死（临时关 `DisplayAlerts`，返回 `usedCells`）；tasks split 子进程加 180 s 上限。
-- **错误判定与门禁**：`exit 2` 改为解析 JSON 信封再判；`batch` 整批失败顶层 `ok:false` + `okCount/failedCount`；`woc.ps1` 对参数绑定失败补 `BAD_ARGS` JSON（见上文「调用错误的两种形态」）；ppt `check -ExitCode` 在热 daemon 路径也生效。
-- **发布与测试**：`publish.ps1` 目标必须是 `…\skills\<name>`（`-Force` 放行）+ staging 切换 + `-WhatIf`；统一 `tests\run_all.ps1`（fast / wps 两层）+ CI 只跑 fast 层 + 自带 normalize fixture + 新增 Excel 数据层回归驱动器（16 组 / 228 断言）。
-- **其它**：脚本全纯 ASCII + 编码门禁；Excel/PPT busy 判定补齐中文「忙」/dialog；主文档瘦身 −8.0%（预设版式契约下沉 [reference/ppt-presets.md](reference/ppt-presets.md)）；版本单源化（历史只在 [reference/changelog.md](reference/changelog.md)）。
+- **租约机制（三端，`shared/HintLease.cs` + `PipeServer` 空闲轮询）**：常驻 helper 在启动时与**每条命令之后**续租 `%LOCALAPPDATA%\wps-office-cooperate\hint-lease-<app>.txt`；等请求的空档里每隔 ≤5 s 检查一次，超过 `WOC_HINT_LEASE_MS`（默认 **120 s**）没有新命令，就把**所有仍挂着标记的窗口**还原（Word/Excel 标题与状态栏、PPT 标题前缀与页内徽章、托盘图标）；helper 自身退出（20 min 空闲 / `serve -Action stop`）时也会再还原一次，所以标记不可能比进程活得久。
+- **意图与显示分离，会话恢复自动补标**：还原只清"看得见的标记"，不清"接管意图"（`hint-state-<app>.json` / `ppt-title-hint.json`）——下一条命令的 `EnsureHint` 会把标记补回（PPT 原本就有这套 `EnsureTitleMarker`，本版 Word/Excel 也补上）。所以：**AI 静默 2 分钟 ⇒ 标记自动消失；AI 又动了 ⇒ 标记自动回来**，不再出现"AI 早已不在了却还写着接管中"。
+- **显式收尾语义不变**：`finish`/`close`/`hint -Clear` 才是"本轮协作结束"，它们会同时清意图（之后不会再自动补标）；`open -NoHint` 同样清意图。`WOC_NO_DAEMON=1` 的一次性模式没有常驻进程跑定时器，仍只靠显式收尾。
+- **回归**：新增三端 `tests/<app>/check_hint_lease.py`（把租约调到秒级——Word/Excel 4 s、PPT 8 s（标题探针本身约 2 s）——验证 标记→静默→消失→下一条命令→回来→`serve stop`→消失→`finish` 清意图），既有 `check_hint.py` / `check_daemon.py` / `check_tray.py` 全过（PPT 的 `check_daemon` D4 在本机因用户自己开着演示文稿而报 running，属环境假设，Word/Excel 同代码通过）。
 
-> **版本历史 v1.1–v1.33 → [reference/changelog.md](reference/changelog.md)**（唯一出处；2026-11-02 起从主文档拆出）。本节只留当前版本要点——**发布旧版内容不要再回到主文档**。
+> **版本历史 v1.1–v1.34 → [reference/changelog.md](reference/changelog.md)**（唯一出处；2026-11-02 起从主文档拆出）。本节只留当前版本要点——**发布旧版内容不要再回到主文档**。
 
 **能力边界（一句话）**：只走 **WPS**（Word=Writer `KWPS.Application`，Excel=表格 `KET.Application`，PPT=演示 `KWPP.Application`，没装微软 Office 也照跑）。Word 侧所有文字改动都是**修订（track changes）**，用户能逐条接受/拒绝；Excel 与 PPT 侧改动**直写**，靠**锚点校验 + 快照**保证可核对（**这两个 app 的 Ctrl+Z 撤不回 Agent 的改动**，外部 COM 修改不进撤销栈）。
 
@@ -72,6 +71,7 @@ version: 1.34
 - **`open` 自动打标签**：窗口标签/标题变成 `〔AI接管中〕 报告.docx`（Writer / 表格都有；WPS 12 的标签页从右截断，所以标记放前面，长文件名也不会被吃掉）。这是纯窗口状态：不进修订、不写文件、不改 `saved`，`-NoHint` 可关。
 - **`hint` 补一句人话**：默认弹 6 s 托盘气泡——"已接管《报告.docx》：我会把改动做成修订或批注，你随时可以接受或拒绝。"`-Text` 换说法，`-HintTag` 换标题里的标签文字，`-Bar` 单独控制状态栏那行（表格会显示，Writer 不渲染），`-Quiet` 静默（不弹气泡，适合刷新标题/状态栏）。
 - **还原**：`hint -Clear`、`finish`、`close` 都会把标题恢复成文件名、把状态栏交还 WPS；`status` 每份文档带 `caption` 与 `hinted`，随时可核对当前有没有挂着标记。
+- **自动还原（v1.35 租约）**：接管标记不是永久烙印，而是**租约**。常驻 helper 在每条命令之后续租，**静默超过 `WOC_HINT_LEASE_MS`（默认 120 s）没有任何命令**就把所有标记还原（标题/状态栏/托盘/页面药丸），helper 自己退出（20 min 空闲 / `serve -Action stop`）时也会还原——**用户退出 AI 会话后，标记最多再留约 2 分钟就不会挂着**。还原只清"看得见的标记"、不清"接管意图"：AI 恢复发命令时下一条命令自动补标。要彻底结束一轮协作仍用 `finish`/`close`/`hint -Clear`（它们会清意图，之后不再自动补标）；`WOC_NO_DAEMON=1` 的一次性模式没有常驻进程，只靠显式收尾。
 - **PPT 的标题标记**：COM 的 `ActiveWindow.Caption` 只读、`Application.Caption` 不重绘标题栏、`StatusBar` 属性不存在，但窗口框（`PP12FrameClass`）接受 `SetWindowText`——`open`/`hint` 给标题加「〔AI接管中〕」前缀，`hint -Clear`/`finish`/`close` 去掉；用户切标签页时 WPS 自己重置（不会挂错文档），下一条命令自动补回。返回里 `captionSupported:false` 仍表示"COM 标题不可写"，`titleMarked:true` 表示 Win32 标记已生效；气泡照旧（`-Toast`）。
 - **PPT 的页面标记（v1.27 起，v1.28 改为按需开启）**：WPS 演示的标签页是自绘的（从文件名画），改窗口标题只有任务栏 / Alt+Tab 看得见；唯一"界面里看得见"的通道是在**每一页右上角**贴一枚「〔AI接管中〕」橙色药丸（形状名 `woc-ai-takeover-mark`，最上层，放映时也在）。**它是内容不是窗口状态**，所以：默认**不贴**（`hint` 零改动，响应里 `inAppHint` 提示要加 `-SlideMark`）；`-SlideMark` 显式开启时返回 `slideMarkWarning`；`save`/`export` 落盘前剥离、写完补回；`hint -Clear`/`finish`/`close` 逐页删除；**用户手动 Ctrl+S 造成的污染会自动修复**（下一条命令：剥离→重存→贴回，返回 `badgeRepaired:true`）。读侧零干扰：`read`/`search`/`snapshot`/`diff`/`check`/`replace`/`outline` 都跳过它（`read` 每页给 `takeoverBadge:true`）。
 - **常驻托盘图标（v1.12，`-Tray`）**：`hint -Doc X -Tray` 在系统托盘挂一个橙色「AI」图标，悬停显示「〔AI接管中〕 文档 · 当前步骤」，右键可**结束协作并还原标记**；`finish`/`close`/`-Clear` 自动移除，最长 4 小时自灭。**新图标默认在「^」溢出区**（Windows 行为，进程无法自我提升），要提醒用户拖到任务栏常显；PPT 侧这是唯一常驻通道。用户中途关掉文档，图标约 10 s 内自动消失（不会再挂着"AI 协作中"骗人）。
@@ -129,7 +129,7 @@ version: 1.34
 | `page` | `-Doc <路径>`（**不带任何选项=查询各节设置**）`[-Paper A4] [-Orientation portrait\|landscape] [-Top/-Bottom/-Left/-Right 厘米] [-HeaderText] [-FooterText] [-PageNumber center\|right\|left\|none] [-PageNumberStart N\|none] [-All]` | 纸张/方向/页边距/页眉页脚/页码（逐节应用）；查询模式报每节纸张/方向/边距/页眉页脚 **+ `pageNumbers`（起始号/是否节内重启/该节首段的实际显示页码——页码断号一眼看出）**；`-PageNumberStart none` 试图清掉「本节重新编号」（WPS 常做不到，会**明说失败**并给 XML 路线） |
 | `table` | 插入：`-Para N -Data <json> [-Borders grid\|thick\|three-line\|none] [-Widths "2,3,2"] [-HeaderRow] [-Caption]`；改表：`-Table n [-Borders ...] [-Autofit] [-RowHeight] [-KeepTogether] [-Font/-Size/-Align]`（**省略 -Table = 全文档所有表，一次 COM 遍历 + 单个撤销记录**）；**体检 `-Action scan`（每行带 `para` = 表起始段号）**；**表头跨页 `-Action header-repeat [-Table n] [-Row 2] [-Passes 3]`**；**题名出框 `-Action caption [-Table n] [-Borders thick] [-Force]`**；**删行 `-Action rows -Table n [-Row 1]`**；**v1.33 一键整备 `-Action plan`**（只读侦察：结构/题注位置与页码/边框/样式/列宽/字号 + `risks[]` + `captions[]`/`references[]`/`issues[]` + `renumber` 提议）与 **`-Action normalize`**（默认只改 plan 判定未达标的表；`-DryRun`/`-Table n`/`-NoCaptions`/`-NoBorders`/`-NoHeaderRepeat`/`-Gap 2`/`-Fit keep\|window\|content`/`-Plan <file>`/`-Verify`）。**先 plan 再 normalize，不要逐条小命令拼**；plan 完整字段清单见下方工作流 §11 与 [reference/word-quirks.md](reference/word-quirks.md)「表格整备」 | 建表 / 改表 / 批量体检 / 表头重复 / 把做进第 1 行的题名提到框外并删该行 / 删指定行（后三者内部绕过 WPS 的 `Rows.Item(n)` 残缺对象，走选区写法）。`scan` 的 `para` 可直接 `read -From <para-3> -Count 6` 看题注，或喂给 `-Action caption -Table n`。**v1.30**：新建表格的单元格默认**整词换行**；`-KeepTogether` 逐行走选区 + **逐行回读**（WPS 没接受的行走 → 整条命令 `ok:false` + `KEEPTOGETHER_FAILED` 点名行号，不再"报成功其实没落上"）。**v1.33 两条硬结论**：① 题名外提**不承诺**（回读「题注页码 == 表起始页」才保留；表前是分节符 → `needsHuman`，不重试；cut-paste 在 WPS 上会把 Writer 转死，默认禁用）；② 给**缺 `w:tblBorders` 的表**写边框会触发 WPS 重建布局、按渲染宽度重推 gridCol（写前快照/写后回读/漂移即恢复，已达标的表跳过）。细节 → [reference/word-quirks.md](reference/word-quirks.md)「表格整备」 |
 | `fillgaps` | `-Doc <路径> [-DryRun] [-MaxMoves 8] [-MinGapPt 0]` | **填掉图/表前面的页面留白**（v1.30；照 dsh-office 的 `fill_gaps` 移植）：图/表因放不下整块跳到下一页、上一页底部空出一截时，把**图/表后面的正文段**提到图/表之前补上。`-DryRun` 只报不动（**只读文档也能跑**），返回 `moves:[{block,kind,para,page,gap,text}]`；空白阈值默认 `max(90pt, 文本高度×12%)`，`-MinGapPt` 可覆盖。**保守判据**：块前一段必须是正文（不越标题）、块首行页码必须晚于前一段、块后段不能是空段/题注/图段/表内段、冒号结尾的引导句连带搬。`moved:0` 是正常结果（这稿没有值得填的留白）；搬完表格前会留一个空段（实现代价，见 quirks 与下方故障排查） |
-| `serve` | `-Action start\|status\|stop` | **常驻 helper 控制**（Word/Excel/PPT 三端都有，v1.15 起）：start 预热/查看管道、status 报 `running`/`pipe`、stop 让它答完即退。正常流程**不用手动调**——`open` 会自动拉起、`close` 关完文档自动退出；设 `WOC_NO_DAEMON=1` 可整轮退回一次性模式（也是 A/B 用的开关）。设计见 `reference/workflows.md` §15；`-Action reset`（v1.34）= daemon 读超时后复位重连 |
+| `serve` | `-Action start\|status\|stop` | **常驻 helper 控制**（Word/Excel/PPT 三端都有，v1.15 起）：start 预热/查看管道、status 报 `running`/`pipe`、stop 让它答完即退。正常流程**不用手动调**——`open` 会自动拉起、`close` 关完文档自动退出；设 `WOC_NO_DAEMON=1` 可整轮退回一次性模式（也是 A/B 用的开关）。设计见 `reference/workflows.md` §15；`-Action reset`（v1.34）= daemon 读超时后复位重连。**v1.35**：daemon 还是"接管租约"的计时器——`stop` 与空闲退出都会把还挂在窗口上的接管标记还原（见「接管提示」）。 |
 | `textdiag` | `-Doc <路径> [-Slow]` | **读侧慢/回退的体检**（只读，一次调用）：① 段落数/修订数/表数/表行总数；② `Content.Text` 的块数与尾块；③ 抽样段落号在块模型下的文本 vs 真值；④ 表格行数 vs 段落数的关系（WPS 每行多算一个空段落——块模型对不上的根因）；⑤ `WordOpenXML` 是否可取、字符数、`w:p` 数、`w:p`+表行是否等于段落数、解析耗时；⑥ 最终 `fastPath`/`fastFail` 结论。**遇到「按说几秒却几十秒」先跑它** |
 | `captions` | `-Doc <路径> [-Label 表\|图] [-Max 200]` | **题注清单 + 编号体检**（只读，一条命令替掉"全篇扫段落配对"）：每张表 → 题注段号 `para` / 位置 `pos`（`above` 表上方、`in-table` 做在第 1 行、`below` 在表下方）/ 表号 `number` / 格式 `format`（`dot` 2.4.1、`hyphen` 3.3-1、`plain` 表1）/ 空白 `gap` / `title`；`summary` 汇总重号、同节跳号（`missing` 列出缺的号）、格式混用、空格不一、题注位置混用、缺题注、正文引用与表号的对应（`references` 里 `resolved`）+ 悬空引用；`issues` 每条给 `rule`+`para`+`sample`+`suggest`，直接可照着改。实测 10521 段 / 32 表 **6.4 s**；编号问题**不要**用 `audit` 或全篇 `read` 去查 |
 | `caption` | `-Para N -Label 表\|图 -Title "..." [-Above] [-Align center]` | 生成**域**式题注「表 1 xxx」（自动编号，增删后重排） |
@@ -151,7 +151,7 @@ version: 1.34
 | `close` | `-Doc <路径> [-Save]` | 关闭；无其它文档时退出实例，并回报进程数 |
 | `quit` | — | 关掉该实例的**全部**文档并退出（不保存）。**慎用**：会波及用户在同一实例里开的文档，只在自己的独占实例上用 |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | **任务完成信号**（agent 无关，零依赖）：默认**托盘气泡 + 提示音**（原生 .NET），**不触碰文档任何内容**；`-Quiet` 静音。**任务收尾默认调用** |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**三者都是窗口状态，不写文档、不落盘**。`open` 已自动打标签；`-Text` 换气泡/状态栏里的话（如"正在核对第 3 节"）；`-Clear` 还原（`finish`/`close` 也会自动还原）。Writer 的 `Application.StatusBar` 只写不读、且 WPS 界面不渲染（实测状态栏仍是页面/字数），`statusBar:true` 只代表写入被接受；表格侧写入会真的显示。**`-Tray`**：常驻托盘图标，悬停=标记+当前步骤，右键可还原，`finish`/`close`/`-Clear` 自动移除 |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**三者都是窗口状态，不写文档、不落盘**。`open` 已自动打标签；`-Text` 换气泡/状态栏里的话（如"正在核对第 3 节"）；`-Clear` 还原（`finish`/`close` 也会自动还原）。Writer 的 `Application.StatusBar` 只写不读、且 WPS 界面不渲染（实测状态栏仍是页面/字数），`statusBar:true` 只代表写入被接受；表格侧写入会真的显示。**`-Tray`**：常驻托盘图标，悬停=标记+当前步骤，右键可还原，`finish`/`close`/`-Clear` 自动移除。**v1.35 租约**：标记不是永久烙印——静默超过 `WOC_HINT_LEASE_MS`（默认 120 s）由常驻 helper 自动还原，AI 恢复发命令时下一条命令自动补标；"标记"与"接管意图"分离，`finish`/`close`/`-Clear` 才清意图 |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）控制等待；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
 
@@ -330,7 +330,7 @@ version: 1.34
 | `close` | `-Doc [-Save]` | 关闭；无其它工作簿时退出实例，回报进程数 |
 | `quit` | — | 关掉该实例**全部**工作簿并退出（不保存）。**慎用** |
 | `finish` | `[-Note "改了什么"] [-Cell A1] [-Toast] [-Sound] [-Quiet] [-Force]` | **任务完成信号**（agent 无关，零依赖）：默认**托盘气泡 + 提示音**（原生 .NET，任何机器都响），**不动工作簿任何内容**。`-Cell` 显式指定时才额外写一行状态（目标格非空拒绝，`-Force` 覆盖）；`-Quiet` 静音。**任务收尾默认调用** |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**不写单元格、不落盘**。`open` 自动打标签，`finish`/`close` 自动还原；表格的 `Application.StatusBar` 可读写且实测会显示这行字，`-Clear` 时写 `false` 把状态栏交还 WPS。`-Tray` 加常驻托盘图标（悬停看进度、右键还原） |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-HintTag "〔AI接管中〕"] [-Bar "..."] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**（v1.11 / v1.12 加 `-Tray`）：改窗口标题 + 写状态栏一行 + 默认弹托盘气泡，**不写单元格、不落盘**。`open` 自动打标签，`finish`/`close` 自动还原；表格的 `Application.StatusBar` 可读写且实测会显示这行字，`-Clear` 时写 `false` 把状态栏交还 WPS。`-Tray` 加常驻托盘图标（悬停看进度、右键还原）。**v1.35 租约**：静默超过 `WOC_HINT_LEASE_MS`（默认 120 s）自动还原、AI 恢复发命令时自动补标（意图与显示分离，`finish`/`close`/`-Clear` 才清意图） |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，说明 WPS 大概率弹了对话框。
 
@@ -586,7 +586,7 @@ v1.17 已经把最常触发的两处逃生需求做成命令（`sheet -Action ac
 | `close` | `-Doc [-Save]` | 关闭；`-Save` 会先保存（有改动才存，返回 `saved:true`）；最后一份时退出实例，回报 wpp 进程数。**关闭后同一路径可以再 `open`** |
 | `quit` | — | 全部关闭并退出（不保存）。**慎用** |
 | `finish` | `[-Note "做了什么"] [-Toast] [-Sound] [-Quiet]` | 完成信号（托盘气泡+提示音）；**不碰文稿任何内容**。任务收尾默认调用 |
-| `hint` | `-Doc <路径> [-Text "正在做什么"] [-SlideMark\|-NoSlideMark] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**：气泡/托盘图标 + 窗口标题标记+ **按需的页面标记（v1.27 引入、v1.28 改为 opt-in）**。**默认零改动**，响应 `inAppHint` 说明"要界面可见加 `-SlideMark`"；`-SlideMark` 逐页贴「〔AI接管中〕」并返回 `slideMarkCount` + `slideMarkWarning`；`-NoSlideMark`/`-Clear` 移除；`save`/`export` 落盘前自动剥离；**用户 Ctrl+S 造成的污染由下一条命令自动修复**（`badgeRepaired:true`，只读文件给 `badgeDirty`）。COM 标题仍不可写 → `captionSupported:false` |
+| `hint` | `-Doc <路径> [-Text "正在做什么"] [-SlideMark\|-NoSlideMark] [-Toast] [-Sound] [-Quiet] [-Clear] [-Tray]` | **接管提示**：气泡/托盘图标 + 窗口标题标记+ **按需的页面标记（v1.27 引入、v1.28 改为 opt-in）**。**默认零改动**，响应 `inAppHint` 说明"要界面可见加 `-SlideMark`"；`-SlideMark` 逐页贴「〔AI接管中〕」并返回 `slideMarkCount` + `slideMarkWarning`；`-NoSlideMark`/`-Clear` 移除；`save`/`export` 落盘前自动剥离；**用户 Ctrl+S 造成的污染由下一条命令自动修复**（`badgeRepaired:true`，只读文件给 `badgeDirty`）。COM 标题仍不可写 → `captionSupported:false`。**v1.35 租约**：静默超过 `WOC_HINT_LEASE_MS`（默认 120 s）后标题前缀与页面药丸由常驻 helper 自动撤掉（只清显示、不清意图），下一条命令自动补回；`serve stop`/空闲退出同样会清 |
 
 所有命令都可用 `-TimeoutSec <秒>`（默认 180）；超时返回 `TIMEOUT`，多半是 WPS 弹了对话框。
 

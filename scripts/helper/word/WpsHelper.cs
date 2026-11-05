@@ -311,7 +311,7 @@ internal static partial class Program
         // v1.14 resident mode: keep the COM application alive and serve request JSON over a named
         // pipe, so a command no longer pays "start exe + attach to WPS + find document" every time.
         if (args != null && args.Length >= 2 && args[0] == "--serve")
-            return PipeServer.Run(args[1], HandleRequest, OpenDocumentCount);
+            return PipeServer.Run(args[1], "word", HandleRequest, OpenDocumentCount, ReleaseHints);
 
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
@@ -351,6 +351,10 @@ internal static partial class Program
             Bag bag = new Bag(Json.Parse(requestJson));
             string cmd = bag.Str("cmd", "").Trim().ToLowerInvariant();
             if (cmd.Length == 0) throw new Fail("BAD_ARGS", "\"cmd\" is required");
+            // v1.35 hint lease: put the takeover mark back before doing anything else (WPS resets
+            // the caption on a tab switch, and the resident helper strips it when the agent goes
+            // quiet). `open` applies it itself; hint/finish/close own the intent registry.
+            if (cmd != "open" && cmd != "hint" && cmd != "finish" && cmd != "close") EnsureHint(bag);
             string docPath = bag.Str("doc", null);
             Dictionary<string, object> live = null;
             object dispatched = null;
@@ -976,6 +980,7 @@ internal static partial class Program
         // Setting the window caption here costs one COM property write and is pure view
         // state - the document content and the saved file are untouched.
         if (!a.Flag("noHint", false)) info["hint"] = HintOnTakeover(doc, a);
+        else HintStateSet(Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture), null);
         if (otherInstancePossible)
         {
             info["multiInstanceWarning"] = "WPS \u8fd0\u884c\u4e2d\u6709 " + wpsBefore
@@ -1880,6 +1885,7 @@ internal static partial class Program
     private static object SaveDoc(Bag a)
     {
         dynamic doc = RequireDoc(a, true);
+        string oldFull = Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture);
         string asPath = a.Str("as", null);
         if (asPath != null && asPath.Length > 0)
         {
@@ -1898,6 +1904,14 @@ internal static partial class Program
             {
                 string keep = cap.StartsWith(HINT_READONLY, StringComparison.Ordinal) ? HINT_READONLY : HINT_TAG;
                 TrySetCaption(doc, HintCaption(NameOf(doc), keep));
+                // The intent registry is keyed by path, so a save-as must move the entry with the
+                // document - otherwise the next command would fail to re-brand the renamed file.
+                string newFull = Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture);
+                if (!string.Equals(oldFull, newFull, StringComparison.OrdinalIgnoreCase))
+                {
+                    HintStateSet(oldFull, null);
+                    HintStateSet(newFull, keep);
+                }
             }
         }
         catch (Exception) { }
@@ -2032,6 +2046,111 @@ internal static partial class Program
         catch (Exception) { return null; }
     }
 
+    // ------------------------------------------------------------ hint lease (v1.35)
+    // The caption is the VISIBLE hint; this registry is the INTENT ("this document is under
+    // takeover"). Keeping them apart is what makes the hint a lease: the resident helper removes
+    // the caption when the agent goes quiet (shared/HintLease.cs) but leaves the intent alone, so
+    // the next request re-applies it with EnsureHint - a paused session comes back branded, an
+    // ended session leaves a clean window. Cleared only by hint -Clear / finish / close /
+    // open -NoHint, i.e. when the collaboration is explicitly over.
+    private static string HintStatePath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "wps-office-cooperate", "hint-state-word.json");
+    }
+
+    private static string HintStateGet(string full)
+    {
+        if (full == null || full.Length == 0) return null;
+        try
+        {
+            Dictionary<string, object> m = Json.Parse(File.ReadAllText(HintStatePath(), Encoding.UTF8)) as Dictionary<string, object>;
+            if (m != null)
+            {
+                object v;
+                if (m.TryGetValue(full.ToLowerInvariant(), out v) && v != null)
+                {
+                    string tag = Convert.ToString(v, CultureInfo.InvariantCulture);
+                    if (tag != null && tag.Length > 0) return tag;
+                }
+            }
+        }
+        catch (Exception) { }
+        return null;
+    }
+
+    private static void HintStateSet(string full, string tag)
+    {
+        if (full == null || full.Length == 0) return;
+        IDisposable g = WocLocks.State(3000);
+        try
+        {
+            Dictionary<string, object> m = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                Dictionary<string, object> old = Json.Parse(File.ReadAllText(HintStatePath(), Encoding.UTF8)) as Dictionary<string, object>;
+                if (old != null) m = old;
+            }
+            catch (Exception) { }
+            string key = full.ToLowerInvariant();
+            if (tag == null || tag.Length == 0) m.Remove(key);
+            else m[key] = tag;
+            string dir = Path.GetDirectoryName(HintStatePath());
+            if (dir != null) Directory.CreateDirectory(dir);
+            string tmp = HintStatePath() + ".tmp";
+            File.WriteAllText(tmp, Json.Write(m), new UTF8Encoding(false));
+            File.Copy(tmp, HintStatePath(), true);
+            try { File.Delete(tmp); } catch (Exception) { }
+        }
+        catch (Exception) { }
+        finally { if (g != null) g.Dispose(); }
+    }
+
+    /// <summary>Re-apply the hint on a document that is still under takeover. Called before every
+    /// command: WPS drops the caption when the user switches to another tab, and the lease release
+    /// takes it off when the agent goes quiet - in both cases the mark belongs back on screen as
+    /// soon as the agent touches the document again.</summary>
+    private static void EnsureHint(Bag a)
+    {
+        try
+        {
+            string doc = a.Str("doc", null);
+            if (doc == null || doc.Length == 0) return;
+            string full = FullPathOf(doc);
+            string tag = HintStateGet(full);
+            if (tag == null) return;
+            dynamic app = App(false, false);
+            if (app == null) return;
+            dynamic d = FindOpen(full);
+            if (d == null) return;
+            if (IsHinted(CaptionOf(d))) return;          // still branded: no COM write at all
+            TrySetCaption(d, HintCaption(NameOf(d), tag));
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>Take the visible hint off every document this instance has open. Called by the
+    /// resident helper when the agent's lease expires and on its way out; the intent registry is
+    /// kept, so the next request puts the mark back (see EnsureHint).</summary>
+    private static void ReleaseHints()
+    {
+        try { TrayDaemon.Stop("word"); } catch (Exception) { }
+        dynamic app = null;
+        try { app = App(false, false); } catch (Exception) { }
+        if (app == null) return;
+        int n = 0;
+        try { n = (int)app.Documents.Count; } catch (Exception) { return; }
+        for (int k = 1; k <= n; k++)
+        {
+            try
+            {
+                dynamic d = app.Documents.Item(k);
+                if (IsHinted(CaptionOf(d))) TrySetCaption(d, NameOf(d));
+            }
+            catch (Exception) { }
+        }
+        try { TrySetStatusBar(app, ""); } catch (Exception) { }
+    }
+
     /// <summary>Set (or clear, with "") the WPS status bar. Write-only in WPS: no readback.</summary>
     private static bool TrySetStatusBar(dynamic app, string text)
     {
@@ -2080,6 +2199,9 @@ internal static partial class Program
         string name = NameOf(doc);
         string caption = HintCaption(name, tag);
         bool set = TrySetCaption(doc, caption);
+        // Record the intent even when the caption could not be set (hidden window): the next
+        // command's EnsureHint will retry, and the lease release needs to know what to clear.
+        HintStateSet(Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture), tag);
         Dictionary<string, object> h = new Dictionary<string, object>();
         h["tag"] = tag;
         h["caption"] = caption;
@@ -2113,6 +2235,9 @@ internal static partial class Program
         r["caption"] = caption;
         r["captionSet"] = captionSet;
         if (!clear) r["tag"] = tag;
+        // The intent registry follows an explicit hint too: -Clear ends the takeover, a plain
+        // hint (re)brands the document, so a later lease check knows what to release.
+        HintStateSet(Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture), clear ? null : tag);
 
         // 2) status bar - WPS accepts the write but the Writer status bar does NOT render it
         //    (screenshot 2026-10-30: after setting it the bar still shows 页面/字数/拼写检查).
@@ -2160,6 +2285,9 @@ internal static partial class Program
         string name = NameOf(doc);
         r["captionCleared"] = TrySetCaption(doc, name);
         r["statusBarCleared"] = TrySetStatusBar(App(false, false), "");
+        // finish / close are an explicit end of the collaboration: drop the intent too, so a later
+        // command does not re-brand a document this skill was told to let go.
+        HintStateSet(Convert.ToString(TryGet(() => (object)doc.FullName, ""), CultureInfo.InvariantCulture), null);
         return r;
     }
 
