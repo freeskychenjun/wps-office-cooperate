@@ -1,12 +1,19 @@
 ---
 name: wps-office-cooperate
 description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式改写+批注+LaTeX 原生公式+脚注+版式核对+总览图）、Excel（.xlsx/.xls/.csv，批量写值公式+锚点校验+快照回滚+批注+数据清洗/透视表/条件格式/图表次轴）、PowerPoint（.pptx，预设版式建页+形状级改文字+表格图片+套版裁切+框图连线+SmartArt+逐页渲染核对），改动当场出现在用户正开着的 WPS 窗口里。当用户要求：在 WPS 里改这个文档/表格/演示文稿/PPT、在 WPS 里做修订、实时改 Word/Excel/PPT、一边看着一边改、做汇报 PPT、加批注、写公式/脚注、清洗表格/做透视表、核对排版/版式/表格格式，或提到 wps word、wps excel、wps ppt、live edit word/excel/ppt 时使用。不适用：纯离线批量处理（改副本、不要求用户在场，Word 用 docx-paragraph-polish，Excel 用 openpyxl/minimax-xlsx，PPT 用 pptx-generator 等离线方案）、用户明确不要动原文件（只出旁挂报告）、微软 Office 窗口里的文档（本 skill 只走 WPS）。
-version: 1.36
+version: 1.37
 ---
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
 ## 当前版本
+
+**版本 v1.37（2026-11-05）**：**接管提示可整体关掉（A/B 自证开关）+ 我们的每次窗口写入都可追溯（trace）+ 关闭慢/重开空白的诊断口径**。背景：用户（pi agent 实测）认为 `毛坊湖高程点.xlsx` 的"关闭半天 + 重开卡死"是 v1.35/v1.36 撤标记改造引入的。我们做了对照实验：① **完全没有任何 helper 进程时**（`Get-Process EtHelper,WpsHelper,WppHelper` 计数 0），仍用"双击 .xlsx（WPS 已在运行）"复现出 `wps.exe` 崩溃（21:41:44、21:42:35 各一次，`kprometheus.dll_unloaded` 0xc0000005，进程 ID 0x987c / 0xb908）⇒ WPS 自己的打开交接路径就有缺陷，不需要我们的标记参与；② scratch 工作簿上"带标记关闭 + 租约到期撤标记"实测：关闭 428–687 ms、`releaseHints()` 30–200 ms、期间 0 崩溃；③ 复现出"卡死"形态：脏文档关闭被晾住/半关后，窗口仍显示文件名但 `Application.Workbooks.Count == 0`（`close` 报 `NOT_OPEN`）⇒ 空壳/僵尸窗口，只能结束 `wps.exe` 重开。为了让你能自行判定（而不是听我解释），v1.37 提供两个开关：
+
+- **① `hint-off` 总开关（推荐用来做 A/B）**：`WOC_HINT_OFF=1`（或建空文件 `%LOCALAPPDATA%\wps-office-cooperate\hint-off.txt`）⇒ 三端**不再对 WPS 做任何自动 UI 写入**：`open` 不写标题前缀、`hint` 返回 `disabled:true`、每命令前的 `EnsureHint`/`EnsureTitleMarker` 跳过、租约到期的 `ReleaseHints` 跳过、**v1.36 的 `HealWindow` 也跳过**（所以这是干净的 A/B：开关打开 ≈ 回到"任何时刻都不碰 WPS 窗口标题/状态栏/可见性"的老行为，读写文档照常）。`hint -Clear` 永不禁用（用来清理旧残留）。判定法：开开关用几天，若"关闭慢/重开空白"照样出现 ⇒ 与标记无关；若不再出现 ⇒ 回来找我，按 trace 定位。
+- **② `trace` 日志**：`WOC_TRACE=1`（或空文件 `trace-on.txt`）⇒ 三端把关键时刻追加到 `%LOCALAPPDATA%\wps-office-cooperate\trace-<app>.log`：`release start` / `release done` / `release skipped (...)` / `heal skipped (...)` / `hint skipped (...)`，行首是毫秒时间戳。卡死时把 `trace-excel.log` 发我，就能逐秒对照"我们写了什么、用户点了什么"。
+- **③ 诊断口径**：`status` 里 `app.visible=false` 且 `workbooks>0` ⇒ 文档在但窗口被藏（下一条命令自动 `HealWindow` 恢复）；`workbooks:[]` 而 WPS 窗口还显示文件名 ⇒ 僵尸窗口（结束 `wps.exe` 重开，别指望 COM 能救）；`close` 报 `NOT_OPEN` 但窗口还在 ⇒ 同上。
+- **验收**：建 `hint-off.txt` 后 `open` 返回 `hint.disabled:true`、窗口标题无前缀、`status` `hinted:false`、`read` 正常；删文件即恢复。`serve -Action stop` 后无 helper 残留。
 
 **版本 v1.36（2026-11-05）**：**关门不再留残余客户端 + 卡死窗口自动自愈（修"关闭接管的 Excel 半天才关、重开一片空白"）**。用户反馈（pi agent 实测）：关掉被接管的 `毛坊湖高程点.xlsx` 要等到像卡住，再打开就成"卡死"状态。现场取证：卡死态 = WPS 外框/标签页还在，但 `Application.Visible=false`、文档子窗口（XLMAIN/XLDESK/EXCEL7）全被隐藏（截图=整片灰）；**根因是 WPS 自己的关闭路径崩溃**——本机 12.1.0.29161 的 `wps.exe` 每天崩几十次（`kprometheus.dll_unloaded` 0xc0000005 / 栈溢出 0xc00000fd，今天 20+ 次，远早于接管会话），我们的常驻 helper 在其后仍挂着自动化客户端，放大了"看起来像 AI 卡死"的观感。
 

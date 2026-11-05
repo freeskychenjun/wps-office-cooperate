@@ -90,6 +90,38 @@ internal static class HintLease
         return 0;
     }
 
+    /// <summary>v1.37: master OFF switch for the takeover hint. Create
+    /// %LOCALAPPDATA%\wps-office-cooperate\hint-off.txt (any content) or set WOC_HINT_OFF=1 and the
+    /// helpers write nothing hint-related into WPS: no caption/title/status-bar/tray on open, no
+    /// re-brand on later commands, no release when the lease expires. It exists so the user can
+    /// A/B-test one question on a real document: "is the hint what trips WPS on this machine?".
+    /// Explicit `hint -Clear` still works (removing an old brand must never be blocked).</summary>
+    public static bool HintOff()
+    {
+        string env = Environment.GetEnvironmentVariable("WOC_HINT_OFF");
+        if (!string.IsNullOrEmpty(env) && env != "0"
+            && !string.Equals(env, "false", StringComparison.OrdinalIgnoreCase)) return true;
+        try { return File.Exists(Path.Combine(StateDir(), "hint-off.txt")); }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>Optional trace (WOC_TRACE=1, or a trace-on.txt file in the state dir): append one
+    /// timestamped line to trace-&lt;app&gt;.log. Never throws. The point is to correlate "we wrote
+    /// the caption" with the WPS close/crash events in the application log (v1.37 investigation).</summary>
+    public static void Trace(string app, string message)
+    {
+        try
+        {
+            bool on = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WOC_TRACE"));
+            if (!on && !File.Exists(Path.Combine(StateDir(), "trace-on.txt"))) return;
+            Directory.CreateDirectory(StateDir());
+            File.AppendAllText(Path.Combine(StateDir(), "trace-" + app + ".log"),
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) + " " + message + "\r\n",
+                new UTF8Encoding(false));
+        }
+        catch (Exception) { }
+    }
+
     /// <summary>Has the agent been silent for longer than the lease? False when no lease exists
     /// (one-shot mode, or a helper that never started a daemon).</summary>
     public static bool Stale(string app)

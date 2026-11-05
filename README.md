@@ -12,6 +12,8 @@
 
 **标记是租约（v1.35；v1.36 过期即退出 + 卡死窗口自愈）**：接管标记不再需要 agent 主动收尾——常驻 helper 每条命令续租，**AI 静默超过 `WOC_HINT_LEASE_MS`（默认 120 s）** 就自动还原所有仍挂着的标记（Word/Excel 标题与状态栏、PPT 标题前缀与页面药丸、托盘图标），**随后 helper 进程直接退出（v1.36）**，`serve -Action stop` 也会先还原再退；**用户退出 AI 会话后不会长期顶着「〔AI接管中〕」，也不会留下自动化客户端干扰用户自己保存/关闭**。只清"看得见的标记"、不清"接管意图"：AI 恢复发命令时下一条命令自动补标；`finish`/`close`/`hint -Clear` 才是结束协作（清意图，之后不再补标）。另外 **WPS 自己的关闭路径偶尔崩溃后会把文档窗口藏起来**（外框还在、内容全灰 = 用户说的"卡死"）：v1.36 每条命令执行前自检，发现 `Application.Visible=false` 且有文档就自动显示并激活，**发任意一条命令即可恢复**。
 
+**想验证"卡死是不是标记造成的"（v1.37）**：设 `WOC_HINT_OFF=1` 或建空文件 `%LOCALAPPDATA%\wps-office-cooperate\hint-off.txt`，三端就**只在文档内容区读写，完全不碰 WPS 的窗口标题/状态栏/可见性**（连自愈也停），读写命令照常可用；去掉即恢复。再设 `WOC_TRACE=1`（或 `trace-on.txt`）可把每次"写窗口/撤标记/自愈"记进 `trace-<app>.log`（毫秒时间戳）。实测对照：**零 helper 进程时双击打开 xlsx 也会让 `wps.exe` 崩在 `kprometheus.dll_unloaded`**（WPS 自身打开交接缺陷）；带标记关闭/撤标记实测 30–687 ms、0 崩溃——所以"关闭慢/重开空白"更可能来自 WPS 自身 + 脏文档关闭被晾住造成的僵尸窗口（`workbooks:[]` 但窗口还显示文件名 ⇒ 结束 `wps.exe` 重开）。
+
 v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）于 2026-10-25 合并而成。原 Word 版曾托管在合集 [my-doc-skills](https://github.com/freeskychenjun/my-doc-skills)，合并后该目录已移除，此处为唯一维护位置。## 效果
 
 一份用预设版式 + 主题一次生成的汇报稿（`render -Overview` 六页拼图，带页码），全部改动都发生在 WPS 窗口里：

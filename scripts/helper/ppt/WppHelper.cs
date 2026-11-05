@@ -1218,7 +1218,7 @@ internal static partial class Program
             if (wins == 0) { try { p.NewWindow(); } catch (Exception) { } }
             try { p.Windows(1).Activate(); } catch (Exception) { }
         }
-        if (!a.Flag("noHint", false))
+        if (!a.Flag("noHint", false) && !HintLease.HintOff())   // v1.37: hint-off.txt / WOC_HINT_OFF
         {
             bool marked = ApplyTitleMarker(p, true);
             try { TitleStateSet(Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture), true); } catch (Exception) { }
@@ -3469,6 +3469,7 @@ internal static partial class Program
     {
         try
         {
+            if (HintLease.HintOff()) { HintLease.Trace("ppt", "heal skipped (hints disabled)"); return; }   // v1.37 A/B switch: no automatic UI writes at all
             dynamic app = _app;
             if (app == null) return;
             bool visible;
@@ -3500,6 +3501,7 @@ internal static partial class Program
     {
         try
         {
+            if (HintLease.HintOff()) return;   // v1.37 master switch
             string doc = a.Str("doc", null);
             if (doc == null) return;
             string full = FullPathOf(doc);
@@ -3525,6 +3527,13 @@ internal static partial class Program
     private static void ReleaseHints()
     {
         try { TrayDaemon.Stop("ppt"); } catch (Exception) { }
+        // v1.37 master switch: with the mark off there is nothing to take off.
+        if (HintLease.HintOff())
+        {
+            HintLease.Trace("ppt", "release skipped (hints disabled)");
+            return;
+        }
+        HintLease.Trace("ppt", "release start");
         dynamic app = null;
         try { app = App(false, false); } catch (Exception) { }
         if (app == null) return;
@@ -3554,6 +3563,7 @@ internal static partial class Program
             }
             catch (Exception) { }
         }
+        HintLease.Trace("ppt", "release done");
     }
 
     private static object HintCmd(Bag a)
@@ -3570,6 +3580,17 @@ internal static partial class Program
         Dictionary<string, object> r = new Dictionary<string, object>();
         r["name"] = name;
         r["cleared"] = clear;
+        // v1.37 master switch: answer explicitly, but write nothing into the deck / title / tray.
+        if (!clear && HintLease.HintOff())
+        {
+            r["disabled"] = true;
+            r["captionSupported"] = false;
+            r["titleMarked"] = false;
+            r["slideMarked"] = false;
+            r["note"] = "Takeover hints are disabled (hint-off.txt / WOC_HINT_OFF, v1.37): nothing is written into WPS.";
+            HintLease.Trace("ppt", "hint skipped (disabled)");
+            return r;
+        }
         bool titleMarked = false;
         string full = Convert.ToString(TryGet(() => (object)p.FullName, ""), CultureInfo.InvariantCulture);
         try

@@ -3150,6 +3150,7 @@ internal static partial class Program
     {
         try
         {
+            if (HintLease.HintOff()) { HintLease.Trace("excel", "heal skipped (hints disabled)"); return; }   // v1.37 A/B switch: no automatic UI writes at all
             dynamic app = _app;
             if (app == null) return;
             bool visible;
@@ -3173,6 +3174,7 @@ internal static partial class Program
     {
         try
         {
+            if (HintLease.HintOff()) return;   // v1.37 master switch
             string doc = a.Str("doc", null);
             if (doc == null || doc.Length == 0) return;
             string full = FullPathOf(doc);
@@ -3194,6 +3196,14 @@ internal static partial class Program
     private static void ReleaseHints()
     {
         try { TrayDaemon.Stop("excel"); } catch (Exception) { }
+        // v1.37 master switch: with the mark off there is nothing to take off, and this is exactly
+        // the write that used to hit WPS at an arbitrary moment (possibly while the user closes).
+        if (HintLease.HintOff())
+        {
+            HintLease.Trace("excel", "release skipped (hints disabled)");
+            return;
+        }
+        HintLease.Trace("excel", "release start");
         dynamic app = null;
         try { app = App(false, false); } catch (Exception) { }
         if (app == null) return;
@@ -3209,6 +3219,7 @@ internal static partial class Program
             catch (Exception) { }
         }
         try { TrySetStatusBar(app, ""); } catch (Exception) { }
+        HintLease.Trace("excel", "release done");
     }
 
     private static bool ShowBalloon(string title, string text)
@@ -3241,6 +3252,16 @@ internal static partial class Program
 
     private static Dictionary<string, object> HintOnTakeover(dynamic wb, Bag a)
     {
+        // v1.37 master switch: see HintLease.HintOff.
+        if (HintLease.HintOff())
+        {
+            Dictionary<string, object> off = new Dictionary<string, object>();
+            off["disabled"] = true;
+            off["captionSet"] = false;
+            off["note"] = "Takeover hints are disabled (hint-off.txt / WOC_HINT_OFF, v1.37): nothing is written into WPS.";
+            HintLease.Trace("excel", "open: hint skipped (disabled)");
+            return off;
+        }
         string tag = HintTagFor(wb, a);
         string name = NameOf(wb);
         string caption = HintCaption(name, tag);
@@ -3278,6 +3299,21 @@ internal static partial class Program
         bool clear = a.Flag("clear", false);
         string tag = HintTagFor(wb, a);
         string name = NameOf(wb);
+        // v1.37 master switch: an explicit hint is still answered, but nothing is written into WPS.
+        // -Clear is never blocked (taking an old brand off is always safe).
+        if (!clear && HintLease.HintOff())
+        {
+            Dictionary<string, object> off = new Dictionary<string, object>();
+            off["name"] = name;
+            off["cleared"] = false;
+            off["disabled"] = true;
+            off["captionSet"] = false;
+            off["statusBar"] = false;
+            off["toast"] = false;
+            off["note"] = "Takeover hints are disabled (hint-off.txt / WOC_HINT_OFF, v1.37): nothing is written into WPS.";
+            HintLease.Trace("excel", "hint skipped (disabled)");
+            return off;
+        }
         string text = a.Str("text", null);
         if (text == null)
             text = clear

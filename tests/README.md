@@ -124,6 +124,11 @@ python tests\word\check_normalize.py --fixture "D:\path\to\real-report.docx"
 > python tests\ppt\check_hint_lease.py
 > python tests\excel\check_window_heal.py
 > ```
+>
+> **v1.37 开关的冒烟**（不在上面四个脚本里，手敲即可）：建 `%LOCALAPPDATA%\wps-office-cooperate\hint-off.txt`
+> 后跑 `scripts\excel.ps1 open -Doc <测试表>`，断言返回 `hint.disabled:true`、窗口标题无「〔AI接管中〕」、
+> `status` 的 `hinted:false`、`read` 正常；再建 `trace-on.txt` 跑 `serve -Action stop`（或等租约过期），
+> 断言 `trace-excel.log` 里**没有** `release start`（只有 `release skipped (hints disabled)`）。测完删两个文件。
 
 ## 清理
 

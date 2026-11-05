@@ -2142,6 +2142,7 @@ internal static partial class Program
     {
         try
         {
+            if (HintLease.HintOff()) { HintLease.Trace("word", "heal skipped (hints disabled)"); return; }   // v1.37 A/B switch: no automatic UI writes at all
             dynamic app = _app;
             if (app == null) return;
             bool visible;
@@ -2165,6 +2166,7 @@ internal static partial class Program
     {
         try
         {
+            if (HintLease.HintOff()) return;   // v1.37 master switch
             string doc = a.Str("doc", null);
             if (doc == null || doc.Length == 0) return;
             string full = FullPathOf(doc);
@@ -2186,6 +2188,14 @@ internal static partial class Program
     private static void ReleaseHints()
     {
         try { TrayDaemon.Stop("word"); } catch (Exception) { }
+        // v1.37 master switch: nothing was ever written, and this is the write that could hit WPS
+        // at an arbitrary moment (possibly while the user is closing the document).
+        if (HintLease.HintOff())
+        {
+            HintLease.Trace("word", "release skipped (hints disabled)");
+            return;
+        }
+        HintLease.Trace("word", "release start");
         dynamic app = null;
         try { app = App(false, false); } catch (Exception) { }
         if (app == null) return;
@@ -2201,6 +2211,7 @@ internal static partial class Program
             catch (Exception) { }
         }
         try { TrySetStatusBar(app, ""); } catch (Exception) { }
+        HintLease.Trace("word", "release done");
     }
 
     /// <summary>Set (or clear, with "") the WPS status bar. Write-only in WPS: no readback.</summary>
@@ -2247,6 +2258,16 @@ internal static partial class Program
     /// <summary>Takeover hint applied by `open`: the caption tag only - silent and instant.</summary>
     private static Dictionary<string, object> HintOnTakeover(dynamic doc, Bag a)
     {
+        // v1.37 master switch: see HintLease.HintOff.
+        if (HintLease.HintOff())
+        {
+            Dictionary<string, object> off = new Dictionary<string, object>();
+            off["disabled"] = true;
+            off["captionSet"] = false;
+            off["note"] = "Takeover hints are disabled (hint-off.txt / WOC_HINT_OFF, v1.37): nothing is written into WPS.";
+            HintLease.Trace("word", "open: hint skipped (disabled)");
+            return off;
+        }
         string tag = HintTagFor(doc, a);
         string name = NameOf(doc);
         string caption = HintCaption(name, tag);
@@ -2271,6 +2292,20 @@ internal static partial class Program
         bool clear = a.Flag("clear", false);
         string tag = HintTagFor(doc, a);
         string name = NameOf(doc);
+        // v1.37 master switch: answer explicitly, but write nothing. -Clear stays available.
+        if (!clear && HintLease.HintOff())
+        {
+            Dictionary<string, object> off = new Dictionary<string, object>();
+            off["name"] = name;
+            off["cleared"] = false;
+            off["disabled"] = true;
+            off["captionSet"] = false;
+            off["statusBar"] = false;
+            off["toast"] = false;
+            off["note"] = "Takeover hints are disabled (hint-off.txt / WOC_HINT_OFF, v1.37): nothing is written into WPS.";
+            HintLease.Trace("word", "hint skipped (disabled)");
+            return off;
+        }
         string text = a.Str("text", null);
         if (text == null)
             text = clear

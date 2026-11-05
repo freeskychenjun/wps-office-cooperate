@@ -4,6 +4,13 @@
 >
 > 自 v1.29（2026-11-02）从 `SKILL.md` 拆出：原主文档前 74 行版本记录约 1.97 万字符，占整份 skill 的 25.5%，每次加载都白付一次上下文。查「某版改了什么 / 为什么这么设计」看这里；主文档只留当前版本的要点。
 
+**版本 v1.37（2026-11-05）**：**接管提示可整体关闭（A/B 自证）+ 窗口写入可追溯（trace）+ "关闭慢/重开空白"的诊断口径**。用户 m01182 认为卡死是 v1.35/v1.36 的撤标记改造引入的，因此本版不再论证而是给可自证的工具。
+- **对照实验（本次定性的依据）**：① 在**零 helper 进程**（`EtHelper`/`WpsHelper`/`WppHelper` 计数 0）下，双击 xlsx 让 WPS 在已运行实例上交接，仍复现 `wps.exe` 崩 `kprometheus.dll_unloaded` 0xc0000005（11-05 21:41:44、21:42:35，PID 0x987c/0xb908）⇒ 打开交接崩溃不需要我们的标记参与；② scratch 工作簿"带标记关闭 + 租约到期撤标记"：关闭 428/687 ms、`releaseHints()` 30/203 ms、期间 0 崩溃；③ 复现用户口中的卡死形态：脏文档关闭被晾住后，窗口仍显示文件名但 `Application.Workbooks.Count == 0`（`close` 报 `NOT_OPEN`）⇒ 僵尸窗口，只能结束 `wps.exe` 重开。
+- **`hint-off` 总开关**：`WOC_HINT_OFF=1` 或文件 `%LOCALAPPDATA%\wps-office-cooperate\hint-off.txt` ⇒ 三端不写任何自动 UI（`open` 不写前缀、`hint` 返回 `disabled:true`、`EnsureHint`/`EnsureTitleMarker` 跳过、`ReleaseHints` 跳过、`HealWindow` 也跳过），`hint -Clear` 永不禁用；用于 A/B 判定"卡死是否与标记有关"。
+- **`trace` 日志**：`WOC_TRACE=1` 或 `trace-on.txt` ⇒ 追加 `%LOCALAPPDATA%\wps-office-cooperate\trace-<app>.log`（`release start/done/skipped`、`heal skipped`、`hint skipped`，毫秒时间戳）。实现于 `shared/HintLease.cs` 的 `HintOff()` / `Trace()`，三端 `HintOnTakeover`/`EnsureHint`/`ReleaseHints`/`HealWindow`/`HintCmd` 各加保护。
+- **诊断口径写进 SKILL 当前版本**：`app.visible=false`+`workbooks>0` ⇒ 窗口隐藏（下条命令自愈）；`workbooks:[]` 但窗口仍显示文件名 ⇒ 僵尸窗口（杀 wps 重开）；`close` 报 `NOT_OPEN` 但窗口还在 ⇒ 同上。
+- **实测**：`hint-off.txt` 下 `open` 返回 `hint.disabled:true`、标题无前缀、`status.hinted=false`、`read` 正常。
+
 **版本 v1.36（2026-11-05）**：**不留残余客户端 + 卡死窗口自愈（修"关闭接管的 Excel 半天才关、重开一片空白"）**。用户反馈（pi agent 实测）：关闭被接管的 `毛坊湖高程点.xlsx` 要等到像卡住，再打开就成"卡死"状态。
 - **现场取证（决定性）**：卡死态 = WPS 外框/标签页还在，但 `Application.Visible=false`、文档子窗口 `XLMAIN`/`XLDESK`/`EXCEL7` 全部 `IsWindowVisible=false`（真实屏幕截图与 PrintWindow 一致：整片灰、无表格工具栏）；daemon pipe 仍健康（`ping` 31 ms、`status` 115 ms），`open -Show` 3 ms 级恢复显示 ⇒ **卡死 = 文档窗口被隐藏，不是 COM 死锁**。往宿主找：`wps.exe` 12.1.0.29161 在本机**每天崩几十次**（Application Error 10-29～11-05 大量记录，两大签名 `kprometheus.dll_unloaded 0xc0000005` 与 `0xc00000fd` 栈溢出；11-05 当天 20+ 次，最早 08:12，远早于 18:47 的接管会话），崩溃转储 `%TEMP%\KSO_CrashDump_Dir` 今日 5 份同 `dumpid`、无可用调用栈（栈已损坏）⇒ **关闭慢/崩是 WPS 自身关闭路径缺陷**；我们的常驻 helper 仍挂着自动化客户端，放大了"像 AI 卡死"的观感。
 - **① 隐藏窗口自愈**：三端 `HandleRequest` 在 `EnsureHint` 之前先 `HealWindow()`——`_app.Visible == false` 且文档数 >0 时 `Visible = true` + 激活活动文档/窗口（Excel `ActiveWorkbook.Activate()`、Word `ActiveDocument.Activate()`、PPT 无窗口先 `NewWindow()` 再 `Windows(1).Activate()`），stderr 记 `repaired a hidden ... window (v1.36)`。⇒ **AI 下一条命令（甚至 `status`/`read`）就把"卡死"窗口恢复**，用户不必手动关开。
