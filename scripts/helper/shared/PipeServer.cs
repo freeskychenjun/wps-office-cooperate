@@ -39,8 +39,14 @@ internal static class PipeServer
     ///
     /// v1.36: an expired lease ends the process too - "the agent went quiet" is the same thing as
     /// "no client should stay attached to WPS". The wrapper restarts a helper on the next command.
+    ///
+    /// v1.38: detachIdle() runs after every served request - the helper keeps its pipe but drops
+    /// the COM reference. WPS refuses to finish its own quit path while a live automation client
+    /// holds the Application object (measured: quit hangs / leaves a blank frame; user report
+    /// "closing an Excel file takes 10+ s after the agent took it over"). The next request simply
+    /// re-attaches.
     /// </summary>
-    public static int Run(string pipeName, string app, Func<string, string> handler, Func<int> openDocuments, Action releaseHints)
+    public static int Run(string pipeName, string app, Func<string, string> handler, Func<int> openDocuments, Action releaseHints, Action detachIdle)
     {
         int idleMs = 20 * 60 * 1000;
         string env = Environment.GetEnvironmentVariable("WOC_DAEMON_IDLE_MS");
@@ -145,7 +151,11 @@ internal static class PipeServer
             released = false;
             try { if (openDocuments() > 0) hadDocument = true; }
             catch (Exception) { }
-            if (exitAfterOne) return 0;
+            if (exitAfterOne)
+            {
+                try { detachIdle(); } catch (Exception) { }
+                return 0;
+            }
             if (hadDocument)
             {
                 int left = -1;
@@ -156,6 +166,9 @@ internal static class PipeServer
                     return 0;
                 }
             }
+            // v1.38: drop the COM reference while waiting for the next request, so the user can
+            // close/save WPS without a live automation client blocking the quit path.
+            try { detachIdle(); } catch (Exception) { }
         }
         }
         finally

@@ -311,7 +311,7 @@ internal static partial class Program
         // v1.14 resident mode: keep the COM application alive and serve request JSON over a named
         // pipe, so a command no longer pays "start exe + attach to WPS + find document" every time.
         if (args != null && args.Length >= 2 && args[0] == "--serve")
-            return PipeServer.Run(args[1], "word", HandleRequest, OpenDocumentCount, ReleaseHints);
+            return PipeServer.Run(args[1], "word", HandleRequest, OpenDocumentCount, ReleaseHints, DetachIdle);
 
         string requestPath = args != null && args.Length > 0 ? args[0] : null;
         string responsePath = args != null && args.Length > 1 ? args[1] : null;
@@ -332,10 +332,35 @@ internal static partial class Program
         try
         {
             if (_daemonStop) return 0;
-            if (_app == null) return 0;
-            return (int)_app.Documents.Count;
+            // v1.38: the loop detaches COM between requests, so re-attach to count. -1 = 'unknown'
+            // (COM busy): a transient failure must not look like 'the user closed everything'.
+            dynamic app = _app;
+            if (app == null)
+            {
+                try { app = App(false, false); } catch (Exception) { return -1; }
+                if (app == null) return 0;   // WPS is gone: nothing left open
+            }
+            return (int)app.Documents.Count;
         }
-        catch (Exception) { return 0; }
+        catch (Exception) { return -1; }
+    }
+
+    /// <summary>
+    /// v1.38: called by the resident loop after every served request. Drops the COM reference so
+    /// WPS can quit/close without a live automation client blocking its teardown (the user's
+    /// "closing the file takes 10+ s and leaves a blank window" report). The next request
+    /// re-attaches through App().
+    /// </summary>
+    private static void DetachIdle()
+    {
+        dynamic app = _app;
+        _app = null;
+        if (app == null) return;
+        try { Marshal.ReleaseComObject(app); } catch (Exception) { }
+        app = null;
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        HintLease.Trace("word", "detached idle (v1.38)");
     }
 
     /// <summary>
@@ -2143,7 +2168,8 @@ internal static partial class Program
         try
         {
             if (HintLease.HintOff()) { HintLease.Trace("word", "heal skipped (hints disabled)"); return; }   // v1.37 A/B switch: no automatic UI writes at all
-            dynamic app = _app;
+            // v1.38: the resident loop detaches COM between requests, so attach again here.
+            dynamic app = App(false, false);
             if (app == null) return;
             bool visible;
             try { visible = (bool)app.Visible; } catch (Exception) { return; }

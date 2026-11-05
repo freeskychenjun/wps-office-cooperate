@@ -1,12 +1,19 @@
 ---
 name: wps-office-cooperate
 description: 在 WPS 里实时改 Office 文档——Word（.docx，修订模式改写+批注+LaTeX 原生公式+脚注+版式核对+总览图）、Excel（.xlsx/.xls/.csv，批量写值公式+锚点校验+快照回滚+批注+数据清洗/透视表/条件格式/图表次轴）、PowerPoint（.pptx，预设版式建页+形状级改文字+表格图片+套版裁切+框图连线+SmartArt+逐页渲染核对），改动当场出现在用户正开着的 WPS 窗口里。当用户要求：在 WPS 里改这个文档/表格/演示文稿/PPT、在 WPS 里做修订、实时改 Word/Excel/PPT、一边看着一边改、做汇报 PPT、加批注、写公式/脚注、清洗表格/做透视表、核对排版/版式/表格格式，或提到 wps word、wps excel、wps ppt、live edit word/excel/ppt 时使用。不适用：纯离线批量处理（改副本、不要求用户在场，Word 用 docx-paragraph-polish，Excel 用 openpyxl/minimax-xlsx，PPT 用 pptx-generator 等离线方案）、用户明确不要动原文件（只出旁挂报告）、微软 Office 窗口里的文档（本 skill 只走 WPS）。
-version: 1.37
+version: 1.38
 ---
 
 # wps-office-cooperate：在 WPS 里实时改 Word / Excel / PowerPoint
 
 ## 当前版本
+
+**版本 v1.38（2026-11-05）**：**空闲期不再持有 WPS 的 COM 引用——这就是"被接管后关闭 Excel 慢十几秒 + 留空白窗口"的真因**。用户（m01625）稳定对比：同一文件，不接管 → 改完点关闭瞬间关；**被接管 + 新建工作表 → 无论选保存还是不保存都要十几秒，随后冒出空白 WPS 窗口，再点一下还要几秒才退**。定位实验（`.tmp/gclose-metric.ps1`：双击打开副本 → `WM_CLOSE` 关窗口 → 点"不保存" → 量到顶层帧消失）：不接管 **670 ms**；接管且 helper 在世 **≥25 s 不退出、只留空白帧**；接管后先 `serve -Action stop`（helper 正常释放 COM 并退出）→ **714 ms**。⇒ 常驻 helper 只要还持有 `Application` 的 COM 引用，WPS 自己的退出/关闭流程就被卡住（WPS 在等自动化客户端撒手），**与标记文字无关，与"谁开的文档"也无关**。
+
+- **① 空闲即断开 COM（核心修复）**：每条请求处理完，`shared/PipeServer.cs` 调 `detachIdle()` → 三端 `DetachIdle()` 做 `Marshal.ReleaseComObject(_app)`、`_app = null`、`GC.Collect()`；下一条命令由 `App()` 重新 attach（`GetActiveObject`）。daemon 进程与 pipe 照常存活，只是用户自己点保存/关闭时 WPS 手里没有我们的客户端。
+- **② 计数健壮性**：`OpenDocumentCount()` 在 `_app == null` 时先重新 attach 再数；COM busy 时返回 `-1`（"未知"）而不是 `0`，避免把"暂时数不到"误判成"文档全关了"导致 daemon 提前退出、留下没有自愈的窗口（回归时 `word D4` 踩到过）。
+- **③ 自愈也要先 attach**：`HealWindow()` 现在先 `App(false, false)` 再判 `Visible`——断开后 `_app` 为 null，否则 v1.36 的自愈会静默失效（`check_window_heal` 的 H3/H4 曾因此失败）。
+- **验收**：`.tmp/gclose-metric.ps1 -Variant 1 -QuitFrame` 关闭帧 **<1.5 s**（修复前 ≥25 s 且帧不消失）；三端 `check_hint_lease.py`、`tests/excel/check_window_heal.py`、`tests/word/check_daemon.py`（40/40）全过；`run_all.ps1 -Layer fast` 10/10。
 
 **版本 v1.37（2026-11-05）**：**接管提示可整体关掉（A/B 自证开关）+ 我们的每次窗口写入都可追溯（trace）+ 关闭慢/重开空白的诊断口径**。背景：用户（pi agent 实测）认为 `毛坊湖高程点.xlsx` 的"关闭半天 + 重开卡死"是 v1.35/v1.36 撤标记改造引入的。我们做了对照实验：① **完全没有任何 helper 进程时**（`Get-Process EtHelper,WpsHelper,WppHelper` 计数 0），仍用"双击 .xlsx（WPS 已在运行）"复现出 `wps.exe` 崩溃（21:41:44、21:42:35 各一次，`kprometheus.dll_unloaded` 0xc0000005，进程 ID 0x987c / 0xb908）⇒ WPS 自己的打开交接路径就有缺陷，不需要我们的标记参与；② scratch 工作簿上"带标记关闭 + 租约到期撤标记"实测：关闭 428–687 ms、`releaseHints()` 30–200 ms、期间 0 崩溃；③ 复现出"卡死"形态：脏文档关闭被晾住/半关后，窗口仍显示文件名但 `Application.Workbooks.Count == 0`（`close` 报 `NOT_OPEN`）⇒ 空壳/僵尸窗口，只能结束 `wps.exe` 重开。为了让你能自行判定（而不是听我解释），v1.37 提供两个开关：
 

@@ -4,6 +4,13 @@
 >
 > 自 v1.29（2026-11-02）从 `SKILL.md` 拆出：原主文档前 74 行版本记录约 1.97 万字符，占整份 skill 的 25.5%，每次加载都白付一次上下文。查「某版改了什么 / 为什么这么设计」看这里；主文档只留当前版本的要点。
 
+**版本 v1.38（2026-11-05）**：**空闲期释放 COM 引用——修"被接管后关闭 Excel 十几秒 + 空白窗口"的真因**。用户 m01625 稳定对比：同一文件不接管时改完点关闭瞬间关；被接管 + 新建工作表后，无论保存/不保存都要十几秒，随后留空白 WPS 窗口、需再点一下并再等几秒才退。
+- **定位（决定性）**：`.tmp/gclose-metric.ps1`（双击副本 → `WM_CLOSE` 关窗口 → 点"不保存" → 等顶层帧消失）。不接管 **670 ms**；接管且 helper 在世 **≥25 s 帧不消失、只留空白**；接管后先 `serve -Action stop`（helper 正常释放 COM 退出）→ **714 ms**。另测：接管时若只 `Stop-Process EtHelper`（硬杀）也救不回来——WPS 已经在等，说明问题是"活着持有 COM 引用"而非进程本身。⇒ **WPS 的退出/关闭流程会被常驻自动化客户端卡住**（与标记文字无关；v1.37 的 hint-off 也慢，因为 daemon 仍附着）。
+- **① 每请求后断开**：`shared/PipeServer.cs` 新增 `Action detachIdle` 参数，服务完一条请求即调用；三端 `DetachIdle()` = `Marshal.ReleaseComObject(_app)` + `_app = null` + `GC.Collect()/WaitForPendingFinalizers()`，下条命令由 `App()` 重新 attach。进程/pipe 仍常驻（快路径保留），只是空闲时不持有 WPS 对象。
+- **② 计数健壮性**：`OpenDocumentCount()` 断开后先 attach 再数；异常返回 `-1`（未知）而非 `0`，防止 busy 时误判"文档都关了"导致 daemon 提前退出（`word D4` 回归曾失败）。
+- **③ 自愈先 attach**：`HealWindow()` 改为 `dynamic app = App(false, false)` 再判 `Visible`（否则断开后 `_app==null` 直接 return，v1.36 自愈失效；`check_window_heal` H3/H4 曾失败）。
+- **回归**：三端 `check_hint_lease.py` ALL PASS；`tests/excel/check_window_heal.py` ALL PASS；`tests/word/check_daemon.py` 40/40；`run_all.ps1 -Layer fast` 10/10。实验数据：修复后接管场景关闭 **727 ms**（与不接管 670 ms 同级）。
+
 **版本 v1.37（2026-11-05）**：**接管提示可整体关闭（A/B 自证）+ 窗口写入可追溯（trace）+ "关闭慢/重开空白"的诊断口径**。用户 m01182 认为卡死是 v1.35/v1.36 的撤标记改造引入的，因此本版不再论证而是给可自证的工具。
 - **对照实验（本次定性的依据）**：① 在**零 helper 进程**（`EtHelper`/`WpsHelper`/`WppHelper` 计数 0）下，双击 xlsx 让 WPS 在已运行实例上交接，仍复现 `wps.exe` 崩 `kprometheus.dll_unloaded` 0xc0000005（11-05 21:41:44、21:42:35，PID 0x987c/0xb908）⇒ 打开交接崩溃不需要我们的标记参与；② scratch 工作簿"带标记关闭 + 租约到期撤标记"：关闭 428/687 ms、`releaseHints()` 30/203 ms、期间 0 崩溃；③ 复现用户口中的卡死形态：脏文档关闭被晾住后，窗口仍显示文件名但 `Application.Workbooks.Count == 0`（`close` 报 `NOT_OPEN`）⇒ 僵尸窗口，只能结束 `wps.exe` 重开。
 - **`hint-off` 总开关**：`WOC_HINT_OFF=1` 或文件 `%LOCALAPPDATA%\wps-office-cooperate\hint-off.txt` ⇒ 三端不写任何自动 UI（`open` 不写前缀、`hint` 返回 `disabled:true`、`EnsureHint`/`EnsureTitleMarker` 跳过、`ReleaseHints` 跳过、`HealWindow` 也跳过），`hint -Clear` 永不禁用；用于 A/B 判定"卡死是否与标记有关"。
