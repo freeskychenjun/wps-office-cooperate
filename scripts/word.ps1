@@ -586,6 +586,10 @@ $json = $request | ConvertTo-Json -Depth 12 -Compress
 # NOTE: this variable must NOT be called $text - PowerShell variable names are case-insensitive, so
 # $text IS the [string]$Text parameter and assigning $null to it stores '' instead, which makes the
 # $null test below false and silently skips the one-shot fallback.
+# v1.36: if the resident helper exited with its hint lease (see shared/PipeServer.cs), start a
+# fresh one now - a paused session must not fall back to the slow one-shot path for every command.
+# The probe is a 300 ms pipe connect against a pipe that usually exists, so this costs ~nothing.
+if ($env:WOC_NO_DAEMON -ne '1') { $null = Start-Daemon $exePath }
 $responseText = Invoke-WocDaemonFirst -Command $Command -Json $json -TimeoutSec $TimeoutSec
 if ($null -eq $responseText) { $responseText = Invoke-WocOneShot -App 'word' -Command $Command -ExePath $exePath -Json $json -TimeoutSec $TimeoutSec }
 exit 0

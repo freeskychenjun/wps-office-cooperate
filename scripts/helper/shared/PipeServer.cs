@@ -36,6 +36,9 @@ internal static class PipeServer
     /// while waiting in short slices, calls releaseHints() once the lease has expired. The same
     /// release runs on the way out (idle timeout / `serve -Action stop` / last document closed),
     /// so a branded window cannot survive the process either.
+    ///
+    /// v1.36: an expired lease ends the process too - "the agent went quiet" is the same thing as
+    /// "no client should stay attached to WPS". The wrapper restarts a helper on the next command.
     /// </summary>
     public static int Run(string pipeName, string app, Func<string, string> handler, Func<int> openDocuments, Action releaseHints)
     {
@@ -82,11 +85,20 @@ internal static class PipeServer
                     {
                         // Release ONCE per lease period: the intent registry stays, so the next
                         // request re-applies the hint and a resumed session is branded again.
+                        //
+                        // v1.36: release AND leave. The expired lease means the agent's session is
+                        // over, so keeping this process - i.e. keeping an automation client
+                        // attached to the user's WPS - alive for another 20 idle minutes only adds
+                        // one more participant to the user's own save/close path (WPS 12.1 on this
+                        // machine already crashes there on its own, see SKILL.md v1.36). The
+                        // wrapper starts a fresh helper the next time an agent actually runs a
+                        // command, and the kept intent registry re-brands at that moment.
                         released = true;
                         Console.Error.WriteLine("woc-daemon: hint lease expired (no request for "
-                            + HintLease.LeaseMs() + " ms) - releasing takeover hints");
+                            + HintLease.LeaseMs() + " ms) - releasing takeover hints and exiting");
                         try { releaseHints(); }
                         catch (Exception) { Console.Error.WriteLine("woc-daemon: hint release failed"); }
+                        return 0;
                     }
                 }
                 try { server.EndWaitForConnection(connecting); }
@@ -149,8 +161,13 @@ internal static class PipeServer
         finally
         {
             // Any exit path (idle timeout, serve -Action stop, last document closed, a crash in
-            // this thread) must not leave a window branded "AI is working".
-            try { releaseHints(); } catch (Exception) { }
+            // this thread) must not leave a window branded "AI is working". The lease path above
+            // has already released before returning, so do not touch COM on that exit a second time
+            // (the app may be half-dead exactly then).
+            if (!released)
+            {
+                try { releaseHints(); } catch (Exception) { }
+            }
         }
     }
 

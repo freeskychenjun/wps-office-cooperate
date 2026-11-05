@@ -158,6 +158,11 @@ def main():
 
     print("== P3 silence longer than the lease strips the prefix (the reported bug) ==")
     time.sleep(SILENT_WAIT_S)   # stay silent: any wrapper call would renew the lease
+    # v1.36: an expired lease now ENDS the helper process (it used to idle on for 20 minutes), so
+    # a user who closes the deck right after the agent goes away has no automation client left.
+    # serve status only pings the pipe; it does not touch COM or renew the lease.
+    dg = run("serve", "-Action", "status")["result"]
+    ok &= check("helper process exited with the lease (v1.36)", dg.get("running") is False, dg)
     titles = our_titles()
     ok &= check("helper removed the prefix on its own", titles and not any(TAG in t for t in titles), titles)
     ok &= check("intent is kept for a resumed session", intent_on())

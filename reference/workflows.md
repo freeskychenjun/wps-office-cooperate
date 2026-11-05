@@ -414,11 +414,13 @@ office.ps1 word unit -Doc $DOC -Apply -Units "s2"          # 追加真实使用�
 
 - 常驻 helper 启动时 + 每服务完一条命令，刷新 `%LOCALAPPDATA%\wps-office-cooperate\hint-lease-<app>.txt`；
 - 等请求的空档 **≤5 s** 检查一次，超过 `WOC_HINT_LEASE_MS`（默认 **120 s**）没有新命令 ⇒ 还原所有仍挂着的标记（Word/Excel 标题与状态栏、PPT 标题前缀与页内药丸、托盘图标），三端同一套 `shared/HintLease.cs` + `PipeServer`；
-- helper 退出（空闲 20 min、`serve -Action stop`、最后一份文档关闭）也会**先还原再退出**；
+- helper 退出（租约过期、`serve -Action stop`、最后一份文档关闭）也会**先还原再退出**；**v1.36 起租约过期后 helper 直接退出**（不再空挂 20 分钟），包装器在下一条命令前用 ping 探活、没了就重新拉起——所以"AI 走了"与"自动化客户端走了"现在同时发生；
+- **业务命令前自愈隐藏窗口（v1.36）**：WPS 自己的关闭路径崩溃后可能留下 `Application.Visible=false`、文档子窗口全隐藏的状态（外框还在、内容全灰 = 用户说的"卡死"）。`HandleRequest` 在 `EnsureHint` 前调 `HealWindow()`：app 被隐藏且有文档 ⇒ `Visible=true` + 激活活动文档/窗口；**AI 下一条命令（甚至 `status`）即可恢复**；
+- **陈旧 COM 引用自恢复（v1.36）**：`App()` 复用缓存前先 `StillAlive()` 探活（`Workbooks/Documents/Presentations.Count`），只有断开类 HRESULT 才丢弃重连；`close` 关最后一份文档 / `quit` 后 `_app = null`；
 - **只清显示、不清意图**：Word/Excel 的 `hint-state-<app>.json`、PPT 的 `ppt-title-hint.json` 保留，下一条命令开头的 `EnsureHint` / `EnsureTitleMarker` 会自动补标 ⇒ 暂停超过 2 分钟的协作，回来后标记会自己回来；
 - 真正结束一轮协作仍用 `finish` / `close` / `hint -Clear`（它们清意图，之后不再自动补标）；`open -NoHint` 同样清意图；
-- 覆盖范围：`WOC_NO_DAEMON=1` 的一次性模式没有常驻进程跑定时器，仍只有显式收尾（这也是它只适合 A/B 的原因）；
-- 验收：`tests/<app>/check_hint_lease.py`（租约调到 4 s，断言 标记 → 静默 → 消失 → 命令 → 回来 → `serve stop` → 消失 → `finish` 清意图）。
+- 覆盖范围：`WOC_NO_DAEMON=1` 的一次性模式没有常驻进程跑定时器，仍只有显式收尾（这也是它只适合 A/B 的原因）；HealWindow 在一次性模式下同样生效；
+- 验收：`tests/<app>/check_hint_lease.py`（租约调到 4 s，断言 标记 → 静默 → 消失 → helper 退出（`serve status` 的 `running:false`）→ 命令 → 回来 → `serve stop` → 消失 → `finish` 清意图）；`tests/excel/check_window_heal.py`（隐藏 app → `read` → 可见性恢复）。
 
 ## 15. 忙重试与剪贴板礼仪（v1.32 基础设施，用户看不见但会感觉到）
 

@@ -345,7 +345,13 @@ internal static partial class Program
             // v1.35 hint lease: put the takeover mark back before doing anything else (WPS resets
             // the caption on a tab switch, and the resident helper strips it when the agent goes
             // quiet). `open`/`new` apply it themselves; hint/finish/close own the intent registry.
-            if (cmd != "open" && cmd != "new" && cmd != "hint" && cmd != "finish" && cmd != "close") EnsureHint(bag);
+            if (cmd != "open" && cmd != "new" && cmd != "hint" && cmd != "finish" && cmd != "close")
+            {
+                // v1.36: the same "first thing on contact" slot also repairs the blank-window state
+                // WPS can leave behind (see HealWindow).
+                HealWindow();
+                EnsureHint(bag);
+            }
             response = Ok(cmd, Dispatch(cmd, bag));
         }
         catch (Fail f)
@@ -480,10 +486,35 @@ internal static partial class Program
         catch (Exception) { return null; }
     }
 
+    /// <summary>
+    /// v1.36: is the cached COM object still worth using? A cached Application survives the app it
+    /// points at (the user closed WPS, WPS crashed on close - a daily occurrence on this machine,
+    /// or its frame was replaced). Workbooks.Count is the cheapest liveness probe. Only "the object
+    /// is gone" HRESULTs invalidate the cache: busy/rejected calls (typing in a cell, a dialog) are
+    /// transient and must NOT throw away a healthy app object.
+    /// </summary>
+    private static bool StillAlive(dynamic app)
+    {
+        try { int n = (int)app.Workbooks.Count; return true; }
+        catch (COMException e)
+        {
+            int hr = e.HResult;
+            return !(hr == unchecked((int)0x80010108)    // RPC_E_DISCONNECTED
+                  || hr == unchecked((int)0x800401FD)    // CO_E_OBJNOTCONNECTED
+                  || hr == unchecked((int)0x800706BA)    // RPC server unavailable
+                  || hr == unchecked((int)0x800401E3));  // MK_E_UNAVAILABLE / empty object
+        }
+        catch (Exception) { return true; }
+    }
+
     /// <summary>The spreadsheet app: the running WPS ET instance if there is one, otherwise a new one.</summary>
     private static dynamic App(bool create, bool visible)
     {
-        if (_app != null) return _app;
+        if (_app != null)
+        {
+            if (StillAlive(_app)) return _app;
+            _app = null;   // detached or died underneath us: re-attach below
+        }
         dynamic found = Running(WPS_ET);
         if (found != null) { _app = found; return _app; }
         if (!create) return null;
@@ -2959,6 +2990,10 @@ internal static partial class Program
         if (left == 0)
         {
             try { app.Quit(); } catch (Exception) { }
+            // v1.36: the automation instance is gone - drop the cached COM object instead of
+            // keeping a dead one around (the next command re-attaches to whatever WPS is running,
+            // or starts a new one).
+            _app = null;
         }
         r["processes"] = ProcessCount("et");
         return r;
@@ -3103,6 +3138,31 @@ internal static partial class Program
         }
         catch (Exception) { }
         finally { if (g != null) g.Dispose(); }
+    }
+
+    /// <summary>v1.36: repair a hidden spreadsheet window. WPS's own close path can crash and come
+    /// back with the frame chrome up but the document window hidden (Application.Visible false), so
+    /// the user stares at an empty grey window: "the file is stuck". Verified on 2026-11-05 - after
+    /// that state, `app.Visible = true` + Activate brings the grid back at once. Every request that
+    /// is allowed to touch the app repairs this before doing its work, so the next agent command
+    /// un-sticks what the host broke (the user does not have to know the trick).</summary>
+    private static void HealWindow()
+    {
+        try
+        {
+            dynamic app = _app;
+            if (app == null) return;
+            bool visible;
+            try { visible = (bool)app.Visible; } catch (Exception) { return; }
+            if (visible) return;
+            int n;
+            try { n = (int)app.Workbooks.Count; } catch (Exception) { return; }
+            if (n <= 0) return;
+            try { app.Visible = true; } catch (Exception) { return; }
+            try { app.ActiveWorkbook.Activate(); } catch (Exception) { }
+            Console.Error.WriteLine("woc-helper: repaired a hidden spreadsheet window (v1.36)");
+        }
+        catch (Exception) { }
     }
 
     /// <summary>Re-apply the hint on a workbook that is still under takeover. Called before every

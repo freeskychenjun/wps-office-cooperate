@@ -10,7 +10,7 @@
 
 **接管提示（v1.11，三个 app 通用）**：agent 接手的瞬间用户就能看见——`open` 自动给窗口标签打上「〔AI接管中〕」标记（`〔AI接管中〕 报告.docx`，WPS 12 的标签页从右截断，所以标记放前面），`hint -Doc <路径> -Toast` 弹一句"已接管《X》：改动以修订/批注呈现，随时可接受或拒绝"，`hint -Text` 还能把当前进度写到状态栏（表格实测可见；Writer 只接受写入、界面不渲染）；收尾 `finish` / `close` 自动还原标题与状态栏。**全部是窗口状态：不进修订、不写文档、不落盘**。PPT 侧有三个通道（都是窗口/内容标记，不是文档内容）：① **窗口标题标记**（v1.26，`PP12FrameClass` + `SetWindowText`，任务栏/Alt+Tab 看得见，COM 的 `captionSupported:false` 只代表"COM 标题不可写"）；② **托盘气泡/图标**（v1.11/v1.12）；③ **按需的逐页药丸**（v1.27 引入、v1.28 改 opt-in）：`hint -SlideMark` 才在每页右上角贴「〔AI接管中〕」，它是**内容**（用户 Ctrl+S 会存进文件，故默认不贴；落盘前自动剥离，被存进去由下一条命令自动修复并返回 `badgeRepaired:true`）。
 
-**标记是租约（v1.35）**：接管标记不再需要 agent 主动收尾——常驻 helper 每条命令续租，**AI 静默超过 `WOC_HINT_LEASE_MS`（默认 120 s）** 就自动还原所有仍挂着的标记（Word/Excel 标题与状态栏、PPT 标题前缀与页面药丸、托盘图标），helper 退出（空闲 20 min / `serve -Action stop`）时也会先还原再退出；**用户退出 AI 会话后不会长期顶着「〔AI接管中〕」**。只清"看得见的标记"、不清"接管意图"：AI 恢复发命令时下一条命令自动补标；`finish`/`close`/`hint -Clear` 才是结束协作（清意图，之后不再补标）。
+**标记是租约（v1.35；v1.36 过期即退出 + 卡死窗口自愈）**：接管标记不再需要 agent 主动收尾——常驻 helper 每条命令续租，**AI 静默超过 `WOC_HINT_LEASE_MS`（默认 120 s）** 就自动还原所有仍挂着的标记（Word/Excel 标题与状态栏、PPT 标题前缀与页面药丸、托盘图标），**随后 helper 进程直接退出（v1.36）**，`serve -Action stop` 也会先还原再退；**用户退出 AI 会话后不会长期顶着「〔AI接管中〕」，也不会留下自动化客户端干扰用户自己保存/关闭**。只清"看得见的标记"、不清"接管意图"：AI 恢复发命令时下一条命令自动补标；`finish`/`close`/`hint -Clear` 才是结束协作（清意图，之后不再补标）。另外 **WPS 自己的关闭路径偶尔崩溃后会把文档窗口藏起来**（外框还在、内容全灰 = 用户说的"卡死"）：v1.36 每条命令执行前自检，发现 `Application.Visible=false` 且有文档就自动显示并激活，**发任意一条命令即可恢复**。
 
 v1.0 由 `wps-word-cooperate`（v0.8）与 `wps-excel-cooperate`（v0.6）于 2026-10-25 合并而成。原 Word 版曾托管在合集 [my-doc-skills](https://github.com/freeskychenjun/my-doc-skills)，合并后该目录已移除，此处为唯一维护位置。## 效果
 

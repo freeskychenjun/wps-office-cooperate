@@ -387,6 +387,9 @@ internal static partial class Program
             if (cmd.Length == 0) throw new Fail("BAD_ARGS", "\"cmd\" is required");
             if (cmd != "open" && cmd != "hint" && cmd != "finish" && cmd != "close")
             {
+                // v1.36: repair the hidden-window state WPS can leave behind (below) before the
+                // takeover mark, so the mark and the repair land in the same request.
+                HealWindow();
                 EnsureTitleMarker(bag);
                 EnsureSlideMarkIntegrity(bag);
             }
@@ -553,9 +556,33 @@ internal static partial class Program
         catch (Exception) { return null; }
     }
 
+    /// <summary>
+    /// v1.36: is the cached COM object still worth using? A cached Application survives the app it
+    /// points at (the user closed WPS, WPS crashed on close, or its frame was replaced).
+    /// Presentations.Count is the cheapest liveness probe. Only "the object is gone" HRESULTs
+    /// invalidate the cache: busy/rejected calls are transient and must NOT drop a healthy app.
+    /// </summary>
+    private static bool StillAlive(dynamic app)
+    {
+        try { int n = (int)app.Presentations.Count; return true; }
+        catch (COMException e)
+        {
+            int hr = e.HResult;
+            return !(hr == unchecked((int)0x80010108)    // RPC_E_DISCONNECTED
+                  || hr == unchecked((int)0x800401FD)    // CO_E_OBJNOTCONNECTED
+                  || hr == unchecked((int)0x800706BA)    // RPC server unavailable
+                  || hr == unchecked((int)0x800401E3));  // MK_E_UNAVAILABLE / empty object
+        }
+        catch (Exception) { return true; }
+    }
+
     private static dynamic App(bool create, bool visible)
     {
-        if (_app != null) return _app;
+        if (_app != null)
+        {
+            if (StillAlive(_app)) return _app;
+            _app = null;   // detached or died underneath us: re-attach below
+        }
         dynamic found = Running(WPS_WPP);
         if (found != null) { _app = found; return _app; }
         if (!create) return null;
@@ -3066,6 +3093,8 @@ internal static partial class Program
         {
             try { app.Quit(); }
             catch (Exception) { }
+            // v1.36: the automation instance is gone - do not keep a dead COM object cached.
+            _app = null;
         }
         r["processes"] = ProcessCount("wpp");
         return r;
@@ -3432,6 +3461,40 @@ internal static partial class Program
         finally { if (g != null) g.Dispose(); }
     }
 
+    /// <summary>v1.36: repair a hidden Presentation window. WPS's own close path can crash and come
+    /// back with the frame chrome up but the document window hidden (Application.Visible false) -
+    /// the user sees an empty grey window and calls it "stuck". Every request that may touch the
+    /// app repairs that first, so the next agent command un-sticks what the host broke.</summary>
+    private static void HealWindow()
+    {
+        try
+        {
+            dynamic app = _app;
+            if (app == null) return;
+            bool visible;
+            try { visible = (bool)app.Visible; } catch (Exception) { return; }
+            if (visible) return;
+            int n;
+            try { n = (int)app.Presentations.Count; } catch (Exception) { return; }
+            if (n <= 0) return;
+            try { app.Visible = true; } catch (Exception) { return; }
+            try
+            {
+                dynamic p = app.ActivePresentation;
+                if (p != null)
+                {
+                    int wins = 0;
+                    try { wins = (int)p.Windows.Count; } catch (Exception) { }
+                    if (wins == 0) { try { p.NewWindow(); } catch (Exception) { } }
+                    try { p.Windows(1).Activate(); } catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+            Console.Error.WriteLine("woc-helper: repaired a hidden presentation window (v1.36)");
+        }
+        catch (Exception) { }
+    }
+
     /// <summary>Re-apply the marker on later commands: WPS drops it when the user switches tabs.</summary>
     private static void EnsureTitleMarker(Bag a)
     {
@@ -3645,6 +3708,7 @@ internal static partial class Program
         if (app == null) return new Dictionary<string, object> { { "processes", ProcessCount("wpp") } };
         try { app.Quit(); }
         catch (Exception) { }
+        _app = null;   // v1.36: quit() leaves the cached object dead; drop it now
         return new Dictionary<string, object> { { "processes", ProcessCount("wpp") } };
     }
 }

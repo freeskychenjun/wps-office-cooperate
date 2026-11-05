@@ -108,6 +108,10 @@ def main():
     print("== L3 silence longer than the lease strips the visible mark (the reported bug) ==")
     # NB: the status call itself renews the lease, so it must come AFTER the silent wait.
     wait_quiet()
+    # v1.36: an expired lease now ENDS the helper process (it used to idle on for 20 minutes), so
+    # a user who closes the document right after the agent goes away has no automation client left.
+    dg = run("serve", "-Action", "status")["result"]
+    ok &= check("helper process exited with the lease (v1.36)", dg.get("running") is False, dg)
     st = status_for(COPY.name)
     ok &= check("helper released the mark on its own", st.get("hinted") is False, st.get("hinted"))
     ok &= check("caption back to the plain file name", str(st.get("caption", "")) == COPY.name, st.get("caption"))
